@@ -1,1 +1,1 @@
-# Sparse-Influence
+# Sparse Influence

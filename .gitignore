@@ -1,0 +1,8 @@
+/job
+/log
+/result
+/MNIST
+*.npy
+*.mmap
+*.pt
+__pycache__/
