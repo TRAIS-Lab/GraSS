@@ -23,6 +23,7 @@ if __name__ == "__main__":
         help=f"The dataset to use for retraining.\
                It should be one of {SUPPORTED_MODELS}.",
     )
+    argparser.add_argument("--device", type=str, default="cuda")
     argparser.add_argument(
         "--extra_param",
         type=key_value_pair,
@@ -52,7 +53,7 @@ if __name__ == "__main__":
     )
 
     model = create_mlp_model("mnist", **kwargs)
-    model.cuda()
+    model.to(args.device)
     model.eval()
 
     def target_func(ckpt_path, dataloader):
@@ -63,8 +64,8 @@ if __name__ == "__main__":
         loss = nn.CrossEntropyLoss()
         with torch.no_grad():
             for inputs, labels in dataloader:
-                outputs = model(inputs.cuda())
-                target_values.append(loss(outputs, labels.cuda()))
+                outputs = model(inputs.to(args.device))
+                target_values.append(loss(outputs, labels.to(args.device)))
         return torch.Tensor(target_values)
 
     target_values, indices = calculate_lds_ground_truth(target_func, f"./result/retrain/{args.model}_{activation_fn}", test_loader)

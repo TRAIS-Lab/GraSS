@@ -2,11 +2,10 @@
 
 # ruff: noqa
 import argparse
-from functools import partial
-import time
 
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*torch.load.*weights_only=False.*")
 
-import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
@@ -21,7 +20,7 @@ from MLP.load import load_benchmark
 #     # IFAttributorExplicit,
 # )
 # from dattri.algorithm.tracin import TracInAttributor
-from dattri.algorithm.trak import TRAKAttributor
+from TRAK.trak import TRAKAttributor
 # from dattri.algorithm.rps import RPSAttributor
 from dattri.metrics.metrics import lds
 from dattri.task import AttributionTask
@@ -82,6 +81,7 @@ if __name__ == "__main__":
             "RPS",
         ],
     )
+    argparser.add_argument("--sparse_check", action="store_true")
     argparser.add_argument("--metric", type=str, default="lds", choices=["lds", "loo"])
     argparser.add_argument("--device", type=str, default="cuda")
     argparser.add_argument(
@@ -135,7 +135,7 @@ if __name__ == "__main__":
     #         return loss(yhat, label.long())
 
     #     task = AttributionTask(
-    #         model=model_details["model"].cuda(),
+    #         model=model_details["model"].to(args.device),
     #         loss_func=loss_if,
     #         checkpoints=model_details["models_full"][0],
     #     )
@@ -151,7 +151,7 @@ if __name__ == "__main__":
     #         return loss(yhat, label_t.long())
 
     #     task = AttributionTask(
-    #         model=model_details["model"].cuda(),
+    #         model=model_details["model"].to(args.device),
     #         loss_func=loss_tracin,
     #         checkpoints=model_details["models_full"][0:10]
     #         if args.method == "TracIn"
@@ -170,7 +170,7 @@ if __name__ == "__main__":
             return logp - torch.log(1 - torch.exp(logp))
 
         task = AttributionTask(
-            model=model_details["model"].cuda(),
+            model=model_details["model"].to(args.device),
             loss_func=loss_trak,
             checkpoints=model_details["models_half"][
                 0 : int(args.method.split("-")[1])
@@ -193,7 +193,7 @@ if __name__ == "__main__":
     #         return loss_fn(pre_activation_list, label_list)
 
     #     task = AttributionTask(
-    #         model=model_details["model"].cuda(),
+    #         model=model_details["model"].to(args.device),
     #         loss_func=loss_rps,
     #         checkpoints=model_details["models_full"][0],
     #     )
@@ -244,13 +244,13 @@ if __name__ == "__main__":
         attributor = ATTRIBUTOR_DICT[args.method](
             task=task,
             correct_probability_func=m_trak,
-            device=args.device,
             projector_kwargs=projector_kwargs,
+            device=args.device,
         )
-        attributor.cache(train_loader)
+        attributor.cache(train_loader, verbose=False, sparse_check=args.sparse_check)
         torch.cuda.reset_peak_memory_stats("cuda")
         with torch.no_grad():
-            score = attributor.attribute(test_loader)
+            score = attributor.attribute(test_loader, verbose=False)
         peak_memory = torch.cuda.max_memory_allocated("cuda") / 1e6  # Convert to MB
         print(f"Peak memory usage: {peak_memory} MB")
 
