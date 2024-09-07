@@ -59,6 +59,19 @@ ATTRIBUTOR_DICT = {
     # "RPS": RPSAttributor,
 }
 
+def parse_sparsify_param(param_str):
+    # Split the method and parameter
+    if '-' in param_str:
+        method, value = param_str.split('-', 1)
+        # Convert the value to a float
+        try:
+            value = float(value)
+        except ValueError:
+            raise ValueError(f"Invalid parameter value: {value}")
+        return method, value
+    else:
+        raise ValueError(f"Invalid sparsify argument format: {param_str}")
+
 if __name__ == "__main__":
     argparser = argparse.ArgumentParser()
     argparser.add_argument("--dataset", type=str, default="mnist")
@@ -82,6 +95,7 @@ if __name__ == "__main__":
         ],
     )
     argparser.add_argument("--sparse_check", action="store_true")
+    argparser.add_argument('--sparsify', type=str, help="Sparsification method and parameter, e.g., 'random-0.2' or 'threshold-1e-4'")
     argparser.add_argument("--metric", type=str, default="lds", choices=["lds", "loo"])
     argparser.add_argument("--device", type=str, default="cuda")
     argparser.add_argument(
@@ -247,7 +261,17 @@ if __name__ == "__main__":
             projector_kwargs=projector_kwargs,
             device=args.device,
         )
-        attributor.cache(train_loader, verbose=False, sparse_check=args.sparse_check)
+
+        if args.sparsify:
+            method, param = parse_sparsify_param(args.sparsify)
+            sparsify = {
+                'method': method,
+                'param': param
+            }
+        else:
+            sparsify = {}
+
+        attributor.cache(train_loader, verbose=False, sparse_check=args.sparse_check, sparsify=sparsify)
         torch.cuda.reset_peak_memory_stats("cuda")
         with torch.no_grad():
             score = attributor.attribute(test_loader, verbose=False)

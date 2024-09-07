@@ -80,88 +80,19 @@ class TRAKAttributor(BaseAttributor):
         )
         self.full_train_dataloader = None
 
-    # def cache(
-    #     self,
-    #     full_train_dataloader: torch.utils.data.DataLoader,
-    #     sparse_check: bool = False,
-    #     verbose = True,
-    # ) -> None:
-    #     """Cache the dataset for gradient calculation.
-
-    #     Args:
-    #         full_train_dataloader (torch.utils.data.DataLoader): The dataloader
-    #             with full training samples for gradient calculation.
-    #     """
-    #     _check_shuffle(full_train_dataloader)
-    #     self.full_train_dataloader = full_train_dataloader
-    #     inv_XTX_XT_list = []
-    #     running_Q = 0
-    #     running_count = 0
-    #     for ckpt_seed in range(len(self.task.get_checkpoints())):
-    #         parameters, _ = self.task.get_param(index=ckpt_seed)
-
-    #         full_train_projected_grad = []
-    #         Q = []
-    #         for train_data in tqdm(
-    #             self.full_train_dataloader,
-    #             desc="calculating gradient of training set...",
-    #             leave=False,
-    #             disable=not verbose
-    #         ):
-    #             train_batch_data = tuple(data.to(self.device) for data in train_data)
-    #             grad_t = self.grad_loss_func(parameters, train_batch_data)
-    #             grad_t = torch.nan_to_num(grad_t)
-    #             grad_t /= self.norm_scaler
-
-    #             print(grad_t.shape)
-
-    #             grad_p = (
-    #                 random_project(
-    #                     grad_t,
-    #                     train_batch_data[0].shape[0],
-    #                     **self.projector_kwargs,
-    #                 )(grad_t, ensemble_id=ckpt_seed)
-    #                 .clone()
-    #                 .detach()
-    #             )
-    #             full_train_projected_grad.append(grad_p)
-    #             Q.append(
-    #                 (
-    #                     torch.ones(train_batch_data[0].shape[0]).to(self.device)
-    #                     - self.correct_probability_func(
-    #                         _unflatten_params(parameters, self.task.get_model()),
-    #                         train_batch_data,
-    #                     ).flatten()
-    #                 )
-    #                 .clone()
-    #                 .detach(),
-    #             )
-    #         full_train_projected_grad = torch.cat(full_train_projected_grad, dim=0)
-    #         Q = torch.cat(Q, dim=0)
-    #         inv_XTX_XT = (
-    #             torch.linalg.inv(
-    #                 full_train_projected_grad.T @ full_train_projected_grad,
-    #             )
-    #             @ full_train_projected_grad.T
-    #         )
-    #         inv_XTX_XT_list.append(inv_XTX_XT)
-    #         running_Q = running_Q * running_count + Q
-    #         running_count += 1  # noqa: SIM113
-    #         running_Q /= running_count
-    #     self.inv_XTX_XT_list = inv_XTX_XT_list
-    #     self.Q = running_Q
-
     def cache(
-        self,
-        full_train_dataloader: torch.utils.data.DataLoader,
-        sparse_check: bool = False,
-        verbose=True,
+            self,
+            full_train_dataloader: torch.utils.data.DataLoader,
+            sparsify: dict = None,
+            sparse_check: bool = False,
+            verbose=True,
     ) -> None:
         """Cache the dataset for gradient calculation.
 
         Args:
             full_train_dataloader (torch.utils.data.DataLoader): The dataloader
                 with full training samples for gradient calculation.
+            sparsify (dict): A dictionary specifying the sparsification method and parameters.
             sparse_check (bool): If True, calculate the sparsity and distance preservation.
             verbose (bool): If True, display progress bars and messages.
         """
@@ -176,6 +107,9 @@ class TRAKAttributor(BaseAttributor):
         total_projected_sparsity = 0.0
         distance_correlations = []
         total_samples = 0
+
+        # Check if sparsify is provided
+        sparsify_method = sparsify.get('method', None) if sparsify else None
 
         for ckpt_seed in range(len(self.task.get_checkpoints())):
             parameters, _ = self.task.get_param(index=ckpt_seed)
@@ -192,6 +126,21 @@ class TRAKAttributor(BaseAttributor):
                 grad_t = self.grad_loss_func(parameters, train_batch_data)
                 grad_t = torch.nan_to_num(grad_t)
                 grad_t /= self.norm_scaler
+
+                # Apply sparsification based on method specified
+                if sparsify_method == 'threshold':
+                    eps = sparsify.get('param', float('inf')) if sparsify else float('inf')
+                    grad_t[torch.abs(grad_t) < eps] = 0
+                elif sparsify_method == 'random':
+                    drop_rate = sparsify.get('param', 0.0) if sparsify else 0.0
+                    batch_size, num_params = grad_t.size(0), grad_t.size(1)
+                    num_elements_to_drop = int(drop_rate * num_params)
+
+                    if num_elements_to_drop > 0:
+                        for i in range(batch_size):
+                            indices_to_drop = torch.randperm(num_params)[:num_elements_to_drop]
+                            grad_t[i, indices_to_drop] = 0
+
 
                 # Projected gradient
                 grad_p = (
