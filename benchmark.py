@@ -11,7 +11,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from retrain import key_value_pair
-from MLP.load import load_benchmark
+from _dattri.MLP.load import load_benchmark
 
 # from dattri.algorithm.influence_function import (
 #     # IFAttributorCG,
@@ -20,10 +20,10 @@ from MLP.load import load_benchmark
 #     # IFAttributorExplicit,
 # )
 # from dattri.algorithm.tracin import TracInAttributor
-from TRAK.trak import TRAKAttributor
+from _dattri.TRAK.trak import TRAKAttributor
 # from dattri.algorithm.rps import RPSAttributor
 from dattri.metrics.metrics import lds
-from dattri.task import AttributionTask
+from _dattri.task import AttributionTask
 
 
 # IHVP_SEARCH_SPACE = {
@@ -95,7 +95,7 @@ if __name__ == "__main__":
         ],
     )
     argparser.add_argument("--sparse_check", action="store_true")
-    argparser.add_argument('--sparsify', type=str, help="Sparsification method and parameter, e.g., 'random-0.2' or 'threshold-1e-4'")
+    argparser.add_argument('--sparsify', type=str, help="Sparsification method and parameter, e.g., 'random-0.2', 'threshold-1e-4', or 'dropout-0.2'")
     argparser.add_argument("--metric", type=str, default="lds", choices=["lds", "loo"])
     argparser.add_argument("--device", type=str, default="cuda")
     argparser.add_argument(

@@ -4,7 +4,7 @@ import torch
 from torch import nn
 import argparse
 
-from MLP.mnist_mlp import create_mlp_model
+from _dattri.MLP.mnist_mlp import create_mlp_model
 from retrain import key_value_pair
 from dattri.benchmark.datasets.mnist import create_mnist_dataset
 from dattri.benchmark.utils import SubsetSampler

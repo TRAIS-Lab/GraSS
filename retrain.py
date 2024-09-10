@@ -31,7 +31,7 @@ from dattri.benchmark.datasets.mnist import (
     # train_mnist_mlp,
 )
 
-from MLP.mnist_mlp import train_mnist_mlp
+from _dattri.MLP.mnist_mlp import train_mnist_mlp
 
 from dattri.model_utils.retrain import retrain_lds, retrain_loo
 

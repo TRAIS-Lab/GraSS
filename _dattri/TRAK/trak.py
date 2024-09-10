@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import Any, Callable, Dict, Optional
 
-    from dattri.task import AttributionTask
+    from _dattri.task import AttributionTask
 
 
 import torch
@@ -30,6 +30,41 @@ DEFAULT_PROJECTOR_KWARGS = {
     "use_half_precision": False,
 }
 
+def compute_pairwise_distance_metrics(grad_t, grad_p):
+    """
+    Computes relative error, RMSE, and stress between pairwise distances of
+    original and projected datasets.
+
+    Arguments:
+    grad_t -- tensor of original data (batch of gradients)
+    grad_p -- tensor of projected data (batch of projected gradients)
+
+    Returns:
+    relative_error -- average relative error between original and projected pairwise distances
+    rmse -- root mean squared error between original and projected pairwise distances
+    stress -- stress function measuring global distance preservation
+    """
+
+    # Compute pairwise distances
+    original_distances = torch.cdist(grad_t, grad_t, p=2)
+    projected_distances = torch.cdist(grad_p, grad_p, p=2)
+
+    # Avoid division by zero for any zero distances in the original data
+    mask = original_distances > 1e-8  # Mask to filter out zero distances
+
+    # Compute Relative Error
+    relative_errors = torch.abs((original_distances[mask] - projected_distances[mask]) / original_distances[mask])
+    average_relative_error = torch.mean(relative_errors).item()
+
+    # Compute RMSE (Root Mean Squared Error)
+    mse = torch.mean((original_distances[mask] - projected_distances[mask]) ** 2)
+    rmse = torch.sqrt(mse).item()
+
+    # Compute Stress
+    stress = torch.sqrt(torch.sum((original_distances[mask] - projected_distances[mask]) ** 2) /
+                        torch.sum(original_distances[mask] ** 2)).item()
+
+    return average_relative_error, rmse, stress
 
 class TRAKAttributor(BaseAttributor):
     """TRAK attributor."""
@@ -105,14 +140,20 @@ class TRAKAttributor(BaseAttributor):
         # Initialize variables to accumulate sparsity and distance metrics
         total_original_sparsity = 0.0
         total_projected_sparsity = 0.0
-        distance_correlations = []
+        distance_RE = []
+        distance_rmse = []
+        distance_stress = []
+
         total_samples = 0
 
         # Check if sparsify is provided
         sparsify_method = sparsify.get('method', None) if sparsify else None
 
         for ckpt_seed in range(len(self.task.get_checkpoints())):
-            parameters, _ = self.task.get_param(index=ckpt_seed)
+            if sparsify_method == 'drop_out':
+                parameters, _ = self.task.get_param(index=ckpt_seed, )
+            else:
+                parameters, _ = self.task.get_param(index=ckpt_seed)
 
             full_train_projected_grad = []
             Q = []
@@ -140,6 +181,10 @@ class TRAKAttributor(BaseAttributor):
                         for i in range(batch_size):
                             indices_to_drop = torch.randperm(num_params)[:num_elements_to_drop]
                             grad_t[i, indices_to_drop] = 0
+                elif sparsify_method == 'drop_out':
+                    drop_rate = sparsify.get('param', 0.0) if sparsify else 0.0
+                    batch_size, num_params = grad_t.size(0), grad_t.size(1)
+
 
 
                 # Projected gradient
@@ -162,15 +207,10 @@ class TRAKAttributor(BaseAttributor):
                     total_projected_sparsity += projected_sparsity * batch_size
 
                     # Calculate pairwise distances for this batch
-                    original_distances = torch.cdist(grad_t, grad_t, p=2)
-                    projected_distances = torch.cdist(grad_p, grad_p, p=2)
-
-                    # Compute correlation for this batch and store
-                    if original_distances.numel() > 1 and projected_distances.numel() > 1:
-                        batch_correlation = torch.corrcoef(
-                            torch.stack([original_distances.flatten(), projected_distances.flatten()])
-                        )[0, 1].item()
-                        distance_correlations.append(batch_correlation)
+                    relative_error, rmse, stress = compute_pairwise_distance_metrics(grad_t, grad_p)
+                    distance_RE.append(relative_error)
+                    distance_rmse.append(rmse)
+                    distance_stress.append(stress)
 
                     total_samples += batch_size
 
@@ -207,11 +247,15 @@ class TRAKAttributor(BaseAttributor):
             # Compute final average sparsity
             avg_original_sparsity = total_original_sparsity / total_samples
             avg_projected_sparsity = total_projected_sparsity / total_samples
-            avg_distance_correlation = sum(distance_correlations) / len(distance_correlations) if distance_correlations else 0
+            avg_distance_RE = sum(distance_RE) / len(distance_RE) if distance_RE else 0
+            avg_distance_rmse = sum(distance_rmse) / len(distance_rmse) if distance_rmse else 0
+            avg_distance_stress = sum(distance_stress) / len(distance_stress) if distance_stress else 0
 
             print(f"Average Sparsity of Original Gradients: {avg_original_sparsity:.4f}")
             print(f"Average Sparsity of Projected Gradients: {avg_projected_sparsity:.4f}")
-            print(f"Average Distance Correlation (Original vs Projected): {avg_distance_correlation:.4f}")
+            print(f"Average Distance Relative Error (Original vs Projected): {avg_distance_RE:.4f}")
+            print(f"Average Distance RMSE (Original vs Projected): {avg_distance_rmse:.4f}")
+            print(f"Average Distance Stress (Original vs Projected): {avg_distance_stress:.4f}")
 
     def attribute(
         self,
