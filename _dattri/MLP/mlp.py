@@ -6,11 +6,10 @@ AVAILABLE_DATASETS = ["mnist"]
 class MLPMnist(nn.Module):
     """A simple MLP model for MNIST dataset with customizable activation functions."""
 
-    def __init__(self, dropout_rate: float = 0.1, activation_fn: str = "relu") -> None:
+    def __init__(self, activation_fn: str = "relu") -> None:
         """Initialize the MLP model.
 
         Args:
-            dropout_rate: The dropout rate to use.
             activation_fn: The activation function to use (relu, sigmoid, tanh, leaky_relu, linear).
         """
         super(MLPMnist, self).__init__()
@@ -30,9 +29,7 @@ class MLPMnist(nn.Module):
         self.activation = activation_functions[activation_fn]
 
         self.fc1 = nn.Linear(28*28, 128)
-        self.dropout1 = nn.Dropout(dropout_rate)
         self.fc2 = nn.Linear(128, 64)
-        self.dropout2 = nn.Dropout(dropout_rate)
         self.fc3 = nn.Linear(64, 10)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -46,9 +43,7 @@ class MLPMnist(nn.Module):
         """
         x = x.view(-1, 28*28)
         x = self.activation(self.fc1(x))
-        x = self.dropout1(x)
         x = self.activation(self.fc2(x))
-        x = self.dropout2(x)
         x = self.fc3(x)
         return x
 

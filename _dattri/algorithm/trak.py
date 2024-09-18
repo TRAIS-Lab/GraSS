@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import Any, Callable, Dict, Optional
 
-    from _dattri.task import AttributionTask
+    from dattri.task import AttributionTask
 
 
 import torch
@@ -57,14 +57,14 @@ def compute_pairwise_distance_metrics(grad_t, grad_p):
     average_relative_error = torch.mean(relative_errors).item()
 
     # Compute RMSE (Root Mean Squared Error)
-    mse = torch.mean((original_distances[mask] - projected_distances[mask]) ** 2)
-    rmse = torch.sqrt(mse).item()
+    # mse = torch.mean((original_distances[mask] - projected_distances[mask]) ** 2)
+    # rmse = torch.sqrt(mse).item()
 
     # Compute Stress
-    stress = torch.sqrt(torch.sum((original_distances[mask] - projected_distances[mask]) ** 2) /
-                        torch.sum(original_distances[mask] ** 2)).item()
+    # stress = torch.sqrt(torch.sum((original_distances[mask] - projected_distances[mask]) ** 2) /
+    #                     torch.sum(original_distances[mask] ** 2)).item()
 
-    return average_relative_error, rmse, stress
+    return average_relative_error#, rmse, stress
 
 class TRAKAttributor(BaseAttributor):
     """TRAK attributor."""
@@ -141,8 +141,8 @@ class TRAKAttributor(BaseAttributor):
         total_original_sparsity = 0.0
         total_projected_sparsity = 0.0
         distance_RE = []
-        distance_rmse = []
-        distance_stress = []
+        # distance_rmse = []
+        # distance_stress = []
 
         total_samples = 0
 
@@ -150,10 +150,7 @@ class TRAKAttributor(BaseAttributor):
         sparsify_method = sparsify.get('method', None) if sparsify else None
 
         for ckpt_seed in range(len(self.task.get_checkpoints())):
-            if sparsify_method == 'drop_out':
-                parameters, _ = self.task.get_param(index=ckpt_seed, )
-            else:
-                parameters, _ = self.task.get_param(index=ckpt_seed)
+            parameters, _ = self.task.get_param(index=ckpt_seed)
 
             full_train_projected_grad = []
             Q = []
@@ -181,11 +178,6 @@ class TRAKAttributor(BaseAttributor):
                         for i in range(batch_size):
                             indices_to_drop = torch.randperm(num_params)[:num_elements_to_drop]
                             grad_t[i, indices_to_drop] = 0
-                elif sparsify_method == 'drop_out':
-                    drop_rate = sparsify.get('param', 0.0) if sparsify else 0.0
-                    batch_size, num_params = grad_t.size(0), grad_t.size(1)
-
-
 
                 # Projected gradient
                 grad_p = (
@@ -198,6 +190,9 @@ class TRAKAttributor(BaseAttributor):
                     .detach()
                 )
 
+                # normalize the projected gradient according to the JL lemma (1 / sqrt(proj_dim))
+                grad_p /= self.projector_kwargs["proj_dim"] ** 0.5
+
                 if sparse_check:
                     # Calculate and accumulate sparsity for the batch
                     batch_size = grad_t.size(0)
@@ -209,8 +204,8 @@ class TRAKAttributor(BaseAttributor):
                     # Calculate pairwise distances for this batch
                     relative_error, rmse, stress = compute_pairwise_distance_metrics(grad_t, grad_p)
                     distance_RE.append(relative_error)
-                    distance_rmse.append(rmse)
-                    distance_stress.append(stress)
+                    # distance_rmse.append(rmse)
+                    # distance_stress.append(stress)
 
                     total_samples += batch_size
 
@@ -229,9 +224,11 @@ class TRAKAttributor(BaseAttributor):
 
             full_train_projected_grad = torch.cat(full_train_projected_grad, dim=0)
             Q = torch.cat(Q, dim=0)
+            # with regularization
+            lambda_ = 1e-4
             inv_XTX_XT = (
                 torch.linalg.inv(
-                    full_train_projected_grad.T @ full_train_projected_grad,
+                    full_train_projected_grad.T @ full_train_projected_grad + lambda_ * torch.eye(full_train_projected_grad.size(1)).to(self.device),
                 )
                 @ full_train_projected_grad.T
             )
@@ -248,19 +245,20 @@ class TRAKAttributor(BaseAttributor):
             avg_original_sparsity = total_original_sparsity / total_samples
             avg_projected_sparsity = total_projected_sparsity / total_samples
             avg_distance_RE = sum(distance_RE) / len(distance_RE) if distance_RE else 0
-            avg_distance_rmse = sum(distance_rmse) / len(distance_rmse) if distance_rmse else 0
-            avg_distance_stress = sum(distance_stress) / len(distance_stress) if distance_stress else 0
+            # avg_distance_rmse = sum(distance_rmse) / len(distance_rmse) if distance_rmse else 0
+            # avg_distance_stress = sum(distance_stress) / len(distance_stress) if distance_stress else 0
 
             print(f"Average Sparsity of Original Gradients: {avg_original_sparsity:.4f}")
             print(f"Average Sparsity of Projected Gradients: {avg_projected_sparsity:.4f}")
             print(f"Average Distance Relative Error (Original vs Projected): {avg_distance_RE:.4f}")
-            print(f"Average Distance RMSE (Original vs Projected): {avg_distance_rmse:.4f}")
-            print(f"Average Distance Stress (Original vs Projected): {avg_distance_stress:.4f}")
+            # print(f"Average Distance RMSE (Original vs Projected): {avg_distance_rmse:.4f}")
+            # print(f"Average Distance Stress (Original vs Projected): {avg_distance_stress:.4f}")
 
     def attribute(
         self,
         test_dataloader: torch.utils.data.DataLoader,
         train_dataloader: Optional[torch.utils.data.DataLoader] = None,
+        sparsify: dict = None,
         verbose = True,
     ) -> torch.Tensor:
         """Calculate the influence of the training set on the test set.
@@ -290,6 +288,10 @@ class TRAKAttributor(BaseAttributor):
         running_xinv_XTX_XT = 0
         running_Q = 0
         running_count = 0
+
+        # Check if sparsify is provided
+        sparsify_method = sparsify.get('method', None) if sparsify else None
+
         if train_dataloader is not None and self.full_train_dataloader is not None:
             message = "You have cached a training loader by .cache()\
                        and you are trying to attribute a different training loader.\
@@ -325,6 +327,20 @@ class TRAKAttributor(BaseAttributor):
                     grad_t = torch.nan_to_num(grad_t)
                     grad_t /= self.norm_scaler
 
+                    # Apply sparsification based on method specified
+                    if sparsify_method == 'threshold':
+                        eps = sparsify.get('param', float('inf')) if sparsify else float('inf')
+                        grad_t[torch.abs(grad_t) < eps] = 0
+                    elif sparsify_method == 'random':
+                        drop_rate = sparsify.get('param', 0.0) if sparsify else 0.0
+                        batch_size, num_params = grad_t.size(0), grad_t.size(1)
+                        num_elements_to_drop = int(drop_rate * num_params)
+
+                        if num_elements_to_drop > 0:
+                            for i in range(batch_size):
+                                indices_to_drop = torch.randperm(num_params)[:num_elements_to_drop]
+                                grad_t[i, indices_to_drop] = 0
+
                     grad_p = (
                         random_project(
                             grad_t,
@@ -334,6 +350,10 @@ class TRAKAttributor(BaseAttributor):
                         .clone()
                         .detach()
                     )
+
+                    # normalize the projected gradient according to the JL lemma (1 / sqrt(proj_dim))
+                    grad_p /= self.projector_kwargs["proj_dim"] ** 0.5
+
                     train_projected_grad.append(grad_p)
                     Q.append(
                         (
@@ -361,6 +381,20 @@ class TRAKAttributor(BaseAttributor):
                 grad_t = torch.nan_to_num(grad_t)
                 grad_t /= self.norm_scaler
 
+                # Apply sparsification based on method specified
+                if sparsify_method == 'threshold':
+                    eps = sparsify.get('param', float('inf')) if sparsify else float('inf')
+                    grad_t[torch.abs(grad_t) < eps] = 0
+                elif sparsify_method == 'random':
+                    drop_rate = sparsify.get('param', 0.0) if sparsify else 0.0
+                    batch_size, num_params = grad_t.size(0), grad_t.size(1)
+                    num_elements_to_drop = int(drop_rate * num_params)
+
+                    if num_elements_to_drop > 0:
+                        for i in range(batch_size):
+                            indices_to_drop = torch.randperm(num_params)[:num_elements_to_drop]
+                            grad_t[i, indices_to_drop] = 0
+
                 grad_p = (
                     random_project(
                         grad_t,
@@ -370,14 +404,19 @@ class TRAKAttributor(BaseAttributor):
                     .clone()
                     .detach()
                 )
+
+                # normalize the projected gradient according to the JL lemma (1 / sqrt(proj_dim))
+                grad_p /= self.projector_kwargs["proj_dim"] ** 0.5
+
                 test_projected_grad.append(grad_p)
             test_projected_grad = torch.cat(test_projected_grad, dim=0)
 
             if train_dataloader is not None:
+                lambda_ = 1e-4
                 running_xinv_XTX_XT = (
                     running_xinv_XTX_XT * running_count
                     + test_projected_grad
-                    @ torch.linalg.inv(train_projected_grad.T @ train_projected_grad)
+                    @ torch.linalg.inv(train_projected_grad.T @ train_projected_grad + lambda_ * torch.eye(train_projected_grad.size(1)).to(self.device))
                     @ train_projected_grad.T
                 )
             else:

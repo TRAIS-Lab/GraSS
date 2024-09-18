@@ -41,12 +41,17 @@ def train_mnist_mlp(
     model.train()
     model.to(device)
     for _ in range(epoch_num):
+        total_loss = 0
         for inputs, labels in dataloader:
             optimizer.zero_grad()
             outputs = model(inputs.to(device))
             loss = criterion(outputs, labels.to(device))
             loss.backward()
             optimizer.step()
+            total_loss += loss.item()
+
+        if total_loss < 2: # early stopping
+            break
 
     return model
 

@@ -19,11 +19,11 @@ from _dattri.MLP.load import load_benchmark
 #     # IFAttributorArnoldi,
 #     # IFAttributorExplicit,
 # )
-# from dattri.algorithm.tracin import TracInAttributor
-from _dattri.TRAK.trak import TRAKAttributor
+from _dattri.algorithm.tracin import TracInAttributor
+from _dattri.algorithm.trak import TRAKAttributor
 # from dattri.algorithm.rps import RPSAttributor
 from dattri.metrics.metrics import lds
-from _dattri.task import AttributionTask
+from dattri.task import AttributionTask
 
 
 # IHVP_SEARCH_SPACE = {
@@ -50,11 +50,11 @@ ATTRIBUTOR_DICT = {
     # "if-cg": IFAttributorCG,
     # "if-lissa": IFAttributorLiSSA,
     # "if-arnoldi": IFAttributorArnoldi,
-    "TRAK-1": TRAKAttributor,
-    "TRAK-10": TRAKAttributor,
+    # "TRAK-1": TRAKAttributor,
+    # "TRAK-10": TRAKAttributor,
     "TRAK-50": TRAKAttributor,
     # "TracIn": TracInAttributor,
-    # "Grad-Dot": TracInAttributor,
+    "Grad-Dot": TracInAttributor,
     # "Grad-Cos": TracInAttributor,
     # "RPS": RPSAttributor,
 }
@@ -79,23 +79,23 @@ if __name__ == "__main__":
     argparser.add_argument(
         "--method",
         type=str,
-        default="if-explicit",
+        default="TRAK-50",
         choices=[
-            "if-explicit",
-            "if-cg",
-            "if-lissa",
-            "if-arnoldi",
-            "TRAK-1",
-            "TRAK-10",
+            # "if-explicit",
+            # "if-cg",
+            # "if-lissa",
+            # "if-arnoldi",
+            # "TRAK-1",
+            # "TRAK-10",
             "TRAK-50",
-            "TracIn",
+            # "TracIn",
             "Grad-Dot",
-            "Grad-Cos",
-            "RPS",
+            # "Grad-Cos",
+            # "RPS",
         ],
     )
     argparser.add_argument("--sparse_check", action="store_true")
-    argparser.add_argument('--sparsify', type=str, help="Sparsification method and parameter, e.g., 'random-0.2', 'threshold-1e-4', or 'dropout-0.2'")
+    argparser.add_argument('--sparsify', type=str, help="Sparsification method and parameter, e.g., 'random-0.2', 'threshold-1e-4'")
     argparser.add_argument("--metric", type=str, default="lds", choices=["lds", "loo"])
     argparser.add_argument("--device", type=str, default="cuda")
     argparser.add_argument(
@@ -154,23 +154,23 @@ if __name__ == "__main__":
     #         checkpoints=model_details["models_full"][0],
     #     )
 
-    # if args.method in ["TracIn", "Grad-Dot", "Grad-Cos"]:
+    if args.method in ["TracIn", "Grad-Dot", "Grad-Cos"]:
 
-    #     def loss_tracin(params, data_target_pair):
-    #         image, label = data_target_pair
-    #         image_t = image.unsqueeze(0)
-    #         label_t = label.unsqueeze(0)
-    #         loss = nn.CrossEntropyLoss()
-    #         yhat = torch.func.functional_call(model_details["model"], params, image_t)
-    #         return loss(yhat, label_t.long())
+        def loss_tracin(params, data_target_pair):
+            image, label = data_target_pair
+            image_t = image.unsqueeze(0)
+            label_t = label.unsqueeze(0)
+            loss = nn.CrossEntropyLoss()
+            yhat = torch.func.functional_call(model_details["model"], params, image_t)
+            return loss(yhat, label_t.long())
 
-    #     task = AttributionTask(
-    #         model=model_details["model"].to(args.device),
-    #         loss_func=loss_tracin,
-    #         checkpoints=model_details["models_full"][0:10]
-    #         if args.method == "TracIn"
-    #         else model_details["models_full"][0],
-    #     )
+        task = AttributionTask(
+            model=model_details["model"].to(args.device),
+            loss_func=loss_tracin,
+            checkpoints=model_details["models_full"][0:10]
+            if args.method == "TracIn"
+            else model_details["models_full"][0],
+        )
 
     if args.method in ["TRAK-1", "TRAK-10", "TRAK-50"]:
 
@@ -274,7 +274,7 @@ if __name__ == "__main__":
         attributor.cache(train_loader, verbose=False, sparse_check=args.sparse_check, sparsify=sparsify)
         torch.cuda.reset_peak_memory_stats("cuda")
         with torch.no_grad():
-            score = attributor.attribute(test_loader, verbose=False)
+            score = attributor.attribute(test_loader, verbose=False, sparsify=sparsify)
         peak_memory = torch.cuda.max_memory_allocated("cuda") / 1e6  # Convert to MB
         print(f"Peak memory usage: {peak_memory} MB")
 
@@ -289,37 +289,49 @@ if __name__ == "__main__":
 
         print(args.method, "RESULT:", best_config, "lds:", best_result)
 
-    # if args.method in ["TracIn", "Grad-Dot", "Grad-Cos"]:
-    #     normalized_grad = False
-    #     if args.method == "Grad-Cos":
-    #         normalized_grad = True
+    if args.method in ["TracIn", "Grad-Dot", "Grad-Cos"]:
+        proj_dim = None
+        if args.model == "mlp":
+            if args.extra_param:
+                for key, value in args.extra_param:
+                    if key == "proj_dim":
+                        proj_dim = value
+                        break
 
-    #     ensemble = 1
-    #     if args.method == "TracIn":
-    #         ensemble = 10
+        projector_kwargs = {
+            "proj_dim": proj_dim,
+            "device": args.device,
+        }
+        normalized_grad = False
+        if args.method == "Grad-Cos":
+            normalized_grad = True
 
-    #     attributor = ATTRIBUTOR_DICT[args.method](
-    #         task=task,
-    #         weight_list=torch.ones(ensemble) * 1e-3,
-    #         normalized_grad=normalized_grad,
-    #         # projector_kwargs=proj_kwargs,
-    #         device=args.device,
-    #     )
-    #     torch.cuda.reset_peak_memory_stats("cuda")
-    #     with torch.no_grad():
-    #         score = attributor.attribute(train_loader, test_loader)
-    #     peak_memory = torch.cuda.max_memory_allocated("cuda") / 1e6  # Convert to MB
-    #     print(f"Peak memory usage: {peak_memory} MB")
+        ensemble = 1
+        if args.method == "TracIn":
+            ensemble = 10
 
-    #     # compute LDS value
-    #     lds_score = lds(-score.T.cpu(), groundtruth)[0]
-    #     lds_score = torch.mean(lds_score[~torch.isnan(lds_score)])
+        attributor = ATTRIBUTOR_DICT[args.method](
+            task=task,
+            weight_list=torch.ones(ensemble) * 1e-3,
+            normalized_grad=normalized_grad,
+            projector_kwargs=projector_kwargs,
+            device=args.device,
+        )
+        torch.cuda.reset_peak_memory_stats("cuda")
+        with torch.no_grad():
+            score = attributor.attribute(train_loader, test_loader)
+        peak_memory = torch.cuda.max_memory_allocated("cuda") / 1e6  # Convert to MB
+        print(f"Peak memory usage: {peak_memory} MB")
 
-    #     if lds_score > best_result:
-    #         best_result = lds_score
-    #     print("complete\n")
+        # compute LDS value
+        lds_score = lds(-score.T.cpu(), groundtruth)[0]
+        lds_score = torch.mean(lds_score[~torch.isnan(lds_score)])
 
-    #     print(args.method, "lds:", best_result)
+        if lds_score > best_result:
+            best_result = lds_score
+        print("complete\n")
+
+        print(args.method, "lds:", best_result)
 
     # if args.method == "RPS":
     #     for l2 in [1, 1e-1, 1e-2, 1e-3, 1e-4]:

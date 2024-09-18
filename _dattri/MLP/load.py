@@ -17,7 +17,7 @@ import requests
 import torch
 
 from dattri.benchmark.datasets.mnist import create_mnist_dataset
-from _dattri.MLP.mnist_mlp import create_mlp_model, loss_mnist_mlp, train_mnist_mlp
+from _dattri.MLP.mnist_mlp import create_mlp_model, train_mnist_mlp
 from dattri.benchmark.utils import SubsetSampler
 
 REPO_URL = "https://huggingface.co/datasets/trais-lab/dattri-benchmark/resolve/main/"
@@ -52,9 +52,9 @@ SUPPORTED_DATASETS = {
     "mnist": create_mnist_dataset,
 }
 
-LOSS_MAP = {
-    "mnist_mlp": loss_mnist_mlp,
-}
+# LOSS_MAP = {
+#     "mnist_mlp": loss_mnist_mlp,
+# }
 
 TRAIN_FUNC_MAP = {
     "mnist_mlp": train_mnist_mlp,
