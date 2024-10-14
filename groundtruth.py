@@ -1,8 +1,9 @@
-"""This example shows how to use the IF to detect noisy labels in the MNIST."""
-
 import torch
 from torch import nn
 import argparse
+
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*torch.load.*weights_only=False.*")
 
 from _dattri.MLP.mnist_mlp import create_mlp_model
 from retrain import key_value_pair
@@ -24,6 +25,24 @@ if __name__ == "__main__":
                It should be one of {SUPPORTED_MODELS}.",
     )
     argparser.add_argument("--device", type=str, default="cuda")
+    argparser.add_argument(
+        "--method",
+        type=str,
+        default="TRAK-50",
+        choices=[
+            # "if-explicit",
+            # "if-cg",
+            # "if-lissa",
+            # "if-arnoldi",
+            # "TRAK-1",
+            # "TRAK-10",
+            "TRAK-50",
+            # "TracIn",
+            "Grad-Dot",
+            # "Grad-Cos",
+            # "RPS",
+        ],
+    )
     argparser.add_argument(
         "--extra_param",
         type=key_value_pair,
@@ -68,9 +87,10 @@ if __name__ == "__main__":
                 target_values.append(loss(outputs, labels.to(args.device)))
         return torch.Tensor(target_values)
 
-    target_values, indices = calculate_lds_ground_truth(target_func, f"./result/retrain/{args.model}_{activation_fn}", test_loader)
-    print(target_values[50:].shape)
-    print(indices[50:].shape)
-
-    torch.save(target_values[50:], f"./result/groundtruth/lds/{args.model}_{activation_fn}/target_values_lds.pt")
-    torch.save(indices[50:], f"./result/groundtruth/lds/{args.model}_{activation_fn}/indices_lds.pt")
+    target_values, indices = calculate_lds_ground_truth(target_func, f"./result/retrain/models_half/{args.model}_{activation_fn}", test_loader)
+    if args.method == "TRAK-50":
+        torch.save(target_values[50:], f"./result/groundtruth/lds/TRAK-50/{args.model}_{activation_fn}/target_values_lds.pt")
+        torch.save(indices[50:], f"./result/groundtruth/lds/TRAK-50/{args.model}_{activation_fn}/indices_lds.pt")
+    elif args.method == "Grad-Dot":
+        torch.save(target_values, f"./result/groundtruth/lds/Grad-Dot/{args.model}_{activation_fn}/target_values_lds.pt")
+        torch.save(indices, f"./result/groundtruth/lds/Grad-Dot/{args.model}_{activation_fn}/indices_lds.pt")

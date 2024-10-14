@@ -1,5 +1,3 @@
-"""This scripts is used in terminal to retrain models on various dataset."""
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -123,6 +121,14 @@ def main() -> None:
               -1 to use all the data.",
     )
     argparser.add_argument(
+        "--subset_ratio",
+        type=float,
+        default=0.5,
+        help="The ratio of sampled training samples to use,\
+              for retraining. Default to 0.5, set to\
+              1 to use all the data.",
+    )
+    argparser.add_argument(
         "--mode",
         type=str,
         choices=SUPPORTED_RETRAINING_MODE.keys(),
@@ -215,6 +221,9 @@ def main() -> None:
         kwargs = {}
         kwargs["indices"] = list(range(int(args.partition[0]), int(args.partition[1])))
     kwargs["device"] = args.device
+    kwargs["subset_ratio"] = args.subset_ratio
+
+
     kwargs.update(args.extra_param or {})
 
     activation_fn = None
@@ -224,11 +233,18 @@ def main() -> None:
                 if key == "activation_fn":
                     activation_fn = value
                     break
+    if args.subset_ratio == 1:
+        path = f"./result/retrain/models_full/{args.model}_{activation_fn}"
+    elif args.subset_ratio < 1:
+        path = f"./result/retrain/models_half/{args.model}_{activation_fn}"
+    else:
+        raise ValueError("The subset ratio can't be greater than 1")
+
 
     retrain_helper(
         train_func,
         dataloader=train_loader,
-        path=f"./result/retrain/{args.model}_{activation_fn}",
+        path=path,
         seed=args.seed,
         **kwargs,
     )

@@ -20,6 +20,7 @@ from _dattri.MLP.load import load_benchmark
 #     # IFAttributorExplicit,
 # )
 from _dattri.algorithm.tracin import TracInAttributor
+from _dattri.algorithm.trak_inv import TRAKinvAttributor
 from _dattri.algorithm.trak import TRAKAttributor
 # from dattri.algorithm.rps import RPSAttributor
 from dattri.metrics.metrics import lds
@@ -53,6 +54,7 @@ ATTRIBUTOR_DICT = {
     # "TRAK-1": TRAKAttributor,
     # "TRAK-10": TRAKAttributor,
     "TRAK-50": TRAKAttributor,
+    "TRAK-50-inv": TRAKinvAttributor,
     # "TracIn": TracInAttributor,
     "Grad-Dot": TracInAttributor,
     # "Grad-Cos": TracInAttributor,
@@ -88,6 +90,7 @@ if __name__ == "__main__":
             # "TRAK-1",
             # "TRAK-10",
             "TRAK-50",
+            "TRAK-50-inv",
             # "TracIn",
             "Grad-Dot",
             # "Grad-Cos",
@@ -118,7 +121,7 @@ if __name__ == "__main__":
                     break
 
     model_details, groundtruth = load_benchmark(
-        model=f"{args.model}_{activation_fn}", dataset=args.dataset, metric=args.metric
+        model=f"{args.model}_{activation_fn}", dataset=args.dataset, metric=args.metric, method=args.method
     )
 
     train_loader_cache = DataLoader(
@@ -172,7 +175,7 @@ if __name__ == "__main__":
             else model_details["models_full"][0],
         )
 
-    if args.method in ["TRAK-1", "TRAK-10", "TRAK-50"]:
+    if args.method in ["TRAK-1", "TRAK-10", "TRAK-50", "TRAK-50-inv"]:
 
         def loss_trak(params, data_target_pair):
             image, label = data_target_pair
@@ -241,7 +244,7 @@ if __name__ == "__main__":
     #         print("complete\n")
     #     print(args.method, "RESULT:", best_config, "lds:", best_result)
 
-    if args.method in ["TRAK-1", "TRAK-10", "TRAK-50"]:
+    if args.method in ["TRAK-1", "TRAK-10", "TRAK-50", "TRAK-50-inv"]:
         proj_dim = None
         if args.model == "mlp":
             if args.extra_param:
@@ -310,6 +313,15 @@ if __name__ == "__main__":
         if args.method == "TracIn":
             ensemble = 10
 
+        if args.sparsify:
+            method, param = parse_sparsify_param(args.sparsify)
+            sparsify = {
+                'method': method,
+                'param': param
+            }
+        else:
+            sparsify = {}
+
         attributor = ATTRIBUTOR_DICT[args.method](
             task=task,
             weight_list=torch.ones(ensemble) * 1e-3,
@@ -319,7 +331,7 @@ if __name__ == "__main__":
         )
         torch.cuda.reset_peak_memory_stats("cuda")
         with torch.no_grad():
-            score = attributor.attribute(train_loader, test_loader)
+            score = attributor.attribute(train_loader, test_loader, verbose=False, sparse_check=args.sparse_check, sparsify=sparsify)
         peak_memory = torch.cuda.max_memory_allocated("cuda") / 1e6  # Convert to MB
         print(f"Peak memory usage: {peak_memory} MB")
 
@@ -327,11 +339,13 @@ if __name__ == "__main__":
         lds_score = lds(-score.T.cpu(), groundtruth)[0]
         lds_score = torch.mean(lds_score[~torch.isnan(lds_score)])
 
+        print("lds:", lds_score)
         if lds_score > best_result:
             best_result = lds_score
+            best_config = projector_kwargs
         print("complete\n")
 
-        print(args.method, "lds:", best_result)
+        print(args.method, "RESULT:", best_config, "lds:", best_result)
 
     # if args.method == "RPS":
     #     for l2 in [1, 1e-1, 1e-2, 1e-3, 1e-4]:

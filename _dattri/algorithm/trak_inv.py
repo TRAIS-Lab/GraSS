@@ -32,8 +32,8 @@ DEFAULT_PROJECTOR_KWARGS = {
     "use_half_precision": False,
 }
 
-class TRAKAttributor(BaseAttributor):
-    """TRAK attributor."""
+class TRAKinvAttributor(BaseAttributor):
+    """TRAK_inv attributor."""
 
     def __init__(
         self,
@@ -99,7 +99,7 @@ class TRAKAttributor(BaseAttributor):
         """
         _check_shuffle(full_train_dataloader)
         self.full_train_dataloader = full_train_dataloader
-        inv_XTX_XT_list = []
+        XTX_XT_list = []
         running_Q = 0
         running_count = 0
 
@@ -191,20 +191,13 @@ class TRAKAttributor(BaseAttributor):
 
             full_train_projected_grad = torch.cat(full_train_projected_grad, dim=0)
             Q = torch.cat(Q, dim=0)
-            # with regularization
-            lambda_ = 1e-4
-            inv_XTX_XT = (
-                torch.linalg.inv(
-                    full_train_projected_grad.T @ full_train_projected_grad + lambda_ * torch.eye(full_train_projected_grad.size(1)).to(self.device),
-                )
-                @ full_train_projected_grad.T
-            )
-            inv_XTX_XT_list.append(inv_XTX_XT)
+            XTX_XT = full_train_projected_grad.T @ full_train_projected_grad @ full_train_projected_grad.T
+            XTX_XT_list.append(XTX_XT)
             running_Q = running_Q * running_count + Q
             running_count += 1
             running_Q /= running_count
 
-        self.inv_XTX_XT_list = inv_XTX_XT_list
+        self.XTX_XT_list = XTX_XT_list
         self.Q = running_Q
 
         if sparse_check and total_samples > 0:
@@ -252,7 +245,7 @@ class TRAKAttributor(BaseAttributor):
         if train_dataloader is not None:
             _check_shuffle(train_dataloader)
 
-        running_xinv_XTX_XT = 0
+        running_xXTX_XT = 0
         running_Q = 0
         running_count = 0
 
@@ -379,17 +372,16 @@ class TRAKAttributor(BaseAttributor):
             test_projected_grad = torch.cat(test_projected_grad, dim=0)
 
             if train_dataloader is not None:
-                lambda_ = 1e-4
-                running_xinv_XTX_XT = (
-                    running_xinv_XTX_XT * running_count
+                running_xXTX_XT = (
+                    running_xXTX_XT * running_count
                     + test_projected_grad
-                    @ torch.linalg.inv(train_projected_grad.T @ train_projected_grad + lambda_ * torch.eye(train_projected_grad.size(1)).to(self.device))
+                    @ train_projected_grad.T @ train_projected_grad
                     @ train_projected_grad.T
                 )
             else:
-                running_xinv_XTX_XT = (
-                    running_xinv_XTX_XT * running_count
-                    + test_projected_grad @ self.inv_XTX_XT_list[ckpt_seed]
+                running_xXTX_XT = (
+                    running_xXTX_XT * running_count
+                    + test_projected_grad @ self.XTX_XT_list[ckpt_seed]
                 )
 
             if train_dataloader is not None:
@@ -397,8 +389,8 @@ class TRAKAttributor(BaseAttributor):
             running_count += 1  # noqa: SIM113
             if train_dataloader is not None:
                 running_Q /= running_count
-            running_xinv_XTX_XT /= running_count
+            running_xXTX_XT /= running_count
 
         if train_dataloader is not None:
-            return (running_xinv_XTX_XT @ running_Q.diag().to(self.device)).T
-        return (running_xinv_XTX_XT @ self.Q.diag().to(self.device)).T
+            return (running_xXTX_XT @ running_Q.diag().to(self.device)).T
+        return (running_xXTX_XT @ self.Q.diag().to(self.device)).T

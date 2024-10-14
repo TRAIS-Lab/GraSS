@@ -123,6 +123,7 @@ def load_benchmark(
     model: str,
     dataset: str,
     metric: str,
+    method: str,
     # download_path: str = "~/.dattri",
     # redownload: bool = False,
 ) -> Tuple[Dict[str, Any], Tuple[torch.Tensor, torch.Tensor]]:
@@ -206,26 +207,28 @@ def load_benchmark(
     #             file_name=path.split("?")[0].split("/")[-1],
     #         )
 
-    # models_full_count = _count_folders(
-    #     download_path / "benchmark" / identifier / "models_full",
-    # )
-    # models_full_list = [
-    #     download_path
-    #     / "benchmark"
-    #     / identifier
-    #     / "models_full"
-    #     / f"{i}"
-    #     / "model_weights_0.pt"
-    #     for i in range(models_full_count)
-    # ]
     base_path = pathlib.Path("./result").expanduser()
 
+    models_full_count = _count_folders(
+        base_path / "retrain" / "models_full" / model,
+    )
+    models_full_list = [
+        base_path
+        / "retrain"
+        / "models_full"
+        / model
+        / f"{i}"
+        / "model_weights_0.pt"
+        for i in range(models_full_count)
+    ]
+
     models_half_count = _count_folders(
-        base_path / "retrain" / model,
+        base_path / "retrain" / "models_half" / model,
     )
     models_half_list = [
         base_path
         / "retrain"
+        / "models_half"
         / model
         / f"{i}"
         / "model_weights_0.pt"
@@ -239,16 +242,22 @@ def load_benchmark(
         base_path
         / "groundtruth"
         / metric
+        / method
         / model
         / f"target_values_{metric}.pt",
     )
     indices = torch.load(
-        base_path / "groundtruth" / metric / model / f"indices_{metric}.pt",
+        base_path
+        / "groundtruth"
+        / metric
+        / method
+        / model
+        / f"indices_{metric}.pt",
     )
 
     return {
         "model": MODEL_MAP[identifier]().eval(),
-        # "models_full": models_full_list,
+        "models_full": models_full_list,
         "models_half": models_half_list,
         "train_dataset": train_dataset,
         "test_dataset": test_dataset,
