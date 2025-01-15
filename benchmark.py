@@ -300,6 +300,8 @@ if __name__ == "__main__":
                     if key == "proj_dim":
                         proj_dim = value
                         break
+        if proj_dim is None:
+            proj_dim = 512
 
         projector_kwargs = {
             "proj_dim": proj_dim,
