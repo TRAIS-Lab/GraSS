@@ -325,8 +325,6 @@ class CudaProjector(AbstractProjector):
                 (the fast_jl library)."
                 raise ModuleNotFoundError(msg) from None
         elif self.method == "SJLT":
-            from ...utlis import SJLT
-
             # test run at init time if projection goes through
             SJLT(torch.zeros(8, 1_000, device="cuda"), 512, c=10)
 
@@ -388,8 +386,6 @@ class CudaProjector(AbstractProjector):
                     raise RuntimeError(msg) from e
                 raise e from None
         elif self.method == "SJLT":
-            from ...utlis import SJLT
-
             result = SJLT(
                 features,
                 self.proj_dim,
@@ -878,8 +874,6 @@ def make_random_projector(
                 projector = BasicProjector
                 raise
         elif method == "SJLT":
-            from ...utlis import SJLT
-
             test_feature = torch.ones(1, feature_dim).cuda()
             SJLT(test_feature, proj_dim, c=10)
 
@@ -1118,3 +1112,51 @@ def random_project(
         return projector.project(feature, ensemble_id)
 
     return _random_project_func
+
+def SJLT(vecs, proj_dim, seed=0, rand_indices=None, rand_signs=None, c=2, blow_up=1):
+    """
+    Forward and batched SJLT implementation optimized for sparse inputs
+
+    Args:
+        vecs (torch.Tensor): Input tensor of shape [batch_size, original_dim]
+        proj_dim (int): Target projection dimension
+        seed (int): Random seed for reproducibility. Default: 0
+        rand_indices (torch.Tensor): Random indices of shape [original_dim, c], values in [0, proj_dim * blow_up)
+        rand_signs (torch.Tensor): Random signs of shape [original_dim, c], values in {-1, 1}
+        c (int): Sparsity parameter. Default: 2
+        blow_up (int): Intermediate dimension multiplier. Default: 1
+
+    Returns:
+        torch.Tensor: Projected tensor of shape [batch_size, proj_dim]
+    """
+    torch.manual_seed(seed)
+
+    batch_size, original_dim = vecs.size()
+    device = vecs.device
+
+    if rand_indices is None:
+        rand_indices = torch.randint(proj_dim * blow_up, (original_dim, c), device=device)
+    if rand_signs is None:
+        rand_signs = torch.randint(0, 2, (original_dim, c), device=device) * 2 - 1
+
+    # Get indices of all non-zero elements across the batch
+    batch_idx, input_idx = torch.nonzero(vecs, as_tuple=True)
+
+    if input_idx.numel() == 0:
+        return torch.zeros(batch_size, proj_dim, device=device)
+
+    values = vecs[batch_idx, input_idx]
+    scaled_vals = values.unsqueeze(1) * rand_signs[input_idx]
+    output_indices = rand_indices[input_idx]
+
+    vecs_p = torch.zeros(batch_size, proj_dim * blow_up, device=device)
+
+    # Create virtual repeated indices using broadcasting
+    final_indices = (batch_idx.view(-1, 1) * (proj_dim * blow_up) + output_indices).flatten()
+
+    vecs_p.view(-1).index_add_(0, final_indices, scaled_vals.flatten())
+
+    vecs_p = vecs_p.view(batch_size, proj_dim, blow_up)
+    vecs_p = vecs_p.sum(dim=2)
+
+    return vecs_p / (c ** 0.5)

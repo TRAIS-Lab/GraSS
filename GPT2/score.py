@@ -248,6 +248,11 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--GIP",
+        default="store_true",
+        help="Use Ghost Inner-Product (GIP) for Grad-Dot calculation.",
+    )
+    parser.add_argument(
         "--proj",
         type=str,
         default=None,
@@ -517,6 +522,8 @@ def main():
     parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     sys.path.append(parent_dir)
     from _dattri.benchmark.utils import SubsetSampler
+    from _dattri.task import AttributionTask
+    from _dattri.algorithm.tracin import TracInAttributor
 
     train_dataset = lm_datasets["train"]
     eval_dataset = lm_datasets["validation"]
@@ -535,8 +542,6 @@ def main():
         eval_dataset, collate_fn=default_data_collator, batch_size=4, shuffle=False
     )
 
-    from _dattri.task import AttributionTask
-
     def f(params, batch):
         outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(),
                                              kwargs={"attention_mask": batch["attention_mask"].cuda(),
@@ -544,7 +549,6 @@ def main():
         logp = -outputs.loss
         return logp - torch.log(1 - torch.exp(logp))
 
-    from _dattri.algorithm.tracin import TracInAttributor
 
     checkpoints = [f"{args.output_dir}/{i}"
                     for i in range(5)]
@@ -557,7 +561,6 @@ def main():
     task = AttributionTask(loss_func=f, model=model,
                            checkpoints=checkpoints[0],
                            checkpoints_load_func=checkpoints_load_func)
-    # args.proj = proj_method-proj_dim
 
     proj_method, proj_dim = None, None
     if args.proj is not None:
