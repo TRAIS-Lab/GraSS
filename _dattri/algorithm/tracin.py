@@ -56,8 +56,10 @@ class TracInAttributor(BaseAttributor):
         # these are projector kwargs shared by train/test projector
         self.projector_kwargs = projector_kwargs
         # set proj seed
-        # if projector_kwargs is not None:
-        #     self.projector_kwargs.update(projector_kwargs)
+        if projector_kwargs is not None:
+            self.threshold = self.projector_kwargs.get("threshold", None)
+            self.projector_kwargs.pop("threshold")
+
         self.normalized_grad = normalized_grad
         self.layer_name = layer_name
         self.device = device
@@ -147,6 +149,14 @@ class TracInAttributor(BaseAttributor):
                 # get gradient of train
                 grad_t = self.grad_loss_func(parameters, train_batch_data)
                 if self.projector_kwargs is not None:
+                    # threshold the grad_t
+                    if self.threshold is not None:
+                        grad_t = torch.where(
+                            grad_t.abs() > self.threshold,
+                            grad_t,
+                            torch.zeros_like(grad_t),
+                        )
+
                     # define the projector for this batch of data
                     self.train_random_project = random_project(
                         grad_t,
@@ -181,6 +191,14 @@ class TracInAttributor(BaseAttributor):
                     # get gradient of test
                     grad_t = self.grad_target_func(parameters, test_batch_data)
                     if self.projector_kwargs is not None:
+                        # threshold the grad_t
+                        if self.threshold is not None:
+                            grad_t = torch.where(
+                                grad_t.abs() > self.threshold,
+                                grad_t,
+                                torch.zeros_like(grad_t),
+                            )
+
                         # define the projector for this batch of data
                         self.test_random_project = random_project(
                             grad_t,

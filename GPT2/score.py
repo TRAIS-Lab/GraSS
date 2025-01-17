@@ -251,7 +251,13 @@ def parse_args():
         "--proj",
         type=str,
         default=None,
-        help="Method to be used for projection when attributing.",
+        help="Method-Dimension to be used for projection when attributing.",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="Threshold to be used for projection when attributing.",
     )
 
     args = parser.parse_args()
@@ -551,25 +557,44 @@ def main():
     task = AttributionTask(loss_func=f, model=model,
                            checkpoints=checkpoints[0],
                            checkpoints_load_func=checkpoints_load_func)
+    # args.proj = proj_method-proj_dim
 
-    if args.proj is None:
+    proj_method, proj_dim = None, None
+    if args.proj is not None:
+        proj_method, proj_dim = args.proj.split("-")
+        proj_dim = int(proj_dim)
+
+    if proj_method is None:
         projector_kwargs = None
-    elif args.proj == "FJLT":
+    elif proj_method == "Gaussian":
         projector_kwargs = {
-            "proj_dim": 512,
+            "proj_dim": proj_dim,
             "proj_max_batch_size": 32,
             "proj_seed": 0,
+            "method": "Gaussian",
             "device": "cuda",
             "use_half_precision": False,
+            "threshold": args.threshold,
         }
-    elif args.method == "SJLT":
+    elif proj_method == "FJLT":
         projector_kwargs = {
-            "proj_dim": 512,
+            "proj_dim": proj_dim,
+            "proj_max_batch_size": 32,
+            "proj_seed": 0,
+            "method": "FJLT",
+            "device": "cuda",
+            "use_half_precision": False,
+            "threshold": args.threshold,
+        }
+    elif proj_method == "SJLT":
+        projector_kwargs = {
+            "proj_dim": proj_dim,
             "proj_max_batch_size": 32,
             "proj_seed": 0,
             "device": "cuda",
+            "method": "SJLT",
             "use_half_precision": False,
-            "proj_sparse": True,
+            "threshold": args.threshold,
         }
 
     ensemble = 1 # For Grad-Dot, 10 if TracIn
@@ -601,7 +626,14 @@ def main():
     print(f"Time taken: {end - start} seconds")
     print(f"Peak memory usage: {peak_memory} MB")
 
-    torch.save(score, f"./result/score-{args.proj}.pt")
+    if args.proj is not None and args.threshold is not None:
+        torch.save(score, f"./result/score_{proj_method}-{proj_dim}_threshold-{args.threshold}.pt")
+    elif args.proj is not None:
+        torch.save(score, f"./result/score_{proj_method}-{proj_dim}.pt")
+    elif args.threshold is not None:
+        torch.save(score, f"./result/score_threshold-{args.threshold}.pt")
+    else:
+        torch.save(score, f"./result/score.pt")
 
 
 if __name__ == "__main__":

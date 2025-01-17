@@ -121,6 +121,7 @@ class BasicProjector(AbstractProjector):
         block_size: int = 100,
         dtype: torch.dtype = torch.float32,
         ensemble_id: int = 0,
+        method: str = "Gaussian",
     ) -> None:
         """Initializes hyperparameters for BasicProjector.
 
@@ -270,6 +271,7 @@ class CudaProjector(AbstractProjector):
         proj_type: ProjectionType,
         device: str,
         max_batch_size: int,
+        method: str
     ) -> None:
         """Initializes hyperparameters for CudaProjector.
 
@@ -306,20 +308,27 @@ class CudaProjector(AbstractProjector):
             device.index,
         ).multi_processor_count
 
-        try:
-            import fast_jl
+        self.method = method
+        if self.method == "FJLT":
+            try:
+                import fast_jl
 
-            # test run to catch at init time if projection goes through
-            fast_jl.project_rademacher_8(
-                torch.zeros(8, 1_000, device="cuda"),
-                512,
-                0,
-                self.num_sms,
-            )
-        except ImportError:
-            msg = "You should make sure to install the CUDA projector \
-            (the fast_jl library)."
-            raise ModuleNotFoundError(msg) from None
+                # test run to catch at init time if projection goes through
+                fast_jl.project_rademacher_8(
+                    torch.zeros(8, 1_000, device="cuda"),
+                    512,
+                    0,
+                    self.num_sms,
+                )
+            except ImportError:
+                msg = "You should make sure to install the CUDA projector \
+                (the fast_jl library)."
+                raise ModuleNotFoundError(msg) from None
+        elif self.method == "SJLT":
+            from ...utlis import SJLT
+
+            # test run at init time if projection goes through
+            SJLT(torch.zeros(8, 1_000, device="cuda"), 512, c=10)
 
     def project(
         self,
@@ -341,7 +350,6 @@ class CudaProjector(AbstractProjector):
         Returns:
             Tensor: The projected features.
         """
-        import fast_jl
 
         if isinstance(features, dict):
             features = vectorize(features, device=self.device)
@@ -358,25 +366,36 @@ class CudaProjector(AbstractProjector):
 
         effective_batch_size = min(self.max_batch_size, effective_batch_size)
 
-        function_name = f"project_{self.proj_type}_{effective_batch_size}"
+        if self.method == "FJLT":
+            import fast_jl
+            function_name = f"project_{self.proj_type}_{effective_batch_size}"
 
-        fn = getattr(fast_jl, function_name)
+            fn = getattr(fast_jl, function_name)
 
-        try:
-            result = fn(
+            try:
+                result = fn(
+                    features,
+                    self.proj_dim,
+                    self.seed + int(1e4) * ensemble_id,
+                    self.num_sms,
+                )
+            except RuntimeError as e:
+                if "CUDA error: too many resources requested for launch" in str(e):
+                    # provide a more helpful error message
+                    msg = "The batch size of the CudaProjector is too large for your GPU. \
+                        Reduce it by using the proj_max_batch_size argument.\
+                        \nOriginal error:"
+                    raise RuntimeError(msg) from e
+                raise e from None
+        elif self.method == "SJLT":
+            from ...utlis import SJLT
+
+            result = SJLT(
                 features,
                 self.proj_dim,
                 self.seed + int(1e4) * ensemble_id,
-                self.num_sms,
+                c=20,
             )
-        except RuntimeError as e:
-            if "CUDA error: too many resources requested for launch" in str(e):
-                # provide a more helpful error message
-                msg = "The batch size of the CudaProjector is too large for your GPU. \
-                    Reduce it by using the proj_max_batch_size argument.\
-                    \nOriginal error:"
-                raise RuntimeError(msg) from e
-            raise e from None
 
         return result
 
@@ -797,6 +816,7 @@ def make_random_projector(
     proj_max_batch_size: int,
     device: str,
     proj_seed: int = 0,
+    method: str = "Gaussian",
     *,
     use_half_precision: bool = True,
 ) -> Tensor:
@@ -839,25 +859,32 @@ def make_random_projector(
         # normal projection, rather than rademacher.
         proj_type = ProjectionType.normal
     else:
-        try:
-            import fast_jl
+        if method == "FJLT":
+            try:
+                import fast_jl
+
+                test_feature = torch.ones(1, feature_dim).cuda()
+                num_sms = torch.cuda.get_device_properties(
+                    "cuda",
+                ).multi_processor_count
+                fast_jl.project_rademacher_8(
+                    test_feature,
+                    proj_dim,
+                    0,
+                    num_sms,
+                )
+
+            except (ImportError, RuntimeError, AttributeError):
+                projector = BasicProjector
+                raise
+        elif method == "SJLT":
+            from ...utlis import SJLT
 
             test_feature = torch.ones(1, feature_dim).cuda()
-            num_sms = torch.cuda.get_device_properties(
-                "cuda",
-            ).multi_processor_count
-            fast_jl.project_rademacher_8(
-                test_feature,
-                proj_dim,
-                0,
-                num_sms,
-            )
-            projector = CudaProjector
-            using_cuda_projector = True
+            SJLT(test_feature, proj_dim, c=10)
 
-        except (ImportError, RuntimeError, AttributeError):
-            projector = BasicProjector
-            raise
+        projector = CudaProjector
+        using_cuda_projector = True
         proj_type = ProjectionType.rademacher
 
     if using_cuda_projector:
@@ -883,6 +910,7 @@ def make_random_projector(
                     proj_type=proj_type,
                     max_batch_size=proj_max_batch_size,
                     device=device,
+                    method=method,
                 )
                 for i, chunk_size in enumerate(param_chunk_sizes)
             ]
@@ -904,6 +932,7 @@ def make_random_projector(
             proj_type=proj_type,
             max_batch_size=proj_max_batch_size,
             device=device,
+            method=method,
         )
     elif projector == BasicProjector:
         assigned_projector = projector(
@@ -913,6 +942,7 @@ def make_random_projector(
             proj_type=proj_type,
             dtype=dtype,
             device=device,
+            method=method,
         )
 
     return assigned_projector
@@ -1021,6 +1051,7 @@ def random_project(
     proj_max_batch_size: int,
     device: str,
     proj_seed: int = 0,
+    method: str = "Gaussian",
     *,
     use_half_precision: bool = True,
 ) -> Callable:
@@ -1062,6 +1093,7 @@ def random_project(
         proj_max_batch_size=proj_max_batch_size,
         device=device,
         proj_seed=proj_seed,
+        method=method,
         use_half_precision=use_half_precision,
     )
 

@@ -64,50 +64,51 @@ def compute_pairwise_inner_product_rank_correlation(grad_t, grad_p):
 
     return spearman_corr
 
-def SJLT(batch_vec, proj_dim, rand_indices, rand_signs, c=2, blow_up=1):
-    """
-    Forward SJLT implementation optimized for sparse inputs
+# def SJLT(batch_vec, proj_dim, rand_indices, rand_signs, c=2, blow_up=1):
+#     """
+#     Forward SJLT implementation optimized for sparse inputs
 
-    Args:
-        batch_vec (torch.Tensor): Input tensor of shape [batch_size, original_dim]
-        proj_dim (int): Target projection dimension
-        rand_indices (torch.Tensor): Random indices of shape [original_dim, c], values in [0, proj_dim * blow_up)
-        rand_signs (torch.Tensor): Random signs of shape [original_dim, c], values in {-1, 1}
-        c (int): Sparsity parameter. Default: 2
-        blow_up (int): Intermediate dimension multiplier. Default: 1
+#     Args:
+#         batch_vec (torch.Tensor): Input tensor of shape [batch_size, original_dim]
+#         proj_dim (int): Target projection dimension
+#         rand_indices (torch.Tensor): Random indices of shape [original_dim, c], values in [0, proj_dim * blow_up)
+#         rand_signs (torch.Tensor): Random signs of shape [original_dim, c], values in {-1, 1}
+#         c (int): Sparsity parameter. Default: 2
+#         blow_up (int): Intermediate dimension multiplier. Default: 1
 
-    Returns:
-        torch.Tensor: Projected tensor of shape [batch_size, proj_dim]
-    """
-    batch_size, original_dim = batch_vec.size()
+#     Returns:
+#         torch.Tensor: Projected tensor of shape [batch_size, proj_dim]
+#     """
+#     batch_size, original_dim = batch_vec.size()
 
-    batch_vec_p = torch.zeros(batch_size, proj_dim * blow_up, device=batch_vec.device)
+#     batch_vec_p = torch.zeros(batch_size, proj_dim * blow_up, device=batch_vec.device)
 
-    for i in range(batch_size):
-        vec = batch_vec[i]
-        non_zero_indices = torch.nonzero(vec).squeeze()
-        if non_zero_indices.numel() == 0:
-            continue
+#     for i in range(batch_size):
+#         vec = batch_vec[i]
+#         non_zero_indices = torch.nonzero(vec).squeeze()
+#         if non_zero_indices.numel() == 0:
+#             continue
 
-        # Multiply the non-zero elements of batch_vec by their corresponding random signs
-        scaled_vals = vec[non_zero_indices].unsqueeze(1) * rand_signs[non_zero_indices] # Shape (num_non_zero, c_int)
+#         # Multiply the non-zero elements of batch_vec by their corresponding random signs
+#         scaled_vals = vec[non_zero_indices].unsqueeze(1) * rand_signs[non_zero_indices] # Shape (num_non_zero, c_int)
 
-        # Perform vectorized index addition (summing over c_int for each non-zero element)
-        batch_vec_p[i].index_add_(0, rand_indices[non_zero_indices].flatten(), scaled_vals.flatten())
+#         # Perform vectorized index addition (summing over c_int for each non-zero element)
+#         batch_vec_p[i].index_add_(0, rand_indices[non_zero_indices].flatten(), scaled_vals.flatten())
 
-    batch_vec_p = batch_vec_p.view(batch_size, proj_dim, blow_up)
-    batch_vec_p = batch_vec_p.sum(dim=2)
+#     batch_vec_p = batch_vec_p.view(batch_size, proj_dim, blow_up)
+#     batch_vec_p = batch_vec_p.sum(dim=2)
 
-    return batch_vec_p / (c ** 0.5)
+#     return batch_vec_p / (c ** 0.5)
 
 
-def SJLT_batch(batch_vec, proj_dim, rand_indices, rand_signs, c=2, blow_up=1):
+def SJLT(vecs, proj_dim, seed=0, rand_indices=None, rand_signs=None, c=2, blow_up=1):
     """
     Forward and batched SJLT implementation optimized for sparse inputs
 
     Args:
-        batch_vec (torch.Tensor): Input tensor of shape [batch_size, original_dim]
+        vecs (torch.Tensor): Input tensor of shape [batch_size, original_dim]
         proj_dim (int): Target projection dimension
+        seed (int): Random seed for reproducibility. Default: 0
         rand_indices (torch.Tensor): Random indices of shape [original_dim, c], values in [0, proj_dim * blow_up)
         rand_signs (torch.Tensor): Random signs of shape [original_dim, c], values in {-1, 1}
         c (int): Sparsity parameter. Default: 2
@@ -116,30 +117,37 @@ def SJLT_batch(batch_vec, proj_dim, rand_indices, rand_signs, c=2, blow_up=1):
     Returns:
         torch.Tensor: Projected tensor of shape [batch_size, proj_dim]
     """
-    batch_size, original_dim = batch_vec.size()
-    device = batch_vec.device
+    torch.manual_seed(seed)
+
+    batch_size, original_dim = vecs.size()
+    device = vecs.device
+
+    if rand_indices is None:
+        rand_indices = torch.randint(proj_dim * blow_up, (original_dim, c), device=device)
+    if rand_signs is None:
+        rand_signs = torch.randint(0, 2, (original_dim, c), device=device) * 2 - 1
 
     # Get indices of all non-zero elements across the batch
-    batch_idx, input_idx = torch.nonzero(batch_vec, as_tuple=True)
+    batch_idx, input_idx = torch.nonzero(vecs, as_tuple=True)
 
     if input_idx.numel() == 0:
         return torch.zeros(batch_size, proj_dim, device=device)
 
-    values = batch_vec[batch_idx, input_idx]
+    values = vecs[batch_idx, input_idx]
     scaled_vals = values.unsqueeze(1) * rand_signs[input_idx]
     output_indices = rand_indices[input_idx]
 
-    batch_vec_p = torch.zeros(batch_size, proj_dim * blow_up, device=device)
+    vecs_p = torch.zeros(batch_size, proj_dim * blow_up, device=device)
 
     # Create virtual repeated indices using broadcasting
     final_indices = (batch_idx.view(-1, 1) * (proj_dim * blow_up) + output_indices).flatten()
 
-    batch_vec_p.view(-1).index_add_(0, final_indices, scaled_vals.flatten())
+    vecs_p.view(-1).index_add_(0, final_indices, scaled_vals.flatten())
 
-    batch_vec_p = batch_vec_p.view(batch_size, proj_dim, blow_up)
-    batch_vec_p = batch_vec_p.sum(dim=2)
+    vecs_p = vecs_p.view(batch_size, proj_dim, blow_up)
+    vecs_p = vecs_p.sum(dim=2)
 
-    return batch_vec_p / (c ** 0.5)
+    return vecs_p / (c ** 0.5)
 
 def SJLT_reverse(batch_vec, proj_dim, pos_indices=None, neg_indices=None, c=2):
     """
