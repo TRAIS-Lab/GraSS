@@ -19,6 +19,7 @@ from ..func.projection import random_project
 from .base import BaseAttributor
 from .utils import _check_shuffle
 
+DEFAULT_PROJECTOR_KWARGS = None
 
 class TracInAttributor(BaseAttributor):
     """TracIn attributor."""
@@ -55,8 +56,8 @@ class TracInAttributor(BaseAttributor):
         # these are projector kwargs shared by train/test projector
         self.projector_kwargs = projector_kwargs
         # set proj seed
-        if projector_kwargs is not None:
-            self.proj_seed = self.projector_kwargs.get("proj_seed", 0)
+        # if projector_kwargs is not None:
+        #     self.projector_kwargs.update(projector_kwargs)
         self.normalized_grad = normalized_grad
         self.layer_name = layer_name
         self.device = device
@@ -135,9 +136,14 @@ class TracInAttributor(BaseAttributor):
                 ),
             ):
                 # move to device
-                train_batch_data = tuple(
-                    data.to(self.device) for data in train_batch_data_
-                )
+                # TODO: reorganize the data pre-grad processing.
+                if isinstance(train_batch_data_, (tuple, list)):
+                    train_batch_data = tuple(
+                        data.to(self.device) for data in train_batch_data_
+                    )
+                else:
+                    train_batch_data = train_batch_data_
+
                 # get gradient of train
                 grad_t = self.grad_loss_func(parameters, train_batch_data)
                 if self.projector_kwargs is not None:
@@ -145,7 +151,7 @@ class TracInAttributor(BaseAttributor):
                     self.train_random_project = random_project(
                         grad_t,
                         # get the batch size, prevent edge case
-                        train_batch_data[0].shape[0],
+                        grad_t.shape[0],
                         **self.projector_kwargs,
                     )
                     # param index as ensemble id
@@ -164,16 +170,21 @@ class TracInAttributor(BaseAttributor):
                     ),
                 ):
                     # move to device
-                    test_batch_data = tuple(
-                        data.to(self.device) for data in test_batch_data_
-                    )
+                    # TODO: reorganize the data pre-grad processing.
+                    if isinstance(test_batch_data_, (tuple, list)):
+                        test_batch_data = tuple(
+                            data.to(self.device) for data in test_batch_data_
+                        )
+                    else:
+                        test_batch_data = test_batch_data_
+
                     # get gradient of test
                     grad_t = self.grad_target_func(parameters, test_batch_data)
                     if self.projector_kwargs is not None:
                         # define the projector for this batch of data
                         self.test_random_project = random_project(
                             grad_t,
-                            test_batch_data[0].shape[0],
+                            grad_t.shape[0],
                             **self.projector_kwargs,
                         )
 

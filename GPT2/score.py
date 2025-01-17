@@ -32,6 +32,7 @@ from itertools import chain
 from pathlib import Path
 import csv
 from pathlib import PosixPath
+import time
 
 import datasets
 import torch
@@ -245,6 +246,14 @@ def parse_args():
         default=1.0,
         help="The ratio used for model training.",
     )
+
+    parser.add_argument(
+        "--proj",
+        type=str,
+        default=None,
+        help="Method to be used for projection when attributing.",
+    )
+
     args = parser.parse_args()
 
     # Sanity checks
@@ -529,13 +538,6 @@ def main():
         logp = -outputs.loss
         return logp - torch.log(1 - torch.exp(logp))
 
-    def m(params, batch):
-        outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(),
-                                             kwargs={"attention_mask": batch["attention_mask"].cuda(),
-                                                     "labels": batch["labels"].cuda()})
-        p = torch.exp(-outputs.loss)
-        return p
-
     from _dattri.algorithm.tracin import TracInAttributor
 
     checkpoints = [f"{args.output_dir}/{i}"
@@ -550,11 +552,25 @@ def main():
                            checkpoints=checkpoints[0],
                            checkpoints_load_func=checkpoints_load_func)
 
-    projector_kwargs = {
-        "device": "cuda",
-        "proj_dim": 2048,
-        "use_half_precision": False,
-    }
+    if args.proj is None:
+        projector_kwargs = None
+    elif args.proj == "FJLT":
+        projector_kwargs = {
+            "proj_dim": 512,
+            "proj_max_batch_size": 32,
+            "proj_seed": 0,
+            "device": "cuda",
+            "use_half_precision": False,
+        }
+    elif args.method == "SJLT":
+        projector_kwargs = {
+            "proj_dim": 512,
+            "proj_max_batch_size": 32,
+            "proj_seed": 0,
+            "device": "cuda",
+            "use_half_precision": False,
+            "proj_sparse": True,
+        }
 
     ensemble = 1 # For Grad-Dot, 10 if TracIn
     normalized_grad = False # For Grad-Dot, True if Grad-Cos
@@ -570,13 +586,22 @@ def main():
 
     torch.cuda.reset_peak_memory_stats("cuda")
 
+    # time the attribution
+    torch.cuda.synchronize()
+    start = time.time()
+
     with torch.no_grad():
         score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=eval_dataloader)
 
+    torch.cuda.synchronize()
+    end = time.time()
+
     peak_memory = torch.cuda.max_memory_allocated("cuda") / 1e6  # Convert to MB
+
+    print(f"Time taken: {end - start} seconds")
     print(f"Peak memory usage: {peak_memory} MB")
 
-    torch.save(score, "score.pt")
+    torch.save(score, f"./result/score-{args.proj}.pt")
 
 
 if __name__ == "__main__":

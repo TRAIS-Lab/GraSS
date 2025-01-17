@@ -24,7 +24,6 @@ def read_nodes(file_path):
 
 
 def calculate_one(path):
-
     # score = torch.load(path, map_location=torch.device('cpu'))  # _test_0225_regroup
     score = torch.load(path, map_location=torch.device('cpu'))
     # score = torch.rand(5000, 500)
@@ -44,7 +43,7 @@ def calculate_one(path):
             index.append(full_nodes.index(number))
         node_list.append(index)
 
-    loss_list = torch.load("gt.pt", map_location=torch.device('cpu')).detach()
+    loss_list = torch.load("./result/gt.pt", map_location=torch.device('cpu')).detach()
 
     approx_output = []
     for i in range(len(nodes_str)):
@@ -57,7 +56,7 @@ def calculate_one(path):
 
     res = 0
     counter = 0
-    for i in range(481):
+    for i in range(score.shape[1]):
         tmp = spearmanr(np.array([approx_output[k][i] for k in range(len(approx_output))]),
                         np.array([loss_list[k][i].numpy() for k in range(len(loss_list))])).statistic
         if np.isnan(tmp):
@@ -72,5 +71,5 @@ def calculate_one(path):
 
 
 if __name__ == "__main__":
-    path = "score.pt"
+    path = "./result/score.pt"
     print(calculate_one(path)[0])
