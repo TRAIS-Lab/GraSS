@@ -1,8 +1,47 @@
-/job
-/log
-/result
-/MNIST
+# Compile products
+*.pyc
+*.class
+*.crc
+*.o
+
+# IDE specific
+.scala_dependencies
+.worksheet
+*.iml
+.idea/
+.vscode/
+
+# other
+nohup.out
+*.log
+*.lock
+*.un~
+*.idx
+.ipynb_checkpoints/
+.project
+.settings/
+*/.cache-main
+*/.cache-tests
+*/.classpath
+*/.project
+*/.settings/
+*.so
+*.so.*
+*.dylib
+__pycache__
+*.egg-info
+target
+build
+dist
 *.npy
 *.mmap
 *.pt
-__pycache__/
+
+/job
+/log
+/result
+*/data/*
+
+# all files in result folder
+*/result/*
+*/checkpoints/*

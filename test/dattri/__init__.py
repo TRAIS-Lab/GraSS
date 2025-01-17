@@ -1,1 +1,0 @@
-"""dattri module."""
