@@ -36,10 +36,10 @@ dist
 *.npy
 *.mmap
 *.pt
+*.slurm
 
-/job
-/log
-/result
+*/job
+*/log
 */data/*
 
 # all files in result folder
