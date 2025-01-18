@@ -175,7 +175,6 @@ class AttributionTask:
             self.named_parameters = {
                 k: p for k, p in self.model.named_parameters() if p.requires_grad
             }
-            print([(k, p.shape) for k, p in self.model.named_parameters() if p.requires_grad])
 
     @staticmethod
     def _generate_param_layer_map(

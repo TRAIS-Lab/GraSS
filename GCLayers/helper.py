@@ -1,11 +1,12 @@
 import torch
-from GCLayers.linear import GCLinear
+from .linear import GCLinear, GCEmbedding
+from .layer_norm import GCLayerNorm
 
 def find_GClayers(model):
     GC_layers = []
 
     for module in model.modules():
-        if isinstance(module, GCLinear):
+        if isinstance(module, GCLinear) or isinstance(module, GCLayerNorm) or isinstance(module, GCEmbedding):
             GC_layers.append(module)
 
     return GC_layers

@@ -1,6 +1,7 @@
 from transformers import GPT2LMHeadModel
 from transformers.models.gpt2.modeling_gpt2 import Conv1D
-from .linear import GCLinear
+from .linear import GCLinear, GCEmbedding
+from .layer_norm import GCLayerNorm
 import torch
 import torch.nn as nn
 import os
@@ -14,6 +15,19 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
 
     def _replace_with_gc_layers(self):
         """Replace standard layers with GC layers in GPT2 model."""
+        # Replace embedding layers
+        if hasattr(self.transformer, 'wte'):
+            self.transformer.wte = GCEmbedding(
+                num_embeddings=self.transformer.wte.num_embeddings,
+                embedding_dim=self.transformer.wte.embedding_dim
+            )
+
+        if hasattr(self.transformer, 'wpe'):
+            self.transformer.wpe = GCEmbedding(
+                num_embeddings=self.transformer.wpe.num_embeddings,
+                embedding_dim=self.transformer.wpe.embedding_dim
+            )
+
         # Replace layers in transformer blocks
         if hasattr(self, 'transformer') and hasattr(self.transformer, 'h'):
             for i, block in enumerate(self.transformer.h):
@@ -37,10 +51,21 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
                         new_layer = self._create_gc_layer(block.mlp.c_proj)
                         block.mlp.c_proj = new_layer
 
+                    # Replace LayerNorm layers (e.g., ln_1, ln_2)
+                for ln_attr in ['ln_1', 'ln_2']:
+                    if hasattr(block, ln_attr):
+                        new_ln_layer = self._create_gc_layernorm(getattr(block, ln_attr))
+                        setattr(block, ln_attr, new_ln_layer)
+
         # Replace lm_head if it exists
         if hasattr(self, 'lm_head'):
             new_layer = self._create_gc_layer(self.lm_head)
             self.lm_head = new_layer
+
+        # Replace the final layer normalization
+        if hasattr(self.transformer, 'ln_f'):
+            new_ln_layer = self._create_gc_layernorm(self.transformer.ln_f)
+            self.transformer.ln_f = new_ln_layer
 
     def _create_gc_layer(self, old_layer):
         """Create a GC layer from either Conv1D or Linear layer."""
@@ -71,6 +96,22 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
         else:
             raise ValueError(f"Unsupported layer type: {type(old_layer)}")
 
+        return new_layer
+
+    def _create_gc_layernorm(self, old_layer):
+        """Create a GCLayerNorm from a standard LayerNorm."""
+        if isinstance(old_layer, nn.LayerNorm):
+            # Create the custom LayerNorm layer with the same configuration
+            new_layer = GCLayerNorm(
+                normalized_shape=old_layer.normalized_shape,
+                elementwise_affine=old_layer.elementwise_affine,
+            )
+            # Copy weights and biases if they exist
+            if old_layer.elementwise_affine:
+                new_layer.weight.data = old_layer.weight.clone()
+                new_layer.bias.data = old_layer.bias.clone()
+        else:
+            raise ValueError(f"Unsupported layer type for LayerNorm: {type(old_layer)}")
         return new_layer
 
     @classmethod

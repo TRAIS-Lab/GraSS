@@ -1,11 +1,6 @@
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.nn.init as init
-from torch.nn.parameter import Parameter
-
-import sys
 
 
 class GCLinear(nn.Linear):
@@ -100,5 +95,111 @@ class GCLinear(nn.Linear):
             ones_column = torch.ones(H.size(0), 1, device=H.device)
             # Concatenate the column of ones to H along the second dimension (columns)
             H = torch.cat((H, ones_column), dim=1)
+
+        return dLdZ, H
+
+class GCEmbedding(nn.Embedding):
+    def __init__(self, num_embeddings, embedding_dim):
+        super(GCEmbedding, self).__init__(num_embeddings, embedding_dim)
+        # Store input and output for gradient computation
+        self.indices = None
+        self.embedded = None
+        self.name = 'embedding'
+
+    def forward(self, input):
+        self.indices = input
+        self.embedded = super().forward(input)
+        return self.embedded
+
+    def per_example_gradient(self, deriv_pre_activ):
+        """
+        Compute per-example gradients for the embedding layer.
+        For embedding layer, we only need to consider the indices that were actually used.
+
+        Parameters:
+        -----------
+        deriv_pre_activ: derivative of loss function w.r.t. the embedding output
+        """
+        batch_size = deriv_pre_activ.size(0)
+
+        # For sequence inputs (3D)
+        if deriv_pre_activ.dim() == 3:
+            dLdZ = deriv_pre_activ.permute(1, 2, 0)  # Match the linear layer format
+            dLdZ *= dLdZ.size(0)  # Scale by batch size as in linear layer
+
+            # Create sparse gradient tensors for each example
+            pe_grad_weight = torch.zeros(batch_size, self.num_embeddings, self.embedding_dim,
+                                       device=deriv_pre_activ.device)
+
+            # For each position in sequence
+            for pos in range(self.indices.size(1)):
+                pos_indices = self.indices[:, pos]
+                pos_grads = dLdZ[pos]
+
+                # Accumulate gradients for each example's embedding
+                for b in range(batch_size):
+                    pe_grad_weight[b, pos_indices[b]] += pos_grads[:, b]
+
+        # For single token inputs (2D)
+        else:
+            dLdZ = deriv_pre_activ * batch_size
+            pe_grad_weight = torch.zeros(batch_size, self.num_embeddings, self.embedding_dim,
+                                       device=deriv_pre_activ.device)
+
+            # Accumulate gradients for each example's embedding
+            for b in range(batch_size):
+                pe_grad_weight[b, self.indices[b]] = dLdZ[b]
+
+        # Embedding layers don't have bias
+        pe_grad_bias = None
+        return pe_grad_weight, pe_grad_bias
+
+    def pe_grad_sqnorm(self, deriv_pre_activ):
+        """
+        Compute squared norm of per-example gradients for the embedding layer.
+
+        Parameters:
+        -----------
+        deriv_pre_activ: derivative of loss function w.r.t. the embedding output
+        """
+        batch_size = deriv_pre_activ.size(0)
+
+        # For sequence inputs (3D)
+        if deriv_pre_activ.dim() == 3:
+            dLdZ = deriv_pre_activ.permute(1, 2, 0)
+            dLdZ *= dLdZ.size(0)
+
+            # Compute squared norm for each example
+            sq_norms = torch.zeros(batch_size, device=deriv_pre_activ.device)
+
+            # For each position in sequence
+            for pos in range(self.indices.size(1)):
+                pos_grads = dLdZ[pos]
+                # Add squared norms of gradients for each example
+                sq_norms += torch.sum(pos_grads.pow(2), dim=0)
+
+        # For single token inputs (2D)
+        else:
+            dLdZ = deriv_pre_activ * batch_size
+            sq_norms = torch.sum(dLdZ.pow(2), dim=1)
+
+        return sq_norms
+
+    def pe_grad_gradcomp(self, deriv_pre_activ, per_sample=True):
+        """
+        Prepare components for gradient computation in the embedding layer.
+
+        Parameters:
+        -----------
+        deriv_pre_activ: derivative of loss function w.r.t. the embedding output
+        per_sample: whether to return per-sample gradients
+        """
+        batch_size = deriv_pre_activ.size(0)
+        dLdZ = deriv_pre_activ * batch_size
+
+        # Create one-hot encoding for the indices
+        H = torch.zeros(self.indices.size(0), self.num_embeddings,
+                       device=deriv_pre_activ.device)
+        H.scatter_(1, self.indices.unsqueeze(1), 1)
 
         return dLdZ, H

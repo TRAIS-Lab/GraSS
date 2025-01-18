@@ -189,37 +189,70 @@ def flatten_params(tensors: Dict[str, Tensor]) -> Tensor:
     )
 
 
+# def _unflatten_params(tensors: Tensor, model: torch.nn.Module) -> Dict[str, Tensor]:
+#     """Unflatten a single tensor into a dictionary of tensors.
+
+#     This is a reverse operation of flatten_params. The transforming could enable the
+#     following usage of `functional_call` function.
+
+#     Args:
+#         tensors (Tensor): A single tensor containing the flattened parameters.
+#         model (torch.nn.Module): A torch.nn.Module object providing shape
+#             information and parameter names.
+
+#     Returns:
+#         Dict[str, Tensor]: A dictionary of tensors (e.g., something similar to
+#             model.named_parameters()).
+
+#     Note:
+#         The returned value will use the `tensor` as the value of the dictionary, rather
+#         than directly returning model.named_parameters().
+#     """
+#     model_params = {k: p for k, p in model.named_parameters() if p.requires_grad}
+#     shape_list = [p.shape for p in model_params.values()]
+
+#     def generator() -> Tensor:
+#         current_index = 0
+#         for shape in shape_list:
+#             size = math.prod(shape)
+#             yield tensors[current_index : current_index + size].reshape(shape)
+#             current_index += size
+
+#     return dict(zip(model_params.keys(), generator()))
+
+
+
 def _unflatten_params(tensors: Tensor, model: torch.nn.Module) -> Dict[str, Tensor]:
-    """Unflatten a single tensor into a dictionary of tensors.
-
-    This is a reverse operation of flatten_params. The transforming could enable the
-    following usage of `functional_call` function.
-
-    Args:
-        tensors (Tensor): A single tensor containing the flattened parameters.
-        model (torch.nn.Module): A torch.nn.Module object providing shape
-            information and parameter names.
-
-    Returns:
-        Dict[str, Tensor]: A dictionary of tensors (e.g., something similar to
-            model.named_parameters()).
-
-    Note:
-        The returned value will use the `tensor` as the value of the dictionary, rather
-        than directly returning model.named_parameters().
-    """
+    """Unflatten tensors handling tied weights using model information."""
     model_params = {k: p for k, p in model.named_parameters() if p.requires_grad}
-    shape_list = [p.shape for p in model_params.values()]
 
-    def generator() -> Tensor:
+    # Get tied weights info
+    tied_weights_keys = getattr(model.__class__, '_tied_weights_keys', [])
+
+    # For GPT2, we know lm_head.weight is tied to transformer.wte.weight
+    # Filter out tied weights from parameter list
+    unique_params = {}
+    for name, param in model_params.items():
+        if name not in tied_weights_keys:
+            unique_params[name] = param
+
+    # Generate tensors for unique parameters
+    shape_list = [p.shape for p in unique_params.values()]
+    def generator():
         current_index = 0
         for shape in shape_list:
             size = math.prod(shape)
-            yield tensors[current_index : current_index + size].reshape(shape)
+            yield tensors[current_index:current_index + size].reshape(shape)
             current_index += size
 
-    return dict(zip(model_params.keys(), generator()))
+    # Create result dictionary
+    result = dict(zip(unique_params.keys(), generator()))
 
+    # Add tied parameters
+    if 'lm_head.weight' in tied_weights_keys:
+        result['lm_head.weight'] = result['transformer.wte.weight']
+
+    return result
 
 def _unflatten_params_layerwise(
     tensors: Tuple[Tensor, ...],

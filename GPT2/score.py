@@ -59,7 +59,6 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from GCLayers.GCAutoModelForCausalLM import GCAutoModelForCausalLM
 from GCLayers.GCGPT2LMHeadModel import GCGPT2LMHeadModel
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
