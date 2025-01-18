@@ -1,46 +1,15 @@
-# from layers.linear import GCLinear
 import torch
-import torch.nn as nn
-import torch
-import numpy as np
-from modelgc import GCLinear
-import sys, os
-import time
+from GCLayers.GPT2 import GCLinear
 
-
-def replace_Linear(module):
-    for layer_str in dir(module):
-        layer = getattr(module, layer_str)
-        # print out shows <class 'torch.nn.modules.linear.Linear'>
-        if type(layer) == torch.nn.Linear:
-            new_layer = GCLinear(in_features=layer.in_features, out_features=layer.out_features)
-            new_layer.weight = layer.weight
-            new_layer.weight.requires_grad = True
-            del layer
-            print('Found Linear Layer: {}'.format(layer_str))
-            setattr(module, layer_str, new_layer)
-            print('Replaced Linear Layer: {}'.format(layer_str))
-    if hasattr(module,'children'):
-        for immediate_child_module in module.children():
-            replace_Linear(immediate_child_module)
-
-
-def replace_embedding(module):
-    for layer_str in dir(module):
-        layer = getattr(module, layer_str)
-        # print out shows <class 'torch.nn.modules.linear.Linear'>
-        if type(layer) == torch.nn.Embedding:
-            new_layer = GCLinear(in_features=layer.in_features, out_features=layer.out_features)
-            new_layer.weight = layer.weight
-            new_layer.weight.requires_grad = True
-            del layer
-            print('Found Linear Layer: {}'.format(layer_str))
-            setattr(module, layer_str, new_layer)
-            print('Replaced Linear Layer: {}'.format(layer_str))
-    if hasattr(module,'children'):
-        for immediate_child_module in module.children():
-            replace_Linear(immediate_child_module)
-
+def update_list(original, input_element):
+    # Check if the input is a list
+    if isinstance(input_element, list):
+        # Concatenate with the original list
+        return original + input_element
+    else:
+        # Append to the original list
+        original.append(input_element)
+        return original
 
 def find_GClayers(module):
 
@@ -58,338 +27,6 @@ def find_GClayers(module):
             GC_layers = GC_layers + find_GClayers(immediate_child_module)
 
     return GC_layers
-
-
-# if per_token is True, then return the gradient similarity between training loss
-# and per-token validation loss.
-def compute_TracIN_GC_per_iter_cover(model, device, train_data, val_data, optimizer,
-                               trainable_layers,
-                               return_tracin_and_similarity=True, return_val_similarity=True):
-
-    per_val=False
-
-    X, Y = train_data
-    X_val, Y_val = val_data
-    batch_size = X.shape[0]
-    n_val = X_val.shape[0]
-
-    optimizer.zero_grad()
-
-    dLdZ_a_val_lst = []
-
-    val_logits, val_loss = model(X_val, Y_val, return_per_token=True)
-
-    # # pick val_loss subset with loss smaller than 10
-    # print('val_loss fewer loss: ', val_loss.shape)
-
-    # scale each loss by exp(-loss), but exp(-loss) is treated as constant
-    val_loss_value = val_loss.detach().cpu().numpy()
-    val_loss = val_loss * torch.exp(-torch.from_numpy(val_loss_value)).to(device)
-
-    val_loss = val_loss.mean()
-
-    val_pre_acts = [layer.pre_activation for layer in trainable_layers]
-    Z_grad_val = torch.autograd.grad(val_loss, val_pre_acts, retain_graph=True)
-    assert len(trainable_layers) == len(Z_grad_val)
-    for layer, zgrad_val in zip(trainable_layers, Z_grad_val):
-        decompose_result = layer.pe_grad_gradcomp(zgrad_val, per_sample=True)
-        dLdZ_a_val_lst = update_list(dLdZ_a_val_lst, decompose_result)
-
-    optimizer.zero_grad()
-
-    # Compute individual training loss
-    train_logits, train_loss = model(X, Y)
-    pre_acts = [layer.pre_activation for layer in trainable_layers]
-    Z_grad = torch.autograd.grad(train_loss, pre_acts, retain_graph=False)
-
-    dLdZ_a_train_lst = []
-    for layer, zgrad in zip(trainable_layers, Z_grad):
-        decompose_result = layer.pe_grad_gradcomp(zgrad, per_sample=True)
-        dLdZ_a_train_lst = update_list(dLdZ_a_train_lst, decompose_result)
-
-    # Compute TracIN score
-    tracin_local_score = np.zeros( (batch_size, n_val) ) if per_val else np.zeros(batch_size)
-
-    if return_tracin_and_similarity:
-        similarity_local_score = np.zeros( (batch_size, batch_size) )
-
-    if return_val_similarity:
-        val_similarity_score = np.zeros( (n_val, n_val) )
-
-    assert len(dLdZ_a_train_lst) == len(dLdZ_a_val_lst)
-    for (dLdZ, a), (dLdZ_val, a_val) in zip(dLdZ_a_train_lst, dLdZ_a_val_lst):
-
-        dLdZ = dLdZ.detach()
-        a = a.detach()
-
-        dot_prod = grad_dotprod(dLdZ, a, dLdZ_val, a_val)
-
-        if per_val:
-            tracin_local_score += ((dot_prod).float()).cpu().detach().numpy()
-        else:
-            tracin_local_score += ((dot_prod).mean(dim=1).float()).cpu().detach().numpy()
-
-        if return_tracin_and_similarity:
-            dot_prod = grad_dotprod(dLdZ, a, dLdZ, a)
-            similarity_local_score += ((dot_prod).float()).cpu().detach().numpy()
-
-        if return_val_similarity:
-            dot_prod = grad_dotprod(dLdZ_val, a_val, dLdZ_val, a_val)
-            val_similarity_score += ((dot_prod).float()).cpu().detach().numpy()
-
-    if return_val_similarity:
-        return tracin_local_score, similarity_local_score, val_similarity_score
-
-    if return_tracin_and_similarity:
-        return tracin_local_score, similarity_local_score
-    else:
-        return tracin_local_score
-
-
-
-
-# if per_token is True, then return the gradient similarity between training loss
-# and per-token validation loss.
-def compute_TracIN_GC_per_iter_pertoken(model, device, train_data, val_data, optimizer,
-                               trainable_layers,
-                               return_tracin_and_similarity=True, return_val_similarity=True,
-                               token_id=0):
-
-    per_val=False
-
-    X, Y = train_data
-    X_val, Y_val = val_data
-    batch_size = X.shape[0]
-    n_val = X_val.shape[0]
-
-    optimizer.zero_grad()
-
-    dLdZ_a_val_lst = []
-    val_logits, val_loss = model(X_val, Y_val, return_per_token=True)
-
-    # val_loss_value = val_loss.detach().cpu().numpy()
-    # val_loss = val_loss * torch.exp(-torch.from_numpy(val_loss_value)).to(device)
-
-    val_loss_value = val_loss[:, token_id].item()
-    print('TokenLoss={}'.format(val_loss_value))
-
-    val_loss = val_loss[:, token_id]
-
-    val_pre_acts = [layer.pre_activation for layer in trainable_layers]
-    Z_grad_val = torch.autograd.grad(val_loss, val_pre_acts, retain_graph=True)
-    assert len(trainable_layers) == len(Z_grad_val)
-    for layer, zgrad_val in zip(trainable_layers, Z_grad_val):
-        decompose_result = layer.pe_grad_gradcomp(zgrad_val, per_sample=True)
-        dLdZ_a_val_lst = update_list(dLdZ_a_val_lst, decompose_result)
-
-    optimizer.zero_grad()
-
-    # Compute individual training loss
-    train_logits, train_loss = model(X, Y)
-    pre_acts = [layer.pre_activation for layer in trainable_layers]
-    Z_grad = torch.autograd.grad(train_loss, pre_acts, retain_graph=False)
-
-    dLdZ_a_train_lst = []
-    for layer, zgrad in zip(trainable_layers, Z_grad):
-        decompose_result = layer.pe_grad_gradcomp(zgrad, per_sample=True)
-        dLdZ_a_train_lst = update_list(dLdZ_a_train_lst, decompose_result)
-
-    # Compute TracIN score
-    tracin_local_score = np.zeros( (batch_size, n_val) ) if per_val else np.zeros(batch_size)
-
-    if return_tracin_and_similarity:
-        similarity_local_score = np.zeros( (batch_size, batch_size) )
-
-    if return_val_similarity:
-        val_similarity_score = np.zeros( (n_val, n_val) )
-
-    assert len(dLdZ_a_train_lst) == len(dLdZ_a_val_lst)
-    for (dLdZ, a), (dLdZ_val, a_val) in zip(dLdZ_a_train_lst, dLdZ_a_val_lst):
-
-        dLdZ = dLdZ.detach()
-        a = a.detach()
-
-        dot_prod = grad_dotprod(dLdZ, a, dLdZ_val, a_val)
-
-        if per_val:
-            tracin_local_score += ((dot_prod).float()).cpu().detach().numpy()
-        else:
-            tracin_local_score += ((dot_prod).mean(dim=1).float()).cpu().detach().numpy()
-
-        if return_tracin_and_similarity:
-            dot_prod = grad_dotprod(dLdZ, a, dLdZ, a)
-            similarity_local_score += ((dot_prod).float()).cpu().detach().numpy()
-
-        if return_val_similarity:
-            dot_prod = grad_dotprod(dLdZ_val, a_val, dLdZ_val, a_val)
-            val_similarity_score += ((dot_prod).float()).cpu().detach().numpy()
-
-    if return_val_similarity:
-        return tracin_local_score, similarity_local_score, val_similarity_score
-
-    if return_tracin_and_similarity:
-        return tracin_local_score, similarity_local_score, val_loss_value
-    else:
-        return tracin_local_score, val_loss_value
-
-
-
-
-def compute_value_per_iter_inrun(model, device, train_data, val_data, optimizer, trainable_layers,
-                                 return_tracin_and_similarity=True, return_val_similarity=True):
-
-    per_val=False
-
-    X, Y = train_data
-    X_val, Y_val = val_data
-    batch_size = X.shape[0]
-    n_val = X_val.shape[0]
-
-    X_combined = torch.cat((X, X_val), dim=0)
-    Y_combined = torch.cat((Y, Y_val), dim=0)
-
-    optimizer.zero_grad()
-
-    full_logits, full_loss = model(X_combined, Y_combined) # Aggregated loss
-    full_pre_acts = [layer.pre_activation for layer in trainable_layers]
-    Z_grad_full = torch.autograd.grad(full_loss, full_pre_acts, retain_graph=True)
-
-    dLdZ_a_val_lst = []
-    dLdZ_a_train_lst = []
-    for layer, zgrad_full in zip(trainable_layers, Z_grad_full):
-        decompose_result = layer.pe_grad_gradcomp(zgrad_full, per_sample=True)
-        val_1, val_2 = decompose_result
-
-        decompose_result_val = (val_1[batch_size:, :, :], val_2[batch_size:, :, :])
-        dLdZ_a_val_lst = update_list(dLdZ_a_val_lst, decompose_result_val)
-
-        decompose_result_train = (val_1[:batch_size, :, :], val_2[:batch_size, :, :])
-        dLdZ_a_train_lst = update_list(dLdZ_a_train_lst, decompose_result_train)
-
-    first_order_score = torch.zeros(batch_size, n_val, device='cuda') if per_val else torch.zeros(batch_size, device='cuda')
-
-    if return_tracin_and_similarity:
-        second_order_interaction = torch.zeros((batch_size, batch_size), device='cuda')
-
-    if return_val_similarity:
-        val_similarity_score = torch.zeros((n_val, n_val), device='cuda')
-
-    assert len(dLdZ_a_train_lst) == len(dLdZ_a_val_lst)
-
-    with torch.no_grad():
-        for (dLdZ, a), (dLdZ_val, a_val) in zip(dLdZ_a_train_lst, dLdZ_a_val_lst):
-
-            dot_prod = grad_dotprod(dLdZ, a, dLdZ_val, a_val)
-
-            if per_val:
-                first_order_score += (dot_prod).float()
-            else:
-                first_order_score += (dot_prod).mean(dim=1).float()
-
-            if return_tracin_and_similarity:
-                dot_prod = grad_dotprod(dLdZ, a, dLdZ, a)
-                second_order_interaction += dot_prod
-
-            if return_val_similarity:
-                dot_prod = grad_dotprod(dLdZ_val, a_val, dLdZ_val, a_val)
-                val_similarity_score += dot_prod
-
-    if return_val_similarity:
-        return first_order_score, second_order_interaction, val_similarity_score
-
-    if return_tracin_and_similarity:
-        return first_order_score, second_order_interaction
-    else:
-        return first_order_score
-
-
-
-
-
-def compute_TracIN_GC_per_iter(model, device, train_data, val_data, optimizer,
-                               trainable_layers,
-                               return_tracin_and_similarity=True, return_val_similarity=True):
-
-    per_val=False
-
-    X, Y = train_data
-    X_val, Y_val = val_data
-    batch_size = X.shape[0]
-    n_val = X_val.shape[0]
-
-    optimizer.zero_grad()
-
-    dLdZ_a_val_lst = []
-    val_logits, val_loss = model(X_val, Y_val)
-    val_pre_acts = [layer.pre_activation for layer in trainable_layers]
-    Z_grad_val = torch.autograd.grad(val_loss, val_pre_acts, retain_graph=True)
-    assert len(trainable_layers) == len(Z_grad_val)
-    for layer, zgrad_val in zip(trainable_layers, Z_grad_val):
-        decompose_result = layer.pe_grad_gradcomp(zgrad_val, per_sample=True)
-        dLdZ_a_val_lst = update_list(dLdZ_a_val_lst, decompose_result)
-
-    optimizer.zero_grad()
-
-    # Compute individual training loss
-    train_logits, train_loss = model(X, Y)
-    pre_acts = [layer.pre_activation for layer in trainable_layers]
-    Z_grad = torch.autograd.grad(train_loss, pre_acts, retain_graph=False)
-
-    dLdZ_a_train_lst = []
-    for layer, zgrad in zip(trainable_layers, Z_grad):
-        decompose_result = layer.pe_grad_gradcomp(zgrad, per_sample=True)
-        dLdZ_a_train_lst = update_list(dLdZ_a_train_lst, decompose_result)
-
-    # Compute TracIN score
-    tracin_local_score = np.zeros( (batch_size, n_val) ) if per_val else np.zeros(batch_size)
-
-    if return_tracin_and_similarity:
-        similarity_local_score = np.zeros( (batch_size, batch_size) )
-
-    if return_val_similarity:
-        val_similarity_score = np.zeros( (n_val, n_val) )
-
-    assert len(dLdZ_a_train_lst) == len(dLdZ_a_val_lst)
-    for (dLdZ, a), (dLdZ_val, a_val) in zip(dLdZ_a_train_lst, dLdZ_a_val_lst):
-
-        dLdZ = dLdZ.detach()
-        a = a.detach()
-
-        dot_prod = grad_dotprod(dLdZ, a, dLdZ_val, a_val)
-
-        if per_val:
-            tracin_local_score += ((dot_prod).float()).cpu().detach().numpy()
-        else:
-            tracin_local_score += ((dot_prod).mean(dim=1).float()).cpu().detach().numpy()
-
-        if return_tracin_and_similarity:
-            dot_prod = grad_dotprod(dLdZ, a, dLdZ, a)
-            similarity_local_score += ((dot_prod).float()).cpu().detach().numpy()
-
-        if return_val_similarity:
-            dot_prod = grad_dotprod(dLdZ_val, a_val, dLdZ_val, a_val)
-            val_similarity_score += ((dot_prod).float()).cpu().detach().numpy()
-
-    if return_val_similarity:
-        return tracin_local_score, similarity_local_score, val_similarity_score
-
-    if return_tracin_and_similarity:
-        return tracin_local_score, similarity_local_score
-    else:
-        return tracin_local_score
-
-
-
-def update_list(original, input_element):
-    # Check if the input is a list
-    if isinstance(input_element, list):
-        # Concatenate with the original list
-        return original + input_element
-    else:
-        # Append to the original list
-        original.append(input_element)
-        return original
-
 
 def grad_dotprod(A1, B1, A2, B2) -> torch.Tensor:
     """Compute gradient sample norm for the weight matrix in a linear layer."""
@@ -491,38 +128,159 @@ def _chunked_matmul(A1, A2, chunk_size=128):
 
     return result
 
+# def Ghost_Inner_Product(model, device, train_data, val_data, optimizer, trainable_layers,
+#                                  return_tracin_and_similarity=True, return_val_similarity=True):
 
-def greedy_selection(scores, interaction_matrix, K):
+#     per_val=False
+
+#     X, Y = train_data
+#     X_val, Y_val = val_data
+#     batch_size = X.shape[0]
+#     n_val = X_val.shape[0]
+
+#     X_combined = torch.cat((X, X_val), dim=0)
+#     Y_combined = torch.cat((Y, Y_val), dim=0)
+
+#     optimizer.zero_grad()
+
+#     full_logits, full_loss = model(X_combined, Y_combined) # Aggregated loss
+#     full_pre_acts = [layer.pre_activation for layer in trainable_layers]
+#     Z_grad_full = torch.autograd.grad(full_loss, full_pre_acts, retain_graph=True)
+
+#     dLdZ_a_val_lst = []
+#     dLdZ_a_train_lst = []
+#     for layer, zgrad_full in zip(trainable_layers, Z_grad_full):
+#         decompose_result = layer.pe_grad_gradcomp(zgrad_full, per_sample=True)
+#         val_1, val_2 = decompose_result
+
+#         decompose_result_val = (val_1[batch_size:, :, :], val_2[batch_size:, :, :])
+#         dLdZ_a_val_lst = update_list(dLdZ_a_val_lst, decompose_result_val)
+
+#         decompose_result_train = (val_1[:batch_size, :, :], val_2[:batch_size, :, :])
+#         dLdZ_a_train_lst = update_list(dLdZ_a_train_lst, decompose_result_train)
+
+#     first_order_score = torch.zeros(batch_size, n_val, device='cuda') if per_val else torch.zeros(batch_size, device='cuda')
+
+#     if return_tracin_and_similarity:
+#         second_order_interaction = torch.zeros((batch_size, batch_size), device='cuda')
+
+#     if return_val_similarity:
+#         val_similarity_score = torch.zeros((n_val, n_val), device='cuda')
+
+#     assert len(dLdZ_a_train_lst) == len(dLdZ_a_val_lst)
+
+#     with torch.no_grad():
+#         for (dLdZ, a), (dLdZ_val, a_val) in zip(dLdZ_a_train_lst, dLdZ_a_val_lst):
+
+#             dot_prod = grad_dotprod(dLdZ, a, dLdZ_val, a_val)
+
+#             if per_val:
+#                 first_order_score += (dot_prod).float()
+#             else:
+#                 first_order_score += (dot_prod).mean(dim=1).float()
+
+#             if return_tracin_and_similarity:
+#                 dot_prod = grad_dotprod(dLdZ, a, dLdZ, a)
+#                 second_order_interaction += dot_prod
+
+#             if return_val_similarity:
+#                 dot_prod = grad_dotprod(dLdZ_val, a_val, dLdZ_val, a_val)
+#                 val_similarity_score += dot_prod
+
+#     if return_val_similarity:
+#         return first_order_score, second_order_interaction, val_similarity_score
+
+#     if return_tracin_and_similarity:
+#         return first_order_score, second_order_interaction
+#     else:
+#         return first_order_score
+
+def Ghost_Inner_Product(model, train_dataloader, test_dataloader, trainable_layers, projector_kwargs=None, device='cuda'):
     """
-    Select K data points based on the highest scores, dynamically updating scores
-    by subtracting interactions with previously selected data points.
-
-    Parameters:
-    - scores: A numpy array of initial scores for each data point.
-    - interaction_matrix: A numpy matrix of pairwise interactions between data points.
-    - K: The number of data points to select.
-
-    Returns:
-    - selected_indices: Indices of the selected data points.
+    Adapted version of Ghost_Inner_Product to work with DataLoader format
     """
-    # Ensure scores is a mutable numpy array to update it in-place
-    scores = scores.copy()
-    selected_indices = []
+    # Collect all data from dataloaders
+    train_input_ids, train_attention_masks, train_labels = [], [], []
+    eval_input_ids, eval_attention_masks, eval_labels = [], [], []
 
-    for _ in range(K):
-        # Select the index with the highest score
-        idx_max = np.argmax(scores)
-        selected_indices.append(idx_max)
+    # Gather training data
+    for batch in train_dataloader:
+        train_input_ids.append(batch["input_ids"])
+        train_attention_masks.append(batch["attention_mask"])
+        train_labels.append(batch["labels"])
 
-        # Update scores by subtracting interactions with the selected data point
-        scores -= interaction_matrix[idx_max, :]
+    # Gather evaluation data
+    for batch in test_dataloader:
+        eval_input_ids.append(batch["input_ids"])
+        eval_attention_masks.append(batch["attention_mask"])
+        eval_labels.append(batch["labels"])
 
-        # Set the score of the selected data point to a very large negative value
-        # to ensure it's not selected again
-        scores[idx_max] = -np.inf
+    # Concatenate all batches
+    train_input_ids = torch.cat(train_input_ids, dim=0).to(device)
+    train_attention_masks = torch.cat(train_attention_masks, dim=0).to(device)
+    train_labels = torch.cat(train_labels, dim=0).to(device)
 
-    return selected_indices
+    eval_input_ids = torch.cat(eval_input_ids, dim=0).to(device)
+    eval_attention_masks = torch.cat(eval_attention_masks, dim=0).to(device)
+    eval_labels = torch.cat(eval_labels, dim=0).to(device)
+
+    batch_size = train_input_ids.shape[0]
+    n_val = eval_input_ids.shape[0]
+
+    # Combine all data
+    combined_input_ids = torch.cat((train_input_ids, eval_input_ids), dim=0)
+    combined_attention_masks = torch.cat((train_attention_masks, eval_attention_masks), dim=0)
+    combined_labels = torch.cat((train_labels, eval_labels), dim=0)
+
+    # Forward pass with all data
+    outputs = model(
+        input_ids=combined_input_ids,
+        attention_mask=combined_attention_masks,
+        labels=combined_labels
+    )
+    full_loss = outputs.loss
+
+    # Get pre-activations from trainable layers
+    full_pre_acts = [layer.pre_activation for layer in trainable_layers]
+
+    # Calculate gradients
+    Z_grad_full = torch.autograd.grad(full_loss, full_pre_acts, retain_graph=True)
+
+    dLdZ_a_val_lst = []
+    dLdZ_a_train_lst = []
 
 
+    if projector_kwargs is not None:
+        threshold = projector_kwargs.get("threshold", None)
+        projector_kwargs.pop("threshold")
 
 
+    for layer, zgrad_full in zip(trainable_layers, Z_grad_full):
+        decompose_result = layer.pe_grad_gradcomp(zgrad_full, per_sample=True)
+        val_1, val_2 = decompose_result
+
+        # Split for validation and training
+        decompose_result_val = (val_1[batch_size:, :, :], val_2[batch_size:, :, :])
+        dLdZ_a_val_lst.append(decompose_result_val)
+
+        decompose_result_train = (val_1[:batch_size, :, :], val_2[:batch_size, :, :])
+        dLdZ_a_train_lst.append(decompose_result_train)
+
+    # Initialize scores
+    grad_dot = torch.zeros(batch_size, n_val, device=device)
+    # second_order_interaction = torch.zeros((batch_size, batch_size), device=device) if return_tracin_and_similarity else None
+    # val_similarity_score = torch.zeros((n_val, n_val), device=device) if return_val_similarity else None
+
+    # Calculate scores
+    with torch.no_grad():
+        for (dLdZ, a), (dLdZ_val, a_val) in zip(dLdZ_a_train_lst, dLdZ_a_val_lst):
+            dot_prod = grad_dotprod(dLdZ, a, dLdZ_val, a_val)
+            grad_dot += dot_prod
+
+            # dot_prod = grad_dotprod(dLdZ, a, dLdZ, a)
+            # second_order_interaction += dot_prod
+
+            # dot_prod = grad_dotprod(dLdZ_val, a_val, dLdZ_val, a_val)
+            # val_similarity_score += dot_prod
+
+    return grad_dot

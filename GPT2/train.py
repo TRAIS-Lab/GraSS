@@ -53,7 +53,7 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from GCGPT2 import CustomGPT2LMHeadModel
+from GCLayers.GPT2 import CustomGPT2LMHeadModel
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 

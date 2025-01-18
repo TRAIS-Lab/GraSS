@@ -34,6 +34,10 @@ import csv
 from pathlib import PosixPath
 import time
 
+import sys
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(parent_dir)
+
 import datasets
 import torch
 from accelerate import Accelerator, DistributedType
@@ -55,7 +59,7 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from GCGPT2 import CustomGPT2LMHeadModel
+from GCLayers.GPT2 import CustomGPT2LMHeadModel
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
@@ -522,9 +526,6 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> dattri Code begins here >>>>>>>>>>>>>>>>>>>>>
-    import sys
-    parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-    sys.path.append(parent_dir)
     from _dattri.benchmark.utils import SubsetSampler
     from _dattri.task import AttributionTask
     from _dattri.algorithm.tracin import TracInAttributor
@@ -533,7 +534,8 @@ def main():
     eval_dataset = lm_datasets["validation"]
 
     # TODO debugging: just include the first eval test point in the eval_dataset
-    # eval_dataset = eval_dataset.select(range(1))
+    train_dataset = train_dataset.select(range(4))
+    eval_dataset = eval_dataset.select(range(1))
 
     train_sampler = SubsetSampler(range(len(train_dataset)))
 
@@ -543,10 +545,10 @@ def main():
 
     # DataLoaders creation:
     train_dataloader = DataLoader(
-        train_dataset, collate_fn=default_data_collator, batch_size=32, sampler=train_sampler
+        train_dataset, collate_fn=default_data_collator, batch_size=4, sampler=train_sampler
     )
     eval_dataloader = DataLoader(
-        eval_dataset, collate_fn=default_data_collator, batch_size=32, shuffle=False
+        eval_dataset, collate_fn=default_data_collator, batch_size=4, shuffle=False
     )
 
     proj_method, proj_dim = None, None
@@ -590,13 +592,39 @@ def main():
     if args.GIP:
         print("Grad-Dot with Ghost Inner-Product")
 
+        from GCLayers.helper import find_GClayers, Ghost_Inner_Product
+
+        mode = "SGD"
+        trainable_layers = find_GClayers(model)
+
+        print(f"Trainable layers: {trainable_layers}")
+
         torch.cuda.reset_peak_memory_stats("cuda")
 
         # time the attribution
         torch.cuda.synchronize()
         start = time.time()
 
-        # implement GIP
+        grad_dot = Ghost_Inner_Product(
+            model=model.cuda(),
+            train_dataloader=train_dataloader,
+            test_dataloader=eval_dataloader,
+            trainable_layers=trainable_layers,
+            projector_kwargs=projector_kwargs,
+            device="cuda",
+        )
+
+        if mode == 'adam':
+            # For Adam optimizer, we need to normalize the values by the norm of the gradients.
+            # norm = torch.sqrt( torch.diag(second_order_interaction) + 1e-8 )
+            # grad_dot = grad_dot / norm
+
+            # Note: the following code omit a lr factor for both order values.
+            score = grad_dot
+            # second_order_value = score - np.sum(second_order_interaction, axis=1) * lr / 2
+        else:
+            score = grad_dot * 1e-3
+            # second_order_value = score - torch.sum(second_order_interaction, axis=1) * lr / 2
 
         torch.cuda.synchronize()
         end = time.time()
@@ -636,7 +664,7 @@ def main():
             device="cuda",
         )
 
-        # attributor.cache(train_dataloader) # Grad-Dot doesn't implement cache
+        attributor.cache(train_dataloader)
 
         torch.cuda.reset_peak_memory_stats("cuda")
 
@@ -645,7 +673,7 @@ def main():
         start = time.time()
 
         with torch.no_grad():
-            score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=eval_dataloader)
+            score = attributor.attribute(test_dataloader=eval_dataloader)
 
         torch.cuda.synchronize()
         end = time.time()
@@ -655,14 +683,24 @@ def main():
     print(f"Time taken: {end - start} seconds")
     print(f"Peak memory usage: {peak_memory} MB")
 
-    if args.proj is not None and args.threshold is not None:
-        torch.save(score, f"./result/score_{proj_method}-{proj_dim}_threshold-{args.threshold}.pt")
-    elif args.proj is not None:
-        torch.save(score, f"./result/score_{proj_method}-{proj_dim}.pt")
-    elif args.threshold is not None:
-        torch.save(score, f"./result/score_threshold-{args.threshold}.pt")
+    if args.GIP:
+        if args.proj is not None and args.threshold is not None:
+            torch.save(score, f"./result/score_{proj_method}-{proj_dim}_threshold-{args.threshold}_GIP.pt")
+        elif args.proj is not None:
+            torch.save(score, f"./result/score_{proj_method}-{proj_dim}_GIP.pt")
+        elif args.threshold is not None:
+            torch.save(score, f"./result/score_threshold-{args.threshold}_GIP.pt")
+        else:
+            torch.save(score, f"./result/score_GIP.pt")
     else:
-        torch.save(score, f"./result/score.pt")
+        if args.proj is not None and args.threshold is not None:
+            torch.save(score, f"./result/score_{proj_method}-{proj_dim}_threshold-{args.threshold}.pt")
+        elif args.proj is not None:
+            torch.save(score, f"./result/score_{proj_method}-{proj_dim}.pt")
+        elif args.threshold is not None:
+            torch.save(score, f"./result/score_threshold-{args.threshold}.pt")
+        else:
+            torch.save(score, f"./result/score.pt")
 
 
 if __name__ == "__main__":

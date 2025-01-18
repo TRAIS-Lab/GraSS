@@ -1,4 +1,4 @@
-from transformers import GPT2PreTrainedModel, GPT2Config
+from transformers import GPT2PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
 import torch
 import torch.nn as nn
