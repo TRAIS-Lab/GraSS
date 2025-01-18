@@ -1,30 +1,12 @@
 import torch
-from GCLayers.GPT2 import GCLinear
+from GCLayers.linear import GCLinear
 
-def update_list(original, input_element):
-    # Check if the input is a list
-    if isinstance(input_element, list):
-        # Concatenate with the original list
-        return original + input_element
-    else:
-        # Append to the original list
-        original.append(input_element)
-        return original
-
-def find_GClayers(module):
-
+def find_GClayers(model):
     GC_layers = []
 
-    for layer_str in dir(module):
-        layer = getattr(module, layer_str)
-
-        if type(layer) in [GCLinear]:
-            # print('Found GC Layer: {}'.format(layer_str))
-            GC_layers.append( layer )
-
-    if hasattr(module,'children'):
-        for immediate_child_module in module.children():
-            GC_layers = GC_layers + find_GClayers(immediate_child_module)
+    for module in model.modules():
+        if isinstance(module, GCLinear):
+            GC_layers.append(module)
 
     return GC_layers
 
@@ -39,7 +21,6 @@ def grad_dotprod(A1, B1, A2, B2) -> torch.Tensor:
 
 
 def grad_dotprod_non_sequential(A1, B1, A2, B2):
-
     dot_prod_1 = torch.matmul(A1, A2.T)
     dot_prod_2 = torch.matmul(B1, B2.T)
     dot_prod = dot_prod_1*dot_prod_2
@@ -48,7 +29,6 @@ def grad_dotprod_non_sequential(A1, B1, A2, B2):
 
 
 def grad_dotprod_sequential(A1, B1, A2, B2):
-
     (b, t, p), (_, _, d) = A1.size(), B1.size()
     nval, _, _ = A2.size()
 
@@ -127,73 +107,6 @@ def _chunked_matmul(A1, A2, chunk_size=128):
         result += torch.matmul(A1_chunk, A2_chunk)
 
     return result
-
-# def Ghost_Inner_Product(model, device, train_data, val_data, optimizer, trainable_layers,
-#                                  return_tracin_and_similarity=True, return_val_similarity=True):
-
-#     per_val=False
-
-#     X, Y = train_data
-#     X_val, Y_val = val_data
-#     batch_size = X.shape[0]
-#     n_val = X_val.shape[0]
-
-#     X_combined = torch.cat((X, X_val), dim=0)
-#     Y_combined = torch.cat((Y, Y_val), dim=0)
-
-#     optimizer.zero_grad()
-
-#     full_logits, full_loss = model(X_combined, Y_combined) # Aggregated loss
-#     full_pre_acts = [layer.pre_activation for layer in trainable_layers]
-#     Z_grad_full = torch.autograd.grad(full_loss, full_pre_acts, retain_graph=True)
-
-#     dLdZ_a_val_lst = []
-#     dLdZ_a_train_lst = []
-#     for layer, zgrad_full in zip(trainable_layers, Z_grad_full):
-#         decompose_result = layer.pe_grad_gradcomp(zgrad_full, per_sample=True)
-#         val_1, val_2 = decompose_result
-
-#         decompose_result_val = (val_1[batch_size:, :, :], val_2[batch_size:, :, :])
-#         dLdZ_a_val_lst = update_list(dLdZ_a_val_lst, decompose_result_val)
-
-#         decompose_result_train = (val_1[:batch_size, :, :], val_2[:batch_size, :, :])
-#         dLdZ_a_train_lst = update_list(dLdZ_a_train_lst, decompose_result_train)
-
-#     first_order_score = torch.zeros(batch_size, n_val, device='cuda') if per_val else torch.zeros(batch_size, device='cuda')
-
-#     if return_tracin_and_similarity:
-#         second_order_interaction = torch.zeros((batch_size, batch_size), device='cuda')
-
-#     if return_val_similarity:
-#         val_similarity_score = torch.zeros((n_val, n_val), device='cuda')
-
-#     assert len(dLdZ_a_train_lst) == len(dLdZ_a_val_lst)
-
-#     with torch.no_grad():
-#         for (dLdZ, a), (dLdZ_val, a_val) in zip(dLdZ_a_train_lst, dLdZ_a_val_lst):
-
-#             dot_prod = grad_dotprod(dLdZ, a, dLdZ_val, a_val)
-
-#             if per_val:
-#                 first_order_score += (dot_prod).float()
-#             else:
-#                 first_order_score += (dot_prod).mean(dim=1).float()
-
-#             if return_tracin_and_similarity:
-#                 dot_prod = grad_dotprod(dLdZ, a, dLdZ, a)
-#                 second_order_interaction += dot_prod
-
-#             if return_val_similarity:
-#                 dot_prod = grad_dotprod(dLdZ_val, a_val, dLdZ_val, a_val)
-#                 val_similarity_score += dot_prod
-
-#     if return_val_similarity:
-#         return first_order_score, second_order_interaction, val_similarity_score
-
-#     if return_tracin_and_similarity:
-#         return first_order_score, second_order_interaction
-#     else:
-#         return first_order_score
 
 def Ghost_Inner_Product(model, train_dataloader, test_dataloader, trainable_layers, projector_kwargs=None, device='cuda'):
     """

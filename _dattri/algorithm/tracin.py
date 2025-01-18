@@ -89,7 +89,7 @@ class TracInAttributor(BaseAttributor):
                 ckpt_idx=ckpt_idx,
                 layer_name=self.layer_name,
             )
-
+            print(parameters.shape)
             if self.layer_name is not None:
                 self.grad_loss_func = self.task.get_grad_loss_func(
                     in_dims=(None, 0),
@@ -113,7 +113,6 @@ class TracInAttributor(BaseAttributor):
 
                 # Compute gradients
                 grad_t = self.grad_loss_func(parameters, train_batch_data)
-                print(grad_t.shape)
                 # Apply thresholding if specified
                 if self.projector_kwargs is not None and self.threshold is not None:
                     grad_t = torch.where(

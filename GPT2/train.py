@@ -32,6 +32,10 @@ from itertools import chain
 from pathlib import Path
 import csv
 
+import sys
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(parent_dir)
+
 import datasets
 import torch
 from accelerate import Accelerator, DistributedType
@@ -53,11 +57,12 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from GCLayers.GPT2 import CustomGPT2LMHeadModel
+from GCLayers.GCAutoModelForCausalLM import GCAutoModelForCausalLM
+from GCLayers.GCGPT2LMHeadModel import GCGPT2LMHeadModel
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
-from .._dattri.benchmark.utils import SubsetSampler
+from _dattri.benchmark.utils import SubsetSampler
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -416,19 +421,16 @@ def main():
         )
 
     if args.model_name_or_path:
-        base_model = AutoModelForCausalLM.from_pretrained(
+        model = GCGPT2LMHeadModel.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
             config=config,
             low_cpu_mem_usage=args.low_cpu_mem_usage,
             trust_remote_code=args.trust_remote_code,
         )
-
-        model = CustomGPT2LMHeadModel(config)
-        model.load_state_dict(base_model.state_dict(), strict=False)
     else:
         logger.info("Training new model from scratch")
-        model = CustomGPT2LMHeadModel.from_config(config, trust_remote_code=args.trust_remote_code)
+        model = GCGPT2LMHeadModel.from_config(config, trust_remote_code=args.trust_remote_code)
 
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.

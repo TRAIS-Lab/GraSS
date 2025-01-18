@@ -1203,7 +1203,7 @@ def sjlt(vecs, proj_dim, rand_indices, rand_signs, c=5, blow_up=1):
 
     return vecs_p / (c ** 0.5)
 
-def SJLT_reverse(batch_vec, proj_dim, pos_indices=None, neg_indices=None, c=2):
+def SJLT_reverse(batch_vec, proj_dim, pos_indices=None, neg_indices=None, c=5):
     """
     Backward SJLT implementation that processes entire batch at once.
 

@@ -59,7 +59,8 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from GCLayers.GPT2 import CustomGPT2LMHeadModel
+from GCLayers.GCAutoModelForCausalLM import GCAutoModelForCausalLM
+from GCLayers.GCGPT2LMHeadModel import GCGPT2LMHeadModel
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
@@ -439,19 +440,16 @@ def main():
         )
 
     if args.model_name_or_path:
-        base_model = AutoModelForCausalLM.from_pretrained(
+        model = GCGPT2LMHeadModel.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
             config=config,
             low_cpu_mem_usage=args.low_cpu_mem_usage,
             trust_remote_code=args.trust_remote_code,
         )
-
-        model = CustomGPT2LMHeadModel(config=config)
-        model.load_state_dict(base_model.state_dict(), strict=False)
     else:
         logger.info("Training new model from scratch")
-        model = CustomGPT2LMHeadModel.from_config(config, trust_remote_code=args.trust_remote_code)
+        model = GCGPT2LMHeadModel.from_config(config, trust_remote_code=args.trust_remote_code)
 
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
@@ -644,11 +642,10 @@ def main():
                         for i in range(5)]
 
         def checkpoints_load_func(model, checkpoint):
-            base_model = AutoModelForCausalLM.from_pretrained(checkpoint)
-            model.load_state_dict(base_model.state_dict(), strict=False)
-            model.cuda()
+            model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda()
             model.eval()
             return model
+
 
         task = AttributionTask(loss_func=f, model=model,
                             checkpoints=checkpoints[0],
