@@ -527,7 +527,7 @@ def main():
     sys.path.append(parent_dir)
     from _dattri.benchmark.utils import SubsetSampler
     from _dattri.task import AttributionTask
-    from _dattri.algorithm.tracin import TracInAttributor
+    from _dattri.algorithm.trak import TRAKAttributor
 
     train_dataset = lm_datasets["train"]
     eval_dataset = lm_datasets["validation"]
@@ -543,10 +543,10 @@ def main():
 
     # DataLoaders creation:
     train_dataloader = DataLoader(
-        train_dataset, collate_fn=default_data_collator, batch_size=32, sampler=train_sampler
+        train_dataset, collate_fn=default_data_collator, batch_size=4, sampler=train_sampler
     )
     eval_dataloader = DataLoader(
-        eval_dataset, collate_fn=default_data_collator, batch_size=32, shuffle=False
+        eval_dataset, collate_fn=default_data_collator, batch_size=4, shuffle=False
     )
 
     proj_method, proj_dim = None, None
@@ -611,6 +611,12 @@ def main():
             logp = -outputs.loss
             return logp - torch.log(1 - torch.exp(logp))
 
+        def m(params, batch):
+            outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(),
+                                                kwargs={"attention_mask": batch["attention_mask"].cuda(),
+                                                        "labels": batch["labels"].cuda()})
+            p = torch.exp(-outputs.loss)
+            return p
 
         checkpoints = [f"{args.output_dir}/{i}"
                         for i in range(5)]
@@ -626,17 +632,14 @@ def main():
                             checkpoints=checkpoints[0],
                             checkpoints_load_func=checkpoints_load_func)
 
-        ensemble = 1 # For Grad-Dot, 10 if TracIn
-        normalized_grad = False # For Grad-Dot, True if Grad-Cos
-        attributor = TracInAttributor(
+        attributor = TRAKAttributor(
             task=task,
-            weight_list=torch.ones(ensemble) * 1e-3,
-            normalized_grad=normalized_grad,
-            projector_kwargs=projector_kwargs,
+            correct_probability_func=m,
             device="cuda",
+            projector_kwargs=projector_kwargs,
         )
 
-        # attributor.cache(train_dataloader) # Grad-Dot doesn't implement cache
+        attributor.cache(train_dataloader)
 
         torch.cuda.reset_peak_memory_stats("cuda")
 

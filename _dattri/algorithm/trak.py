@@ -28,6 +28,7 @@ DEFAULT_PROJECTOR_KWARGS = {
     "proj_seed": 0,
     "device": "cpu",
     "use_half_precision": False,
+    "threshold": None,
 }
 
 
@@ -82,6 +83,9 @@ class TRAKAttributor(BaseAttributor):
         self.projector_kwargs = DEFAULT_PROJECTOR_KWARGS
         if projector_kwargs is not None:
             self.projector_kwargs.update(projector_kwargs)
+            self.threshold = projector_kwargs.get("threshold", None)
+            self.projector_kwargs.pop("threshold")
+
         self.layer_name = layer_name
         self.device = device
         self.grad_target_func = self.task.get_grad_target_func(in_dims=(None, 0))
