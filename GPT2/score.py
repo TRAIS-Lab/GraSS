@@ -528,6 +528,9 @@ def main():
     train_dataset = lm_datasets["train"]
     eval_dataset = lm_datasets["validation"]
 
+    # debugging: just include the first eval test point in the eval_dataset
+    eval_dataset = eval_dataset.select(range(1))
+
     train_sampler = SubsetSampler(range(len(train_dataset)))
 
     # Dataset length
