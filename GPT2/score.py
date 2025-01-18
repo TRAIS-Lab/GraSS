@@ -530,9 +530,9 @@ def main():
     train_dataset = lm_datasets["train"]
     eval_dataset = lm_datasets["validation"]
 
-    # TODO debugging: just include the first eval test point in the eval_dataset
-    train_dataset = train_dataset.select(range(4))
-    eval_dataset = eval_dataset.select(range(1))
+    # # TODO debugging: just include the first eval test point in the eval_dataset
+    # train_dataset = train_dataset.select(range(4))
+    # eval_dataset = eval_dataset.select(range(1))
 
     train_sampler = SubsetSampler(range(len(train_dataset)))
 
@@ -591,10 +591,7 @@ def main():
 
         from GCLayers.helper import find_GClayers, Ghost_Inner_Product
 
-        mode = "SGD"
         trainable_layers = find_GClayers(model)
-
-        print(f"Trainable layers: {trainable_layers}")
 
         torch.cuda.reset_peak_memory_stats("cuda")
 
@@ -611,17 +608,7 @@ def main():
             device="cuda",
         )
 
-        if mode == 'adam':
-            # For Adam optimizer, we need to normalize the values by the norm of the gradients.
-            # norm = torch.sqrt( torch.diag(second_order_interaction) + 1e-8 )
-            # grad_dot = grad_dot / norm
-
-            # Note: the following code omit a lr factor for both order values.
-            score = grad_dot
-            # second_order_value = score - np.sum(second_order_interaction, axis=1) * lr / 2
-        else:
-            score = grad_dot * 1e-3
-            # second_order_value = score - torch.sum(second_order_interaction, axis=1) * lr / 2
+        score = grad_dot * 1e-3
 
         torch.cuda.synchronize()
         end = time.time()
@@ -637,8 +624,7 @@ def main():
             return logp - torch.log(1 - torch.exp(logp))
 
 
-        checkpoints = [f"{args.output_dir}/{i}"
-                        for i in range(5)]
+        checkpoints = [f"{args.output_dir}/{i}" for i in range(1)] # Grad-Dot only requires one checkpoint
 
         def checkpoints_load_func(model, checkpoint):
             model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda()
@@ -650,7 +636,7 @@ def main():
                             checkpoints=checkpoints[0],
                             checkpoints_load_func=checkpoints_load_func)
 
-        ensemble = 1 # For Grad-Dot, 10 if TracIn
+        ensemble = len(checkpoints) # For Grad-Dot, 10 if TracIn
         normalized_grad = False # For Grad-Dot, True if Grad-Cos
         attributor = TracInAttributor(
             task=task,

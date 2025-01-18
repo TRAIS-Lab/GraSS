@@ -32,6 +32,10 @@ from itertools import chain
 from pathlib import Path
 import csv
 
+import sys
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(parent_dir)
+
 import datasets
 import torch
 from accelerate import Accelerator, DistributedType
@@ -53,6 +57,7 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
+from GCLayers.GCGPT2LMHeadModel import GCGPT2LMHeadModel
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
@@ -415,7 +420,7 @@ def main():
         )
 
     if args.model_name_or_path:
-        model = AutoModelForCausalLM.from_pretrained(
+        model = GCGPT2LMHeadModel.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
             config=config,
@@ -424,7 +429,7 @@ def main():
         )
     else:
         logger.info("Training new model from scratch")
-        model = AutoModelForCausalLM.from_config(config, trust_remote_code=args.trust_remote_code)
+        model = GCGPT2LMHeadModel.from_config(config, trust_remote_code=args.trust_remote_code)
 
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
@@ -499,7 +504,6 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> dattri Code begins here >>>>>>>>>>>>>>>>>>>>>
-
     train_dataset = lm_datasets["train"]
     eval_dataset = lm_datasets["validation"]
 
@@ -532,7 +536,7 @@ def main():
                     for i in range(50)]
     result_list = []
     for checkpoint in checkpoints:
-        model = AutoModelForCausalLM.from_pretrained(checkpoint).cuda()
+        model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda()
         params = {k: p for k, p in model.named_parameters() if p.requires_grad}
 
         @flatten_func(model)

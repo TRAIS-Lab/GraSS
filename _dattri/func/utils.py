@@ -221,7 +221,6 @@ def flatten_params(tensors: Dict[str, Tensor]) -> Tensor:
 #     return dict(zip(model_params.keys(), generator()))
 
 
-
 def _unflatten_params(tensors: Tensor, model: torch.nn.Module) -> Dict[str, Tensor]:
     """Unflatten tensors handling tied weights using model information."""
     model_params = {k: p for k, p in model.named_parameters() if p.requires_grad}
@@ -253,6 +252,7 @@ def _unflatten_params(tensors: Tensor, model: torch.nn.Module) -> Dict[str, Tens
         result['lm_head.weight'] = result['transformer.wte.weight']
 
     return result
+
 
 def _unflatten_params_layerwise(
     tensors: Tuple[Tensor, ...],

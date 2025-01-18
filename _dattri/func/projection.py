@@ -326,7 +326,7 @@ class CudaProjector(AbstractProjector):
                 raise ModuleNotFoundError(msg) from None
         elif self.method == "SJLT":
             # test run at init time if projection goes through
-            # SJLT(torch.zeros(8, 1_000, device="cuda"), 512, c=10)
+            # SJLT(torch.zeros(8, 1_000, device="cuda"), 512, c=5)
             pass
 
     def project(
@@ -877,7 +877,7 @@ def make_random_projector(
                 raise
         elif method == "SJLT":
             # test_feature = torch.ones(1, feature_dim).cuda()
-            # SJLT(test_feature, proj_dim, c=10)
+            # SJLT(test_feature, proj_dim, c=5)
             pass
 
         projector = CudaProjector
