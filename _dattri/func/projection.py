@@ -326,7 +326,8 @@ class CudaProjector(AbstractProjector):
                 raise ModuleNotFoundError(msg) from None
         elif self.method == "SJLT":
             # test run at init time if projection goes through
-            SJLT(torch.zeros(8, 1_000, device="cuda"), 512, c=10)
+            # SJLT(torch.zeros(8, 1_000, device="cuda"), 512, c=10)
+            pass
 
     def project(
         self,
@@ -389,8 +390,9 @@ class CudaProjector(AbstractProjector):
             result = SJLT(
                 features,
                 self.proj_dim,
-                self.seed + int(1e4) * ensemble_id,
-                c=20,
+                seed=self.seed + int(1e4) * ensemble_id,
+                batch_size=effective_batch_size,
+                c=5,
             )
 
         return result
@@ -874,8 +876,9 @@ def make_random_projector(
                 projector = BasicProjector
                 raise
         elif method == "SJLT":
-            test_feature = torch.ones(1, feature_dim).cuda()
-            SJLT(test_feature, proj_dim, c=10)
+            # test_feature = torch.ones(1, feature_dim).cuda()
+            # SJLT(test_feature, proj_dim, c=10)
+            pass
 
         projector = CudaProjector
         using_cuda_projector = True
@@ -1113,7 +1116,51 @@ def random_project(
 
     return _random_project_func
 
-def SJLT(vecs, proj_dim, seed=0, rand_indices=None, rand_signs=None, c=2, blow_up=1):
+def SJLT(vecs, proj_dim, rand_indices=None, rand_signs=None, seed=0, batch_size=32, c=5, blow_up=1):
+    """
+    Batched SJLT implementation that processes input vectors in smaller batches
+    Args:
+        vecs (torch.Tensor): Input tensor of shape [num_vectors, original_dim]
+        proj_dim (int): Target projection dimension
+        seed (int): Random seed for reproducibility. Default: 0
+        batch_size (int): Number of vectors to process at once. Default: 32
+        c (int): Sparsity parameter. Default: 5
+        blow_up (int): Intermediate dimension multiplier. Default: 1
+    Returns:
+        torch.Tensor: Projected tensor of shape [num_vectors, proj_dim]
+    """
+    num_vectors, original_dim = vecs.size()
+    device = vecs.device
+
+    if rand_indices is None or rand_signs is None:
+        torch.manual_seed(seed)
+        rand_indices = torch.randint(proj_dim * blow_up, (original_dim, c), device=device)
+        rand_signs = torch.randint(0, 2, (original_dim, c), device=device) * 2 - 1
+
+    # Initialize output tensor
+    output = torch.zeros(num_vectors, proj_dim, device=device)
+
+    # Process in batches
+    for i in range(0, num_vectors, batch_size):
+        end_idx = min(i + batch_size, num_vectors)
+        batch = vecs[i:end_idx]
+
+        # Process batch using original SJLT function
+        batch_output = sjlt(
+            batch,
+            proj_dim,
+            rand_indices=rand_indices,
+            rand_signs=rand_signs,
+            c=c,
+            blow_up=blow_up
+        )
+
+        # Store batch output
+        output[i:end_idx] = batch_output
+
+    return output
+
+def sjlt(vecs, proj_dim, rand_indices, rand_signs, c=5, blow_up=1):
     """
     Forward and batched SJLT implementation optimized for sparse inputs
 
@@ -1123,21 +1170,16 @@ def SJLT(vecs, proj_dim, seed=0, rand_indices=None, rand_signs=None, c=2, blow_u
         seed (int): Random seed for reproducibility. Default: 0
         rand_indices (torch.Tensor): Random indices of shape [original_dim, c], values in [0, proj_dim * blow_up)
         rand_signs (torch.Tensor): Random signs of shape [original_dim, c], values in {-1, 1}
+        batch_size (int): Batch size. Default: 32
         c (int): Sparsity parameter. Default: 2
         blow_up (int): Intermediate dimension multiplier. Default: 1
 
     Returns:
         torch.Tensor: Projected tensor of shape [batch_size, proj_dim]
     """
-    torch.manual_seed(seed)
-
     batch_size, original_dim = vecs.size()
+    assert original_dim == rand_indices.size(0), "Input dimension must match the number of random indices"
     device = vecs.device
-
-    if rand_indices is None:
-        rand_indices = torch.randint(proj_dim * blow_up, (original_dim, c), device=device)
-    if rand_signs is None:
-        rand_signs = torch.randint(0, 2, (original_dim, c), device=device) * 2 - 1
 
     # Get indices of all non-zero elements across the batch
     batch_idx, input_idx = torch.nonzero(vecs, as_tuple=True)
