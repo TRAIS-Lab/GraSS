@@ -57,7 +57,7 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from GCLayers.GCGPT2LMHeadModel import GCGPT2LMHeadModel
+from GIP.GIPGPT2LMHeadModel import GIPGPT2LMHeadModel
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
@@ -420,7 +420,7 @@ def main():
         )
 
     if args.model_name_or_path:
-        model = GCGPT2LMHeadModel.from_pretrained(
+        model = GIPGPT2LMHeadModel.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
             config=config,
@@ -429,7 +429,7 @@ def main():
         )
     else:
         logger.info("Training new model from scratch")
-        model = GCGPT2LMHeadModel.from_config(config, trust_remote_code=args.trust_remote_code)
+        model = GIPGPT2LMHeadModel.from_config(config, trust_remote_code=args.trust_remote_code)
 
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
@@ -536,7 +536,7 @@ def main():
                     for i in range(50)]
     result_list = []
     for checkpoint in checkpoints:
-        model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda()
+        model = GIPGPT2LMHeadModel.from_pretrained(checkpoint).cuda()
         params = {k: p for k, p in model.named_parameters() if p.requires_grad}
 
         @flatten_func(model)

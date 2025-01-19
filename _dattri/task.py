@@ -238,6 +238,8 @@ class AttributionTask:
         # first add decorator that handles the layer_name
         target_func = self.target_func
         if layer_name is not None:
+            if not isinstance(layer_name, list):
+                layer_name = [layer_name]
             self._load_checkpoints(ckpt_idx)
             target_func = partial_param(
                 full_param=self.named_parameters,
@@ -324,6 +326,8 @@ class AttributionTask:
         """
         loss_func = self.loss_func
         if layer_name is not None:
+            if not isinstance(layer_name, list):
+                layer_name = [layer_name]
             self._load_checkpoints(ckpt_idx)
             loss_func = partial_param(
                 full_param=self.named_parameters,
@@ -426,6 +430,8 @@ class AttributionTask:
         self._load_checkpoints(ckpt_idx)
 
         if layer_name is not None:
+            if not isinstance(layer_name, list):
+                layer_name = [layer_name]
             named_parameters = {
                 k: self.named_parameters[k]
                 for k in layer_name

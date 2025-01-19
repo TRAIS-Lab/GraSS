@@ -3,9 +3,11 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class GCLinear(nn.Linear):
+class GIPLinear(nn.Linear):
+    """LayerNorm implementation with Ghost Inner-Product computation support.
+    """
     def __init__(self, in_features, out_features, bias=True):
-        super(GCLinear, self).__init__(in_features, out_features, bias)
+        super(GIPLinear, self).__init__(in_features, out_features, bias)
         self.pre_activation = None
         self.layer_input = None
         self.name = 'linear'
@@ -18,83 +20,52 @@ class GCLinear(nn.Linear):
 
         return self.pre_activation
 
-    def per_example_gradient(self, deriv_pre_activ):
+    def pe_grad_gradcomp(self, output_gradient, per_sample=True):
+    # def compute_gradient_terms(self, output_gradient, per_sample=True):
         """
-        Computes the per-example gradients w.r.t. weights and bias of the layer.
+        Compute terms needed for Ghost Inner-Product calculation.
 
-        Parameters:
-        -------------------
-        deriv_pre_activ: a tensor containing the derivative of loss function
-                         w.r.t. the pre-activation of layer
+        Handles both 2D and 3D inputs by properly reshaping tensors.
+
+        Args:
+            output_gradient: Gradient of loss w.r.t. pre-activation (dL/dx_o)
+            per_sample: Whether to maintain per-sample gradients (default: True)
+
+        Returns:
+            tuple: (output_gradient, augmented_input)
         """
-        is_2d = self.layer_input.dim() == 2
-        H = self.layer_input
+        input_features = self.layer_input
+        is_3d = input_features.dim() == 3
 
-        if is_2d:
-            batch_size = deriv_pre_activ.size(0)
-            dLdZ = deriv_pre_activ * batch_size
-
-            pe_grad_weight = torch.bmm(dLdZ.view(batch_size, -1, 1), H.view(batch_size, 1, -1))
-            pe_grad_bias = dLdZ
+        if is_3d:
+            batch_size, seq_length, hidden_size = input_features.shape
+            # Reshape 3D tensors to 2D for consistent processing
+            input_features = input_features.reshape(-1, hidden_size)
+            output_gradient = output_gradient.reshape(-1, self.out_features)
         else:
-            dLdZ = deriv_pre_activ.permute(1, 2, 0)
-            dLdZ *= dLdZ.size(0)
-            pe_grad_weight = torch.bmm(dLdZ, H.transpose(0, 1))
-            pe_grad_bias = dLdZ.sum(dim=-1)
+            batch_size = input_features.shape[0]
 
-        return pe_grad_weight, pe_grad_bias
+        # Scale the gradient if we're computing per-sample gradients
+        if per_sample:
+            output_gradient = output_gradient * batch_size
 
-    def pe_grad_sqnorm(self, deriv_pre_activ):
-        """
-        Parameters:
-        -------------------
-        deriv_pre_activ: derivative of cost function w.r.t. the pre-activation of layer
-        """
-        is_2d = self.layer_input.dim() == 2
-        H = self.layer_input
+        # Handle bias term by augmenting input with ones
+        if self.has_bias:
+            ones = torch.ones(input_features.size(0), 1,
+                            device=input_features.device,
+                            dtype=input_features.dtype)
+            input_features = torch.cat([input_features, ones], dim=1)
 
-        if is_2d:
-            # When the input is a vector, we can compute the per-example gradient,
-            # the norm of per-example graidents can be directly computed without materializing them.
-            batch_size = deriv_pre_activ.size(0)
-            dLdZ = deriv_pre_activ * batch_size
+        if is_3d:
+            # Reshape back to 3D
+            input_features = input_features.reshape(batch_size, seq_length, -1)
+            output_gradient = output_gradient.reshape(batch_size, seq_length, -1)
 
-            zsum = dLdZ.pow(2).sum(1)
-            hsum = H.pow(2).sum(1)
-            s = zsum * hsum
+        return output_gradient, input_features
 
-            return s + zsum
-        else:
-            pe_grad_weight, pe_grad_bias = self.per_example_gradient(deriv_pre_activ)
-            batch_size = pe_grad_weight.size(0)
-            sq_norm_weight = pe_grad_weight.pow(2).view(batch_size, -1).sum(1)
-            sq_norm_bias = pe_grad_bias.pow(2).view(batch_size, -1).sum(1)
-
-            return sq_norm_weight + sq_norm_bias
-
-
-    def pe_grad_gradcomp(self, deriv_pre_activ, per_sample=True):
-        """
-        Parameters:
-        -------------------
-        deriv_pre_activ: derivative of cost function w.r.t. the pre-activation of layer
-        """
-        is_2d = self.layer_input.dim() == 2
-        H = self.layer_input
-        batch_size = deriv_pre_activ.shape[0]
-        dLdZ = deriv_pre_activ * batch_size
-
-        if is_2d and self.has_bias:
-            # Create a column of ones of shape [1000, 1]
-            ones_column = torch.ones(H.size(0), 1, device=H.device)
-            # Concatenate the column of ones to H along the second dimension (columns)
-            H = torch.cat((H, ones_column), dim=1)
-
-        return dLdZ, H
-
-class GCEmbedding(nn.Embedding):
+class GIPEmbedding(nn.Embedding):
     def __init__(self, num_embeddings, embedding_dim):
-        super(GCEmbedding, self).__init__(num_embeddings, embedding_dim)
+        super(GIPEmbedding, self).__init__(num_embeddings, embedding_dim)
         self.pre_activation = None
         self.indices = None
         self.name = 'embedding'

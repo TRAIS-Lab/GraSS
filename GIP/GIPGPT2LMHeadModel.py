@@ -1,18 +1,18 @@
 from transformers import GPT2LMHeadModel
 from transformers.models.gpt2.modeling_gpt2 import Conv1D
-from .linear import GCLinear, GCEmbedding
-from .layer_norm import GCLayerNorm
+from .layers.linear import GIPLinear, GIPEmbedding
+from .layers.layer_norm import GIPLayerNorm
 import torch
 import torch.nn as nn
 import os
 import json
 
-class GCGPT2LMHeadModel(GPT2LMHeadModel):
+class GIPGPT2LMHeadModel(GPT2LMHeadModel):
     """Custom GPT2 model that directly inherits from GPT2LMHeadModel."""
     def __init__(self, config):
         super().__init__(config)
         self.hooks = []
-        self._replace_with_gc_layers()
+        self._replace_with_GIP_layers()
 
     def _register_embedding_hooks(self, token_embedding, position_embedding):
         """Register hooks to capture embedding outputs"""
@@ -44,18 +44,18 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
         # Store hook handles for potential cleanup
         self.hooks.extend([token_hook_handle, position_hook_handle])
 
-    def _replace_with_gc_layers(self):
-        """Replace standard layers with GC layers in GPT2 model."""
+    def _replace_with_GIP_layers(self):
+        """Replace standard layers with GIP layers in GPT2 model."""
         # Replace embedding layers
         if hasattr(self.transformer, 'wte'):
-            token_embedding = GCEmbedding(
+            token_embedding = GIPEmbedding(
                 num_embeddings=self.transformer.wte.num_embeddings,
                 embedding_dim=self.transformer.wte.embedding_dim
             )
             self.transformer.wte = token_embedding
 
         if hasattr(self.transformer, 'wpe'):
-            position_embedding = GCEmbedding(
+            position_embedding = GIPEmbedding(
                 num_embeddings=self.transformer.wpe.num_embeddings,
                 embedding_dim=self.transformer.wpe.embedding_dim
             )
@@ -71,53 +71,53 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
                 # Replace attention layers
                 if hasattr(block, 'attn'):
                     if hasattr(block.attn, 'c_attn'):
-                        new_layer = self._create_gc_layer(block.attn.c_attn)
+                        new_layer = self._create_GIP_layer(block.attn.c_attn)
                         block.attn.c_attn = new_layer
 
                     if hasattr(block.attn, 'c_proj'):
-                        new_layer = self._create_gc_layer(block.attn.c_proj)
+                        new_layer = self._create_GIP_layer(block.attn.c_proj)
                         block.attn.c_proj = new_layer
 
                 # Replace MLP layers
                 if hasattr(block, 'mlp'):
                     if hasattr(block.mlp, 'c_fc'):
-                        new_layer = self._create_gc_layer(block.mlp.c_fc)
+                        new_layer = self._create_GIP_layer(block.mlp.c_fc)
                         block.mlp.c_fc = new_layer
 
                     if hasattr(block.mlp, 'c_proj'):
-                        new_layer = self._create_gc_layer(block.mlp.c_proj)
+                        new_layer = self._create_GIP_layer(block.mlp.c_proj)
                         block.mlp.c_proj = new_layer
 
                 # Replace LayerNorm layers
                 for ln_attr in ['ln_1', 'ln_2']:
                     if hasattr(block, ln_attr):
-                        new_ln_layer = self._create_gc_layernorm(getattr(block, ln_attr))
+                        new_ln_layer = self._create_GIP_layernorm(getattr(block, ln_attr))
                         setattr(block, ln_attr, new_ln_layer)
 
         # Replace final layers
         if hasattr(self, 'lm_head'):
-            new_layer = self._create_gc_layer(self.lm_head)
+            new_layer = self._create_GIP_layer(self.lm_head)
             self.lm_head = new_layer
 
         if hasattr(self.transformer, 'ln_f'):
-            new_ln_layer = self._create_gc_layernorm(self.transformer.ln_f)
+            new_ln_layer = self._create_GIP_layernorm(self.transformer.ln_f)
             self.transformer.ln_f = new_ln_layer
 
         # Replace lm_head if it exists
         if hasattr(self, 'lm_head'):
-            new_layer = self._create_gc_layer(self.lm_head)
+            new_layer = self._create_GIP_layer(self.lm_head)
             self.lm_head = new_layer
 
         # Replace the final layer normalization
         if hasattr(self.transformer, 'ln_f'):
-            new_ln_layer = self._create_gc_layernorm(self.transformer.ln_f)
+            new_ln_layer = self._create_GIP_layernorm(self.transformer.ln_f)
             self.transformer.ln_f = new_ln_layer
 
-    def _create_gc_layer(self, old_layer):
-        """Create a GC layer from either Conv1D or Linear layer."""
+    def _create_GIP_layer(self, old_layer):
+        """Create a GIP layer from either Conv1D or Linear layer."""
         if isinstance(old_layer, Conv1D):
             # Conv1D uses transposed weights compared to Linear
-            new_layer = GCLinear(
+            new_layer = GIPLinear(
                 in_features=old_layer.weight.shape[0],  # nx
                 out_features=old_layer.weight.shape[1], # nf
                 bias=old_layer.bias is not None
@@ -129,7 +129,7 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
                 new_layer.bias.data = old_layer.bias.clone()
 
         elif isinstance(old_layer, nn.Linear):
-            new_layer = GCLinear(
+            new_layer = GIPLinear(
                 in_features=old_layer.in_features,
                 out_features=old_layer.out_features,
                 bias=old_layer.bias is not None
@@ -144,11 +144,11 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
 
         return new_layer
 
-    def _create_gc_layernorm(self, old_layer):
-        """Create a GCLayerNorm from a standard LayerNorm."""
+    def _create_GIP_layernorm(self, old_layer):
+        """Create a GIPLayerNorm from a standard LayerNorm."""
         if isinstance(old_layer, nn.LayerNorm):
             # Create the custom LayerNorm layer with the same configuration
-            new_layer = GCLayerNorm(
+            new_layer = GIPLayerNorm(
                 normalized_shape=old_layer.normalized_shape,
                 elementwise_affine=old_layer.elementwise_affine,
             )
@@ -162,22 +162,22 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
-        """Load pretrained model, handling GC layer conversion efficiently."""
-        # Check if this is already a GC checkpoint
-        gc_config_path = os.path.join(pretrained_model_name_or_path, "gc_config.json")
-        is_gc_checkpoint = os.path.exists(gc_config_path)
+        """Load pretrained model, handling GIP layer conversion efficiently."""
+        # Check if this is already a GIP checkpoint
+        GIP_config_path = os.path.join(pretrained_model_name_or_path, "GIP_config.json")
+        is_GIP_checkpoint = os.path.exists(GIP_config_path)
 
-        if is_gc_checkpoint:
-            print("Loading GC checkpoint directly...")
+        if is_GIP_checkpoint:
+            print("Loading GIP checkpoint directly...")
             return super().from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
 
-        print("Converting standard checkpoint to GC model...")
+        print("Converting standard checkpoint to GIP model...")
         # First load the original model
         original_model = GPT2LMHeadModel.from_pretrained(
             pretrained_model_name_or_path, *model_args, **kwargs
         )
 
-        # Create our GC model
+        # Create our GIP model
         config = original_model.config
         model = cls(config)
 
@@ -206,10 +206,10 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
         **kwargs,
     ):
         """Save model with proper weight transposition."""
-        print("Saving GC model...")
+        print("Saving GIP model...")
         if is_main_process:
             os.makedirs(save_directory, exist_ok=True)
-            with open(os.path.join(save_directory, "gc_config.json"), 'w') as f: json.dump({"is_gc_model": True}, f)
+            with open(os.path.join(save_directory, "GIP_config.json"), 'w') as f: json.dump({"is_GIP_model": True}, f)
         super().save_pretrained(save_directory, is_main_process=is_main_process, save_function=save_function, **kwargs)
 
     def __del__(self):

@@ -11,9 +11,9 @@ from typing import Optional, List
 
 class LoRALayer():
     def __init__(
-        self, 
-        r: int, 
-        lora_alpha: int, 
+        self,
+        r: int,
+        lora_alpha: int,
         lora_dropout: float,
         merge_weights: bool,
     ):
@@ -73,7 +73,7 @@ class Embedding(nn.Embedding, LoRALayer):
                 if self.r > 0:
                     self.weight.data += (self.lora_B @ self.lora_A).transpose(0, 1) * self.scaling
                 self.merged = True
-        
+
     def forward(self, x: torch.Tensor):
         if self.r > 0 and not self.merged:
             result = nn.Embedding.forward(self, x)
@@ -85,17 +85,17 @@ class Embedding(nn.Embedding, LoRALayer):
             return result
         else:
             return nn.Embedding.forward(self, x)
-            
+
 
 
 class LoRALinear(nn.Linear, LoRALayer):
     # LoRA implemented in a dense layer
     def __init__(
-        self, 
-        in_features: int, 
-        out_features: int, 
-        r: int = 0, 
-        lora_alpha: int = 1, 
+        self,
+        in_features: int,
+        out_features: int,
+        r: int = 0,
+        lora_alpha: int = 1,
         lora_dropout: float = 0.,
         fan_in_fan_out: bool = False, # Set this to True if the layer to replace stores weight like (fan_in, fan_out)
         merge_weights: bool = True,
@@ -140,27 +140,27 @@ class LoRALinear(nn.Linear, LoRALayer):
                 # Merge the weights and mark it
                 if self.r > 0:
                     self.weight.data += T(self.lora_B @ self.lora_A) * self.scaling
-                self.merged = True       
+                self.merged = True
 
     def forward(self, x: torch.Tensor):
         def T(w):
             return w.transpose(0, 1) if self.fan_in_fan_out else w
         if self.r > 0 and not self.merged:
-            result = F.linear(x, T(self.weight), bias=self.bias)            
+            result = F.linear(x, T(self.weight), bias=self.bias)
             result += (self.lora_dropout(x) @ self.lora_A.transpose(0, 1) @ self.lora_B.transpose(0, 1)) * self.scaling
             return result
         else:
             return F.linear(x, T(self.weight), bias=self.bias)
 
 
-class GCLoRALinear(LoRALinear):
-    def __init__(self, in_features, out_features, r=0, lora_alpha=1, lora_dropout=0., 
+class GIPLoRALinear(LoRALinear):
+    def __init__(self, in_features, out_features, r=0, lora_alpha=1, lora_dropout=0.,
                  fan_in_fan_out=False, merge_weights=True, **kwargs):
-        super(GCLoRALinear, self).__init__(in_features, out_features, r=r, lora_alpha=lora_alpha,
+        super(GIPLoRALinear, self).__init__(in_features, out_features, r=r, lora_alpha=lora_alpha,
                                            lora_dropout=lora_dropout, fan_in_fan_out=fan_in_fan_out,
                                            merge_weights=merge_weights, **kwargs)
 
-        self.layer_type = 'GC_Linear_LoRA'
+        self.layer_type = 'GIP_Linear_LoRA'
         self.register_forward_hook(self.capture_hook)
 
     def capture_hook(self, module, input, output):
@@ -188,11 +188,11 @@ class GCLoRALinear(LoRALinear):
 class MergedLinear(nn.Linear, LoRALayer):
     # LoRA implemented in a dense layer
     def __init__(
-        self, 
-        in_features: int, 
-        out_features: int, 
-        r: int = 0, 
-        lora_alpha: int = 1, 
+        self,
+        in_features: int,
+        out_features: int,
+        r: int = 0,
+        lora_alpha: int = 1,
         lora_dropout: float = 0.,
         enable_lora: List[bool] = [False],
         fan_in_fan_out: bool = False,
@@ -242,8 +242,8 @@ class MergedLinear(nn.Linear, LoRALayer):
         def T(w):
             return w.transpose(0, 1) if self.fan_in_fan_out else w
         delta_w = F.conv1d(
-            self.lora_A.unsqueeze(0), 
-            self.lora_B.unsqueeze(-1), 
+            self.lora_A.unsqueeze(0),
+            self.lora_B.unsqueeze(-1),
             groups=sum(self.enable_lora)
         ).squeeze(0)
         return T(self.zero_pad(delta_w))
@@ -263,7 +263,7 @@ class MergedLinear(nn.Linear, LoRALayer):
                 # Merge the weights and mark it
                 if self.r > 0 and any(self.enable_lora):
                     self.weight.data += self.merge_AB() * self.scaling
-                self.merged = True        
+                self.merged = True
 
     def forward(self, x: torch.Tensor):
         def T(w):
@@ -321,7 +321,7 @@ class ConvLoRA(nn.Module, LoRALayer):
     def forward(self, x):
         if self.r > 0 and not self.merged:
             return self.conv._conv_forward(
-                x, 
+                x,
                 self.conv.weight + (self.lora_B @ self.lora_A).view(self.conv.weight.shape) * self.scaling,
                 self.conv.bias
             )

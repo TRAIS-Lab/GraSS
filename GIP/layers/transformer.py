@@ -8,8 +8,8 @@ from torch.nn.init import constant_
 from torch.nn.init import xavier_normal_
 from torch.nn.parameter import Parameter
 import torch.nn.functional as F
-from fastgc.layers.layer_norm import LayerNorm
-from fastgc.layers.linear import Linear
+from fastGIP.layers.layer_norm import LayerNorm
+from fastGIP.layers.linear import Linear
 
 
 def _get_activation_fn(activation):
@@ -153,7 +153,7 @@ class PositionalEncoding(nn.Module):
 
 
 class MultiheadAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads, dropout=0., bias=True, add_bias_kv=False, add_zero_attn=False): 
+    def __init__(self, embed_dim, num_heads, dropout=0., bias=True, add_bias_kv=False, add_zero_attn=False):
         super(MultiheadAttention, self).__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
@@ -209,10 +209,10 @@ class MultiheadAttention(nn.Module):
 
         return grad_sq_norm
 
-    def collect_preactivations(self):        
+    def collect_preactivations(self):
         return (self.in_proj.pre_activation, self.out_proj.pre_activation)
 
-    def collect_layers(self):        
+    def collect_layers(self):
         return (self.in_proj, self.out_proj)
 
     def pe_grad_gradcomp(self, deriv_pre_activ, per_sample=True):
@@ -249,8 +249,8 @@ class TransformerEncoderLayer(nn.Module):
         src = self.self_attn(src, src, src, attn_mask=src_mask,
                              key_padding_mask=src_key_padding_mask)
         src = src + self.dropout1(src)
-        src = self.norm1(src)        
-        
+        src = self.norm1(src)
+
         if hasattr(self, "activation"):
             src = self.linear2(self.dropout(self.activation(self.linear1(src))))
         else:  # for backward compatibility
@@ -287,7 +287,7 @@ class TransformerEncoderLayer(nn.Module):
         pre_acts.extend(self.self_attn.collect_preactivations())
         pre_acts.append(self.linear1.pre_activation)
         pre_acts.append(self.linear2.pre_activation)
-        # pre_acts.append(self.norm1.pre_activation)                        
+        # pre_acts.append(self.norm1.pre_activation)
         # pre_acts.append(self.norm2.pre_activation)
 
         return pre_acts
@@ -298,7 +298,7 @@ class TransformerEncoderLayer(nn.Module):
         layer_lst.append( self.linear1 )
         layer_lst.append( self.linear2 )
         return layer_lst
-    
+
     def pe_grad_gradcomp(self, deriv_pre_activ, per_sample=True):
         result_attn = self.self_attn.pe_grad_gradcomp(deriv_pre_activ[:2])
         result_linear1 = self.linear1.pe_grad_gradcomp(deriv_pre_activ[2])

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.nn import Parameter
-from .base_layer import BasePGradLayer
+from .layers.base_layer import BasePGradLayer
 
 
 class RNNModule(nn.RNN):
@@ -51,8 +51,8 @@ class RNNModule(nn.RNN):
         sqnorm = g_weight_ih.pow(2).view(batch_size, -1).sum(1)
         sqnorm += g_weight_hh.pow(2).view(batch_size, -1).sum(1)
         sqnorm += g_bias.pow(2).view(batch_size, -1).sum(1)
-        
-        return sqnorm            
+
+        return sqnorm
 
 
 class RNNCell(nn.RNNCell):
@@ -75,14 +75,14 @@ class RNNCell(nn.RNNCell):
         self.layer_input.append(input)
         self.layer_hidden.append(hx)
 
-        return out        
+        return out
 
     def per_example_gradient(self, deriv_pre_activ):
         batch_size = deriv_pre_activ[0].size(0)
 
         pe_grad_ih = []
         pe_grad_hh = []
-        
+
         for X, H, H_1, dLdZ in zip(self.layer_input, self.layer_hidden,
                                    self.pre_activation, deriv_pre_activ):
             dLdZ *= batch_size
@@ -106,9 +106,9 @@ class RNNCell(nn.RNNCell):
         sqnorm = g_weight_ih.pow(2).view(batch_size, -1).sum(1)
         sqnorm += g_weight_hh.pow(2).view(batch_size, -1).sum(1)
         sqnorm += g_bias.pow(2).view(batch_size, -1).sum(1)
-        
-        return sqnorm            
-    
+
+        return sqnorm
+
 
 class LSTMCell(nn.Module):
     def __init__(self, input_size, hidden_size):
@@ -160,7 +160,7 @@ class LSTMCell(nn.Module):
 
         pe_grad_ih = []
         pe_grad_hh = []
-        
+
         for X, H, dLdZ in zip(self.layer_input, self.layer_hidden,
                               deriv_pre_activ):
             dLdZ *= batch_size

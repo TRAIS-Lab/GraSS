@@ -59,7 +59,7 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from GCLayers.GCGPT2LMHeadModel import GCGPT2LMHeadModel
+from GIP.GIPGPT2LMHeadModel import GIPGPT2LMHeadModel
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
@@ -439,7 +439,7 @@ def main():
         )
 
     if args.model_name_or_path:
-        model = GCGPT2LMHeadModel.from_pretrained(
+        model = GIPGPT2LMHeadModel.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
             config=config,
@@ -448,7 +448,7 @@ def main():
         )
     else:
         logger.info("Training new model from scratch")
-        model = GCGPT2LMHeadModel.from_config(config, trust_remote_code=args.trust_remote_code)
+        model = GIPGPT2LMHeadModel.from_config(config, trust_remote_code=args.trust_remote_code)
 
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
@@ -586,13 +586,18 @@ def main():
             "threshold": args.threshold,
         }
 
+    model_id = 0
+    checkpoint = f"{args.output_dir}/{model_id}"
+    model = GIPGPT2LMHeadModel.from_pretrained(checkpoint).cuda()
+
     if args.GIP:
         print("Grad-Dot with Ghost Inner-Product")
 
-        from GCLayers.helper import find_GClayers, Ghost_Inner_Product
+        from GIP.helper import find_GIPlayers, Ghost_Inner_Product
 
-        print(model)
-        trainable_layers = find_GClayers(model)
+
+
+        trainable_layers = find_GIPlayers(model)
         trainable_layers = trainable_layers[1:] # Omit the first embedding layer due to weight tying with the last linear layer
 
         torch.cuda.reset_peak_memory_stats("cuda")
@@ -624,28 +629,29 @@ def main():
             logp = -outputs.loss
             return logp - torch.log(1 - torch.exp(logp))
 
-
-        checkpoints = [f"{args.output_dir}/{i}" for i in range(1)] # Grad-Dot only requires one checkpoint
-
         def checkpoints_load_func(model, checkpoint):
-            model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda()
+            model = GIPGPT2LMHeadModel.from_pretrained(checkpoint).cuda()
             model.eval()
             return model
 
 
         task = AttributionTask(loss_func=f, model=model,
-                            checkpoints=checkpoints[0],
+                            checkpoints=checkpoint,
                             checkpoints_load_func=checkpoints_load_func)
 
-        ensemble = len(checkpoints) # For Grad-Dot, 10 if TracIn
         normalized_grad = False # For Grad-Dot, True if Grad-Cos
+
+
+        # Initialize TracInAttributor with multiple layers
         attributor = TracInAttributor(
             task=task,
-            weight_list=torch.ones(ensemble) * 1e-3,
+            weight_list=torch.ones(1) * 1e-3,
             normalized_grad=normalized_grad,
             projector_kwargs=projector_kwargs,
             device="cuda",
+            layer_name=[name for name, _ in model.named_parameters() if 'ln' not in name.lower()],  # Pass all parameter names for this layer
         )
+
 
         attributor.cache(train_dataloader)
 

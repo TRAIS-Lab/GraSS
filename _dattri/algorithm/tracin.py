@@ -113,6 +113,8 @@ class TracInAttributor(BaseAttributor):
 
                 # Compute gradients
                 grad_t = self.grad_loss_func(parameters, train_batch_data)
+                # save for inspection
+                torch.save(grad_t, f"train_grad_{ckpt_idx}.pt")
                 # Apply projection if specified
                 if self.projector_kwargs is not None:
                     # Apply thresholding if specified
@@ -279,6 +281,8 @@ class TracInAttributor(BaseAttributor):
 
                 # Compute test gradients
                 grad_t = self.grad_target_func(parameters, test_batch_data)
+                # save for inspection
+                torch.save(grad_t, f"test_grad_{ckpt_idx}.pt")
                 # Apply projection if specified
                 if self.projector_kwargs is not None:
                     # Apply thresholding if specified
@@ -312,9 +316,6 @@ class TracInAttributor(BaseAttributor):
                     .cpu()
                 )
                 curr_col += batch_size
-
-                print(train_grads.shape)
-                print(test_batch_grad.shape)
 
 
         return tda_output
