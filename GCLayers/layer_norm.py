@@ -3,6 +3,7 @@ import torch.nn as nn
 class GCLayerNorm(nn.LayerNorm):
     def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True):
         super().__init__(normalized_shape, eps, elementwise_affine)
+        self.name = 'layer_norm'
         self.pre_activation = None
         self.layer_input = None
 
@@ -55,10 +56,10 @@ class GCLayerNorm(nn.LayerNorm):
         H: normalized input that can be used for gradient computation
         """
         # Scale and permute gradient similar to per_example_gradient
-        dLdZ = deriv_pre_activ.permute(1, 0, 2)  # (feature_dim, batch_size, ...)
+        dLdZ = deriv_pre_activ
         dLdZ *= dLdZ.size(0)  # Scale by batch size
 
         # Prepare the normalized input
-        H = self.layer_input.transpose(0, 1)  # Transpose to match dLdZ dimensions
+        H = self.layer_input  # Transpose to match dLdZ dimensions
 
         return dLdZ, H

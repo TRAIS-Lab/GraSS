@@ -12,7 +12,7 @@ def find_GClayers(model):
     return GC_layers
 
 def grad_dotprod(A1, B1, A2, B2) -> torch.Tensor:
-    """Compute gradient sample norm for the weight matrix in a linear layer."""
+    """Compute gradient sample norm for the weight matrix in a GClinear layer."""
     if A1.dim() == 2 and B1.dim() == 2:
         return grad_dotprod_non_sequential(A1, B1, A2, B2)
     elif A1.dim() == 3 and B1.dim() == 3:
@@ -109,7 +109,7 @@ def _chunked_matmul(A1, A2, chunk_size=128):
 
     return result
 
-def Ghost_Inner_Product(model, train_dataloader, test_dataloader, trainable_layers, projector_kwargs=None, device='cuda'):
+def Ghost_Inner_Product(model, train_dataloader, test_dataloader, trainable_layers, projector_kwargs=None, lr=1e-3, device='cuda'):
     """
     Adapted version of Ghost_Inner_Product to work with DataLoader format
     """
@@ -157,44 +157,34 @@ def Ghost_Inner_Product(model, train_dataloader, test_dataloader, trainable_laye
     # Get pre-activations from trainable layers
     full_pre_acts = [layer.pre_activation for layer in trainable_layers]
 
+    print("---------PreActivation----------")
+    for layer in trainable_layers:
+        print(f"{layer}: {layer.pre_activation.size()}")
+
     # Calculate gradients
     Z_grad_full = torch.autograd.grad(full_loss, full_pre_acts, retain_graph=True)
-
-    dLdZ_a_val_lst = []
-    dLdZ_a_train_lst = []
 
 
     if projector_kwargs is not None:
         threshold = projector_kwargs.get("threshold", None)
         projector_kwargs.pop("threshold")
 
-
-    for layer, zgrad_full in zip(trainable_layers, Z_grad_full):
-        decompose_result = layer.pe_grad_gradcomp(zgrad_full, per_sample=True)
-        val_1, val_2 = decompose_result
-
-        # Split for validation and training
-        decompose_result_val = (val_1[batch_size:, :, :], val_2[batch_size:, :, :])
-        dLdZ_a_val_lst.append(decompose_result_val)
-
-        decompose_result_train = (val_1[:batch_size, :, :], val_2[:batch_size, :, :])
-        dLdZ_a_train_lst.append(decompose_result_train)
-
-    # Initialize scores
     grad_dot = torch.zeros(batch_size, n_val, device=device)
-    # second_order_interaction = torch.zeros((batch_size, batch_size), device=device) if return_tracin_and_similarity else None
-    # val_similarity_score = torch.zeros((n_val, n_val), device=device) if return_val_similarity else None
 
+    print("---------Grad-Dot----------")
     # Calculate scores
     with torch.no_grad():
-        for (dLdZ, a), (dLdZ_val, a_val) in zip(dLdZ_a_train_lst, dLdZ_a_val_lst):
-            dot_prod = grad_dotprod(dLdZ, a, dLdZ_val, a_val)
-            grad_dot += dot_prod
+        for layer, z_grad_full in zip(trainable_layers, Z_grad_full):
+            val_1, val_2 = layer.pe_grad_gradcomp(z_grad_full, per_sample=True)
 
-            # dot_prod = grad_dotprod(dLdZ, a, dLdZ, a)
-            # second_order_interaction += dot_prod
+            # Split validation and training
+            dLdZ_train, z_train = val_1[:batch_size], val_2[:batch_size]
+            dLdZ_val, z_val = val_1[batch_size:], val_2[batch_size:]
 
-            # dot_prod = grad_dotprod(dLdZ_val, a_val, dLdZ_val, a_val)
-            # val_similarity_score += dot_prod
+            result = grad_dotprod(dLdZ_train, z_train, dLdZ_val, z_val)
+            grad_dot += result
 
-    return grad_dot
+            print(f"{layer}: {result}")
+
+    score = grad_dot * lr
+    return score

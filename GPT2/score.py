@@ -591,7 +591,9 @@ def main():
 
         from GCLayers.helper import find_GClayers, Ghost_Inner_Product
 
+        print(model)
         trainable_layers = find_GClayers(model)
+        trainable_layers = trainable_layers[1:] # Omit the first embedding layer due to weight tying with the last linear layer
 
         torch.cuda.reset_peak_memory_stats("cuda")
 
@@ -663,6 +665,8 @@ def main():
 
     print(f"Time taken: {end - start} seconds")
     print(f"Peak memory usage: {peak_memory} MB")
+
+    print(score)
 
     if args.GIP:
         if args.proj is not None and args.threshold is not None:

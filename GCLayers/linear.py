@@ -98,43 +98,72 @@ class GCEmbedding(nn.Embedding):
         self.pre_activation = None
         self.indices = None
         self.name = 'embedding'
-        self.num_embeddings = num_embeddings
-        self.embedding_dim = embedding_dim
+        self.token_output = None
+        self.combined_output = None
 
     def forward(self, input):
         self.indices = input
         embedded = super().forward(input)
-        self.pre_activation = embedded
+        return embedded
 
-        return self.pre_activation
+    # def store_embedding(self, combined_embedding):
+    #     """Store the combined embedding from GPT2's forward pass"""
+    #     self.pre_activation = combined_embedding
+
+    # def per_example_gradient(self, deriv_pre_activ):
+    #     """
+    #     Compute the per-example gradients w.r.t. weights of the layer.
+
+    #     Parameters:
+    #     -----------
+    #     deriv_pre_activ: derivative of loss function w.r.t. the embedding output
+    #     """
+    #     batch_size = deriv_pre_activ.size(0)
+    #     H = self.indices
+
+    #     if self.indices.dim() == 2: # For single token inputs (2D)
+    #         # Scale gradients by batch size
+    #         dLdZ = deriv_pre_activ * batch_size
+
+    #         # Compute gradient using batch matrix multiplication [batch_size, num_embeddings, embedding_dim]
+    #         pe_grad_weight = torch.bmm(dLdZ.view(batch_size, -1, 1), H.view(batch_size, 1, -1))
+    #     else: # For sequence inputs (3D)
+    #         dLdZ = deriv_pre_activ.permute(1, 2, 0)
+    #         dLdZ *= dLdZ.size(0)
+    #         pe_grad_weight = torch.bmm(dLdZ, H.transpose(0, 1))
+
+    #     # Embedding layers don't have bias
+    #     # pe_grad_bias = None
+    #     return pe_grad_weight
 
     def per_example_gradient(self, deriv_pre_activ):
-        """
-        Compute the per-example gradients w.r.t. weights of the layer.
-
-        Parameters:
-        -----------
-        deriv_pre_activ: derivative of loss function w.r.t. the embedding output
-        """
+        """Compute per-example gradients for the embedding layer"""
         batch_size = deriv_pre_activ.size(0)
-        H = self.indices
 
-        if self.indices.dim() == 2: # For single token inputs (2D)
-            # Scale gradients by batch size
-            dLdZ = deriv_pre_activ * batch_size
-
-            # Compute gradient using batch matrix multiplication [batch_size, num_embeddings, embedding_dim]
-            pe_grad_weight = torch.bmm(dLdZ.view(batch_size, -1, 1), H.view(batch_size, 1, -1))
-            pe_grad_bias = dLdZ
-        else: # For sequence inputs (3D)
+        # Use the combined output for position embedding gradients
+        if hasattr(self, 'combined_output') and self.combined_output is not None:
             dLdZ = deriv_pre_activ.permute(1, 2, 0)
             dLdZ *= dLdZ.size(0)
-            pe_grad_weight = torch.bmm(dLdZ, H.transpose(0, 1))
-            pe_grad_bias = dLdZ.sum(dim=-1)
 
-        # Embedding layers don't have bias
-        # pe_grad_bias = None
-        return pe_grad_weight, pe_grad_bias
+            pe_grad_weight = torch.zeros(batch_size, self.num_embeddings, self.embedding_dim,
+                                       device=deriv_pre_activ.device)
+
+            for pos in range(self.indices.size(1)):
+                pos_indices = self.indices[:, pos]
+                pos_grads = dLdZ[pos]
+
+                for b in range(batch_size):
+                    pe_grad_weight[b, pos_indices[b]] += pos_grads[:, b]
+        else:
+            # Regular embedding gradients
+            dLdZ = deriv_pre_activ * batch_size
+            pe_grad_weight = torch.zeros(batch_size, self.num_embeddings, self.embedding_dim,
+                                       device=deriv_pre_activ.device)
+
+            for b in range(batch_size):
+                pe_grad_weight[b, self.indices[b]] = dLdZ[b]
+
+        return pe_grad_weight, None
 
     def pe_grad_sqnorm(self, deriv_pre_activ):
         """
@@ -161,14 +190,33 @@ class GCEmbedding(nn.Embedding):
 
     def pe_grad_gradcomp(self, deriv_pre_activ, per_sample=True):
         """
-        Prepare components for gradient computation in the embedding layer.
+        Prepare components for gradient computation in embedding layer.
+        Similar to linear layer's pe_grad_gradcomp but handles sparse embedding lookups.
 
         Parameters:
-        -----------
-        deriv_pre_activ: derivative of loss function w.r.t. the embedding output
+        -------------------
+        deriv_pre_activ: derivative of cost function w.r.t. the pre-activation of layer
         per_sample: whether to return per-sample gradients
         """
         batch_size = deriv_pre_activ.size(0)
+
+        # Scale gradients by batch size as in linear layer
         dLdZ = deriv_pre_activ * batch_size
 
-        return dLdZ, self.indices
+        # For sequence inputs (3D)
+        if deriv_pre_activ.dim() == 3:
+            # Create one-hot encoding matrix for the sequence
+            # [batch_size, seq_len, num_embeddings]
+            H = torch.zeros(batch_size, self.indices.size(1), self.num_embeddings,
+                          device=deriv_pre_activ.device)
+            # Fill in ones at the positions indicated by indices
+            H.scatter_(2, self.indices.unsqueeze(-1), 1)
+        else:
+            # For single token inputs (2D)
+            # Create one-hot encoding matrix [batch_size, num_embeddings]
+            H = torch.zeros(batch_size, self.num_embeddings,
+                          device=deriv_pre_activ.device)
+            # Fill in ones at the positions indicated by indices
+            H.scatter_(1, self.indices.unsqueeze(1), 1)
+
+        return dLdZ, H
