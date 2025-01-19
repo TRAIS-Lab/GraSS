@@ -39,3 +39,26 @@ class GCLayerNorm(nn.LayerNorm):
         """
         pe_grad_weight, pe_grad_bias = self.per_example_gradient(deriv_pre_activ)
         return pe_grad_weight.pow(2).sum(dim=1) + pe_grad_bias.pow(2).sum(dim=1)
+
+    def pe_grad_gradcomp(self, deriv_pre_activ, per_sample=True):
+        """
+        Prepare components for gradient computation in the layer norm layer.
+
+        Parameters:
+        -----------
+        deriv_pre_activ: derivative of loss function w.r.t. the layer norm output
+        per_sample: whether to return per-sample gradients
+
+        Returns:
+        --------
+        dLdZ: scaled and permuted gradient
+        H: normalized input that can be used for gradient computation
+        """
+        # Scale and permute gradient similar to per_example_gradient
+        dLdZ = deriv_pre_activ.permute(1, 0, 2)  # (feature_dim, batch_size, ...)
+        dLdZ *= dLdZ.size(0)  # Scale by batch size
+
+        # Prepare the normalized input
+        H = self.layer_input.transpose(0, 1)  # Transpose to match dLdZ dimensions
+
+        return dLdZ, H

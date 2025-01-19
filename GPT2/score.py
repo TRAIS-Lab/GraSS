@@ -531,8 +531,8 @@ def main():
     eval_dataset = lm_datasets["validation"]
 
     # # TODO debugging: just include the first eval test point in the eval_dataset
-    # train_dataset = train_dataset.select(range(4))
-    # eval_dataset = eval_dataset.select(range(1))
+    train_dataset = train_dataset.select(range(4))
+    eval_dataset = eval_dataset.select(range(1))
 
     train_sampler = SubsetSampler(range(len(train_dataset)))
 
@@ -599,16 +599,15 @@ def main():
         torch.cuda.synchronize()
         start = time.time()
 
-        grad_dot = Ghost_Inner_Product(
+        score = Ghost_Inner_Product(
             model=model.cuda(),
             train_dataloader=train_dataloader,
             test_dataloader=eval_dataloader,
             trainable_layers=trainable_layers,
             projector_kwargs=projector_kwargs,
+            lr=1e-3,
             device="cuda",
         )
-
-        score = grad_dot * 1e-3
 
         torch.cuda.synchronize()
         end = time.time()

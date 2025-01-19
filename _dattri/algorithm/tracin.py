@@ -89,7 +89,7 @@ class TracInAttributor(BaseAttributor):
                 ckpt_idx=ckpt_idx,
                 layer_name=self.layer_name,
             )
-            print(parameters.shape)
+
             if self.layer_name is not None:
                 self.grad_loss_func = self.task.get_grad_loss_func(
                     in_dims=(None, 0),
@@ -113,16 +113,15 @@ class TracInAttributor(BaseAttributor):
 
                 # Compute gradients
                 grad_t = self.grad_loss_func(parameters, train_batch_data)
-                # Apply thresholding if specified
-                if self.projector_kwargs is not None and self.threshold is not None:
-                    grad_t = torch.where(
-                        grad_t.abs() > self.threshold,
-                        grad_t,
-                        torch.zeros_like(grad_t),
-                    )
-
                 # Apply projection if specified
                 if self.projector_kwargs is not None:
+                    # Apply thresholding if specified
+                    if self.threshold is not None:
+                        grad_t = torch.where(
+                            grad_t.abs() > self.threshold,
+                            grad_t,
+                            torch.zeros_like(grad_t),
+                        )
                     train_random_project = random_project(
                         grad_t,
                         grad_t.shape[0],
@@ -231,17 +230,15 @@ class TracInAttributor(BaseAttributor):
 
                     # Compute gradients
                     grad_t = self.grad_loss_func(parameters, train_batch_data)
-
-                    # Apply thresholding if specified
-                    if self.projector_kwargs is not None and self.threshold is not None:
-                        grad_t = torch.where(
-                            grad_t.abs() > self.threshold,
-                            grad_t,
-                            torch.zeros_like(grad_t),
-                        )
-
                     # Apply projection if specified
                     if self.projector_kwargs is not None:
+                        # Apply thresholding if specified
+                        if self.threshold is not None:
+                            grad_t = torch.where(
+                                grad_t.abs() > self.threshold,
+                                grad_t,
+                                torch.zeros_like(grad_t),
+                            )
                         train_random_project = random_project(
                             grad_t,
                             grad_t.shape[0],
@@ -282,17 +279,15 @@ class TracInAttributor(BaseAttributor):
 
                 # Compute test gradients
                 grad_t = self.grad_target_func(parameters, test_batch_data)
-
-                # Apply thresholding if specified
-                if self.projector_kwargs is not None and self.threshold is not None:
-                    grad_t = torch.where(
-                        grad_t.abs() > self.threshold,
-                        grad_t,
-                        torch.zeros_like(grad_t),
-                    )
-
                 # Apply projection if specified
                 if self.projector_kwargs is not None:
+                    # Apply thresholding if specified
+                    if self.threshold is not None:
+                        grad_t = torch.where(
+                            grad_t.abs() > self.threshold,
+                            grad_t,
+                            torch.zeros_like(grad_t),
+                        )
                     test_random_project = random_project(
                         grad_t,
                         grad_t.shape[0],
@@ -317,5 +312,9 @@ class TracInAttributor(BaseAttributor):
                     .cpu()
                 )
                 curr_col += batch_size
+
+                print(train_grads.shape)
+                print(test_batch_grad.shape)
+
 
         return tda_output
