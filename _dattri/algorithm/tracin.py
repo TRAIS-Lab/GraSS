@@ -232,7 +232,7 @@ class TracInAttributor(BaseAttributor):
                         ckpt_idx=ckpt_idx,
                     )
 
-            if self.full_train_dataloader is not None:
+            if train_dataloader is not None:
                 train_grads = []
                 for train_batch_data_ in tqdm(
                     train_dataloader,

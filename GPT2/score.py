@@ -562,8 +562,8 @@ def main():
             raise ValueError(message)
     elif tda_method == "GD":
         if tda_mode == "default":
-            train_batch_size = 8
-            eval_batch_size = 8
+            train_batch_size = 4
+            eval_batch_size = 4
         elif tda_mode == "iterate":
             train_batch_size = 2
             eval_batch_size = 2
