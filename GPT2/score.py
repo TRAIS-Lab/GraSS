@@ -530,6 +530,7 @@ def main():
     from _dattri.algorithm.tracin import TracInAttributor
     from GIP.gip import find_GIPlayers, GhostInnerProductAttributor
 
+    debug = False
     device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
 
@@ -540,8 +541,9 @@ def main():
     train_dataset = lm_datasets["train"]
     test_dataset = lm_datasets["validation"]
 
-    train_dataset = train_dataset.select(range(5))
-    test_dataset = test_dataset.select(range(2))
+    # train_dataset = train_dataset.select(range(5))
+    # test_dataset = test_dataset.select(range(2))
+
     train_sampler = SubsetSampler(range(len(train_dataset)))
 
     # Dataset length
@@ -556,8 +558,8 @@ def main():
 
     if tda_method == "GIP":
         if tda_mode == "default": # default will first store all the information for train. Only used with projection.
-            train_batch_size = 8
-            test_batch_size = 8
+            train_batch_size = 2
+            test_batch_size = 2
         elif tda_mode == "iterate": # For iterate, #repeated computation over test set is n / train_bat_size.
             if args.proj is not None: # need extra memory for projection
                 train_batch_size = 8
@@ -694,15 +696,18 @@ def main():
     print(score)
 
     # Build the filename components
-    filename_parts = ["score", f"{tda_method}-{tda_mode}"]
+    filename_parts = [f"{tda_method}-{tda_mode}"]
 
     if args.proj is not None:
         filename_parts.append(f"{proj_method}-{proj_dim}")
     if args.threshold is not None:
-        filename_parts.append(f"threshold-{args.threshold}")
+        filename_parts.append(f"thrd-{args.threshold}")
 
     # Join parts and save the file
-    filename = f"./result/{'_'.join(filename_parts)}.pt"
+    if debug:
+        filename = f"./result/debug/{'_'.join(filename_parts)}.pt"
+    else:
+        filename = f"./result/{'_'.join(filename_parts)}.pt"
     torch.save(score, filename)
 
 
