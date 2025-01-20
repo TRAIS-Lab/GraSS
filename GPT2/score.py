@@ -687,14 +687,12 @@ def main():
     print(score)
 
     # Build the filename components
-    filename_parts = ["score"]
+    filename_parts = ["score", f"{tda_method}-{tda_mode}"]
 
     if args.proj is not None:
         filename_parts.append(f"{proj_method}-{proj_dim}")
     if args.threshold is not None:
         filename_parts.append(f"threshold-{args.threshold}")
-
-    filename_parts.append(f"{tda_method}-{tda_mode}")
 
     # Join parts and save the file
     filename = f"./result/{'_'.join(filename_parts)}.pt"

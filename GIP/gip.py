@@ -143,9 +143,9 @@ class GhostInnerProductAttributor():
             layer_dim = []
             for layer in self.layer_name:
                 if isinstance(layer, GIPLinear):
-                    layer_dim.append(layer.weight.shape[1])
+                    layer_dim.append(layer.weight.shape[0] * layer.weight.shape[1])
                 elif isinstance(layer, GIPEmbedding):
-                    layer_dim.append(layer.embedding_dim)
+                    layer_dim.append(layer.embedding_dim * layer.num_embeddings)
                 elif isinstance(layer, GIPLayerNorm):
                     layer_dim.append(layer.normalized_shape[0])
                 else:
@@ -385,10 +385,12 @@ class GhostInnerProductAttributor():
         else:
             train_val_1, train_val_2 = self.cached_train_val_1, self.cached_train_val_2
 
-        for test_batch in tqdm(
-            test_dataloader,
-            desc="calculating gradient of evaluation set...",
-            leave=False,
+        for test_batch_idx, test_batch in enumerate(
+            tqdm(
+                test_dataloader,
+                desc="calculating gradient of evaluation set...",
+                leave=False,
+            ),
         ):
             test_input_ids = test_batch["input_ids"].to(self.device)
             test_attention_masks = test_batch["attention_mask"].to(self.device)
@@ -450,8 +452,13 @@ class GhostInnerProductAttributor():
 
                     dLdZ_train, z_train = train_val_1[layer_id], train_val_2[layer_id]
                     dLdZ_val, z_val = val_1, val_2
+                    col_st = test_batch_idx * test_dataloader.batch_size
+                    col_ed = min(
+                        (test_batch_idx + 1) * test_dataloader.batch_size,
+                        len(test_dataloader.sampler),
+                    )
                     result = grad_dotprod(dLdZ_train, z_train, dLdZ_val, z_val) * self.lr
-                    grad_dot += result
+                    grad_dot[:, col_st:col_ed] += result
 
         return grad_dot
 
