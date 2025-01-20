@@ -127,8 +127,8 @@ class GhostInnerProductAttributor():
         self.lr = lr
         self.layer_name = find_GIPlayers(model) if layer_name is None else layer_name
 
-        # determine the proj_dim in proj_kwargs for each layer depending on the mode
-        if projector_kwargs is not None: # need more complex control of proj_seed and proj_dim for different layers, extract first
+        # need more complex control of proj_seed and proj_dim for different layers, extract first
+        if projector_kwargs is not None:
             self.proj_seed = projector_kwargs.get("proj_seed", 0)
             proj_dim = projector_kwargs.get("proj_dim", 512)
 
@@ -161,8 +161,9 @@ class GhostInnerProductAttributor():
 
         self.full_train_dataloader = None
 
-    def cache(self,
-              full_train_dataloader: torch.utils.data.DataLoader
+    def cache(
+        self,
+        full_train_dataloader: torch.utils.data.DataLoader
     ) -> None:
         # This means we can afford full calculation.
         self.full_train_dataloader = full_train_dataloader
@@ -196,32 +197,33 @@ class GhostInnerProductAttributor():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
                     val_1, val_2 = layer.pe_grad_gradcomp(z_grad_full, per_sample=True)
                     if self.projector_kwargs is not None:
-                        # Apply threshold is specified
-                        # if self.threshold is not None:
-                        #     val_1 = torch.where(val_1.abs() > self.threshold, val_1, torch.zeros_like(val_1))
-                        #     val_2 = torch.where(val_2.abs() > self.threshold, val_2, torch.zeros_like(val_2))
+                        val_1_flatten = val_1.view(-1, val_1.shape[1])
+                        val_2_flatten = val_2.view(-1, val_1.shape[1])
 
-                        val_1 = val_1.view(val_1.shape[0], -1)
-                        val_2 = val_2.view(val_2.shape[0], -1)
                         # input projector
                         random_project_1 = random_project(
-                            val_1,
-                            val_1.shape[0],
+                            val_1_flatten,
+                            val_1_flatten.shape[0],
                             proj_seed=self.proj_seed + int(1e4) * layer_id,
                             proj_dim=self.proj_dim[layer_id],
                             **self.projector_kwargs,
                         )
                         # output_grad projector
                         random_project_2 = random_project(
-                            val_2,
-                            val_2.shape[0],
+                            val_2_flatten,
+                            val_2_flatten.shape[0],
                             proj_seed=self.proj_seed + int(1e4) * layer_id + 1,
                             proj_dim=self.proj_dim[layer_id],
                             **self.projector_kwargs,
                         )
 
-                        val_1 = random_project_1(val_1)
-                        val_2 = random_project_2(val_2)
+                        # when input is sequence
+                        if val_1.dim() == 3:
+                            val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], -1, val_1.shape[2])
+                            val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], -1, val_2.shape[2])
+                        else:
+                            val_1 = random_project_1(val_1_flatten)
+                            val_2 = random_project_2(val_2_flatten)
 
                     # Append to the appropriate layer's list
                     self.cached_train_val_1[layer_id].append(val_1.detach())
@@ -344,33 +346,33 @@ class GhostInnerProductAttributor():
                     for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
                         val_1, val_2 = layer.pe_grad_gradcomp(z_grad_full, per_sample=True)
                         if self.projector_kwargs is not None:
-                            # Apply threshold is specified
-                            # if self.threshold is not None:
-                            #     val_1 = torch.where(val_1.abs() > self.threshold, val_1, torch.zeros_like(val_1))
-                            #     val_2 = torch.where(val_2.abs() > self.threshold, val_2, torch.zeros_like(val_2))
-
-                            val_1 = val_1.view(val_1.shape[0], -1)
-                            val_2 = val_2.view(val_2.shape[0], -1)
+                            val_1_flatten = val_1.view(-1, val_1.shape[1])
+                            val_2_flatten = val_2.view(-1, val_1.shape[1])
 
                             # input projector
                             random_project_1 = random_project(
-                                val_1,
-                                val_1.shape[0],
+                                val_1_flatten,
+                                val_1_flatten.shape[0],
                                 proj_seed=self.proj_seed + int(1e4) * layer_id,
                                 proj_dim=self.proj_dim[layer_id],
                                 **self.projector_kwargs,
                             )
                             # output_grad projector
                             random_project_2 = random_project(
-                                val_2,
-                                val_2.shape[0],
+                                val_2_flatten,
+                                val_2_flatten.shape[0],
                                 proj_seed=self.proj_seed + int(1e4) * layer_id + 1,
                                 proj_dim=self.proj_dim[layer_id],
                                 **self.projector_kwargs,
                             )
 
-                            val_1 = random_project_1(val_1)
-                            val_2 = random_project_2(val_2)
+                            # when input is sequence
+                            if val_1.dim() == 3:
+                                val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], -1, val_1.shape[2])
+                                val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], -1, val_2.shape[2])
+                            else:
+                                val_1 = random_project_1(val_1_flatten)
+                                val_2 = random_project_2(val_2_flatten)
 
                         train_val_1[layer_id].append(val_1.detach())
                         train_val_2[layer_id].append(val_2.detach())
@@ -418,33 +420,33 @@ class GhostInnerProductAttributor():
                 for layer_id, (layer, z_grad_test) in enumerate(zip(self.layer_name, Z_grad_test)):
                     val_1, val_2 = layer.pe_grad_gradcomp(z_grad_test, per_sample=True)
                     if self.projector_kwargs is not None:
-                        # Apply threshold is specified
-                        # if self.threshold is not None:
-                        #     val_1 = torch.where(val_1.abs() > self.threshold, val_1, torch.zeros_like(val_1))
-                        #     val_2 = torch.where(val_2.abs() > self.threshold, val_2, torch.zeros_like(val_2))
-
-                        val_1 = val_1.view(val_1.shape[0], -1)
-                        val_2 = val_2.view(val_2.shape[0], -1)
+                        val_1_flatten = val_1.view(-1, val_1.shape[1])
+                        val_2_flatten = val_2.view(-1, val_1.shape[1])
 
                         # input projector
                         random_project_1 = random_project(
-                            val_1,
-                            val_1.shape[0],
+                            val_1_flatten,
+                            val_1_flatten.shape[0],
                             proj_seed=self.proj_seed + int(1e4) * layer_id,
                             proj_dim=self.proj_dim[layer_id],
                             **self.projector_kwargs,
                         )
                         # output_grad projector
                         random_project_2 = random_project(
-                            val_2,
-                            val_2.shape[0],
+                            val_2_flatten,
+                            val_2_flatten.shape[0],
                             proj_seed=self.proj_seed + int(1e4) * layer_id + 1,
                             proj_dim=self.proj_dim[layer_id],
                             **self.projector_kwargs,
                         )
 
-                        val_1 = random_project_1(val_1)
-                        val_2 = random_project_2(val_2)
+                        # when input is sequence
+                        if val_1.dim() == 3:
+                            val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], -1, val_1.shape[2])
+                            val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], -1, val_2.shape[2])
+                        else:
+                            val_1 = random_project_1(val_1_flatten)
+                            val_2 = random_project_2(val_2_flatten)
 
                     dLdZ_train, z_train = train_val_1[layer_id], train_val_2[layer_id]
                     dLdZ_val, z_val = val_1, val_2
@@ -484,6 +486,7 @@ class GhostInnerProductAttributor():
 
         # Concatenate all batches
         train_input_ids = torch.cat(train_input_ids, dim=0).to(self.device)
+        print(train_input_ids)
         train_attention_masks = torch.cat(train_attention_masks, dim=0).to(self.device)
         train_labels = torch.cat(train_labels, dim=0).to(self.device)
 
@@ -515,33 +518,33 @@ class GhostInnerProductAttributor():
             for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_full)):
                 val_1, val_2 = layer.pe_grad_gradcomp(z_grad_full, per_sample=True)
                 if self.projector_kwargs is not None:
-                    # Apply threshold is specified
-                    # if self.threshold is not None:
-                    #     val_1 = torch.where(val_1.abs() > self.threshold, val_1, torch.zeros_like(val_1))
-                    #     val_2 = torch.where(val_2.abs() > self.threshold, val_2, torch.zeros_like(val_2))
-
-                    val_1 = val_1.view(val_1.shape[0], -1)
-                    val_2 = val_2.view(val_2.shape[0], -1)
+                    val_1_flatten = val_1.view(-1, val_1.shape[1])
+                    val_2_flatten = val_2.view(-1, val_1.shape[1])
 
                     # input projector
                     random_project_1 = random_project(
-                        val_1,
-                        val_1.shape[0],
+                        val_1_flatten,
+                        val_1_flatten.shape[0],
                         proj_seed=self.proj_seed + int(1e4) * layer_id,
                         proj_dim=self.proj_dim[layer_id],
                         **self.projector_kwargs,
                     )
                     # output_grad projector
                     random_project_2 = random_project(
-                        val_2,
-                        val_2.shape[0],
+                        val_2_flatten,
+                        val_2_flatten.shape[0],
                         proj_seed=self.proj_seed + int(1e4) * layer_id + 1,
                         proj_dim=self.proj_dim[layer_id],
                         **self.projector_kwargs,
                     )
 
-                    val_1 = random_project_1(val_1)
-                    val_2 = random_project_2(val_2)
+                    # when input is sequence
+                    if val_1.dim() == 3:
+                        val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], -1, val_1.shape[2])
+                        val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], -1, val_2.shape[2])
+                    else:
+                        val_1 = random_project_1(val_1_flatten)
+                        val_2 = random_project_2(val_2_flatten)
 
                 dLdZ_train, z_train = val_1[:num_train], val_2[:num_train]
                 dLdZ_val, z_val = val_1[num_train:], val_2[num_train:]

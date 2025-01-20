@@ -1171,10 +1171,9 @@ def SJLT(vecs, proj_dim, threshold=0, rand_indices_and_signs=None, seed=0, batch
     # Process in batches
     for i in range(0, num_vectors, batch_size):
         end_idx = min(i + batch_size, num_vectors)
-        batch = vecs[i:end_idx]
 
         # Process batch using original SJLT function
-        batch_output = sjlt(batch, proj_dim, threshold, rand_indices, rand_signs, c, blow_up)
+        batch_output = sjlt(vecs[i:end_idx], proj_dim, threshold, rand_indices, rand_signs, c, blow_up)
 
         # Store batch output
         output[i:end_idx] = batch_output
