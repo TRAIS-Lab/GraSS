@@ -31,7 +31,7 @@ class TracInAttributor(BaseAttributor):
         normalized_grad: bool,
         projector_kwargs: Optional[Dict[str, Any]] = None,
         layer_name: Optional[Union[str, List[str]]] = None,
-        batch: bool = False,
+        mode: str = "default",
         device: str = "cpu",
     ) -> None:
         """Initialize the TracIn attributor.
@@ -64,7 +64,7 @@ class TracInAttributor(BaseAttributor):
         self.normalized_grad = normalized_grad
         self.layer_name = layer_name
         self.device = device
-        self.batch = batch
+        self.mode = mode
         self.full_train_dataloader = None
         # to get per-sample gradients for a mini-batch of train/test samples
         self.grad_target_func = self.task.get_grad_target_func(in_dims=(None, 0))
@@ -191,37 +191,18 @@ class TracInAttributor(BaseAttributor):
         if len(self.task.get_checkpoints()) != len(self.weight_list):
             raise ValueError("The length of checkpoints and weights lists don't match.")
 
-        if self.batch: # process batch-wise
-            tda_output = self.attribute_batch(test_dataloader, train_dataloader)
-        else:
-            tda_output = self.attribute_full(test_dataloader, train_dataloader)
+        if self.mode == "default": # process batch-wise
+            tda_output = self.attribute_default(test_dataloader, train_dataloader)
+        elif self.mode == "iterate":
+            tda_output = self.attribute_iterate(test_dataloader, train_dataloader)
 
         return tda_output
 
-    def attribute_full(
+    def attribute_default(
         self,
         test_dataloader: torch.utils.data.DataLoader,
         train_dataloader: Optional[torch.utils.data.DataLoader] = None,
     ) -> Tensor:
-        """Calculate the influence of the training set on the test set.
-
-        Args:
-            test_dataloader (torch.utils.data.DataLoader): The dataloader for
-                test samples to calculate the influence. The dataloader should not
-                be shuffled.
-            train_dataloader (Optional[torch.utils.data.DataLoader]): The dataloader for
-                training samples to calculate the influence. If None and cache was called,
-                uses cached gradients. If provided with cached gradients, raises an error.
-                The dataloader should not be shuffled.
-
-        Raises:
-            ValueError: If the length of params_list and weight_list don't match,
-                or if train_dataloader is provided when cached gradients exist.
-
-        Returns:
-            Tensor: The influence of the training set on the test set, with
-                the shape of (num_train_samples, num_test_samples).
-        """
         # Initialize output tensor
         if train_dataloader is not None:
             num_train = len(train_dataloader.sampler)
@@ -251,7 +232,7 @@ class TracInAttributor(BaseAttributor):
                         ckpt_idx=ckpt_idx,
                     )
 
-            if train_dataloader is not None:
+            if self.full_train_dataloader is not None:
                 train_grads = []
                 for train_batch_data_ in tqdm(
                     train_dataloader,
@@ -349,33 +330,13 @@ class TracInAttributor(BaseAttributor):
                 )
                 curr_col += batch_size
 
-
         return tda_output
 
-    def attribute_batch(
+    def attribute_iterate(
         self,
         test_dataloader: torch.utils.data.DataLoader,
         train_dataloader: Optional[torch.utils.data.DataLoader] = None,
     ) -> Tensor:
-        """Calculate the influence of the training set on the test set.
-
-        Args:
-            test_dataloader (torch.utils.data.DataLoader): The dataloader for
-                test samples to calculate the influence. The dataloader should not
-                be shuffled.
-            train_dataloader (Optional[torch.utils.data.DataLoader]): The dataloader for
-                training samples to calculate the influence. If None and cache was called,
-                uses cached gradients. If provided with cached gradients, raises an error.
-                The dataloader should not be shuffled.
-
-        Raises:
-            ValueError: If the length of params_list and weight_list don't match,
-                or if train_dataloader is provided when cached gradients exist.
-
-        Returns:
-            Tensor: The influence of the training set on the test set, with
-                the shape of (num_train_samples, num_test_samples).
-        """
         # Initialize output tensor
         if train_dataloader is not None:
             num_train = len(train_dataloader.sampler)

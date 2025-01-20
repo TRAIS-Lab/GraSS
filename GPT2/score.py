@@ -27,7 +27,7 @@ import json
 import logging
 import math
 import os
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+# os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import random
 from itertools import chain
 from pathlib import Path
@@ -254,20 +254,16 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--GIP",
-        action="store_true",
-        help="Use Ghost Inner-Product (GIP) for Grad-Dot calculation.",
-    )
-    parser.add_argument(
-        "--batch",
-        action="store_true",
-        help="If memory is a constraint, with this flag the attribution will process training and testing data in batches (this will cause repetitive computation).",
+        "--mode",
+        type=str,
+        default="GD-default",
+        help="Specify which mode we want to run the data attribution method. Available options: GIP-{default,one_run,iterate} and GD-{default,iterate}.",
     )
     parser.add_argument(
         "--proj",
         type=str,
         default=None,
-        help="Method-Dimension to be used for projection when attributing.",
+        help="The projection method to be used when attributing. Format: proj_method-proj_dim",
     )
     parser.add_argument(
         "--threshold",
@@ -532,9 +528,10 @@ def main():
     from _dattri.benchmark.utils import SubsetSampler
     from _dattri.task import AttributionTask
     from _dattri.algorithm.tracin import TracInAttributor
-    from GIP.helper import find_GIPlayers, Ghost_Inner_Product
+    from GIP.gip import find_GIPlayers, GhostInnerProductAttributor
 
     device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+
     train_dataset = lm_datasets["train"]
     eval_dataset = lm_datasets["validation"]
 
@@ -545,16 +542,38 @@ def main():
     logger.info(f"The eval dataset length: {len(eval_dataset)}.")
 
     # DataLoaders creation:
-    if args.GIP:
-        train_batch_size = 8
-        eval_batch_size = 8
-    else:
-        if args.batch:
-            train_batch_size = 4
+    if args.mode is not None:
+        tda_method, tda_mode = args.mode.split("-")
+
+    print(f"Method: {tda_method}, Mode: {tda_mode}")
+
+    if tda_method == "GIP":
+        if tda_mode == "default":
+            train_batch_size = 8
             eval_batch_size = 8
+        elif tda_mode == "iterate":
+            train_batch_size = 4
+            eval_batch_size = 4
+        elif tda_mode == "one_run":
+            train_batch_size = 4
+            eval_batch_size = 4
         else:
+            message = "Invalid mode type for Grad-Dot with Ghost Inner-Product. Choose from 'default', 'iterate', 'one_run'."
+            raise ValueError(message)
+    elif tda_method == "GD":
+        if tda_mode == "default":
+            train_batch_size = 8
+            eval_batch_size = 8
+        elif tda_mode == "iterate":
             train_batch_size = 2
             eval_batch_size = 2
+        else:
+            message = "Invalid model type for vanilla Grad-Dot. Choose from 'default', 'iterate'."
+            raise ValueError(message)
+    else:
+        raise ValueError("Invalid method type. Choose from 'GIP' or 'GD'.")
+
+    print(f"Train batch size: {train_batch_size}, Eval batch size: {eval_batch_size}")
 
     train_dataloader = DataLoader(
         train_dataset, collate_fn=default_data_collator, batch_size=train_batch_size, sampler=train_sampler
@@ -581,12 +600,14 @@ def main():
             "threshold": args.threshold,
         }
 
+        print(f"Projector: {projector_kwargs}")
+
     model_id = 0
     checkpoint = f"{args.output_dir}/{model_id}"
     model = GIPGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
     model.eval()
 
-    if args.GIP:
+    if tda_method == "GIP":
         print("Grad-Dot with Ghost Inner-Product")
 
         from GIP.layers.layer_norm import GIPLayerNorm
@@ -596,28 +617,28 @@ def main():
         # remove all layer norm layers
         trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GIPLayerNorm)]
 
+        attributor = GhostInnerProductAttributor(
+            model=model,
+            lr=1e-3,
+            layer_name=trainable_layers,
+            projector_kwargs=projector_kwargs,
+            mode=tda_mode,
+            device=device,
+        )
+
         torch.cuda.reset_peak_memory_stats(device)
 
         # time the attribution
         torch.cuda.synchronize(device)
         start = time.time()
 
-        score = Ghost_Inner_Product(
-            model=model,
-            train_dataloader=train_dataloader,
-            test_dataloader=eval_dataloader,
-            layer_name=trainable_layers,
-            projector_kwargs=projector_kwargs,
-            lr=1e-3,
-            batch=args.batch,
-            device=device,
-        )
+        score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=eval_dataloader)
 
         torch.cuda.synchronize(device)
         end = time.time()
 
         peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
-    else:
+    elif tda_method == "GD":
         print("Vanilla Grad-Dot (by dattri)")
         def f(params, batch):
             outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
@@ -643,7 +664,7 @@ def main():
             projector_kwargs=projector_kwargs,
             device=device,
             layer_name=[name for name, _ in model.named_parameters() if 'ln' not in name.lower()],  # Consider only Linear layers (exclude LayerNorm).
-            batch=args.batch,
+            mode=tda_mode,
         )
 
         torch.cuda.reset_peak_memory_stats(device)
@@ -652,13 +673,8 @@ def main():
         torch.cuda.synchronize(device)
         start = time.time()
 
-        if args.batch:
-            with torch.no_grad():
-                score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=eval_dataloader)
-        else:
-            attributor.cache(train_dataloader)
-            with torch.no_grad():
-                score = attributor.attribute(test_dataloader=eval_dataloader)
+        with torch.no_grad():
+            score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=eval_dataloader)
 
         torch.cuda.synchronize(device)
         end = time.time()
@@ -670,24 +686,19 @@ def main():
 
     print(score)
 
-    if args.GIP:
-        if args.proj is not None and args.threshold is not None:
-            torch.save(score, f"./result/score_{proj_method}-{proj_dim}_threshold-{args.threshold}_GIP.pt")
-        elif args.proj is not None:
-            torch.save(score, f"./result/score_{proj_method}-{proj_dim}_GIP.pt")
-        elif args.threshold is not None:
-            torch.save(score, f"./result/score_threshold-{args.threshold}_GIP.pt")
-        else:
-            torch.save(score, f"./result/score_GIP.pt")
-    else:
-        if args.proj is not None and args.threshold is not None:
-            torch.save(score, f"./result/score_{proj_method}-{proj_dim}_threshold-{args.threshold}.pt")
-        elif args.proj is not None:
-            torch.save(score, f"./result/score_{proj_method}-{proj_dim}.pt")
-        elif args.threshold is not None:
-            torch.save(score, f"./result/score_threshold-{args.threshold}.pt")
-        else:
-            torch.save(score, f"./result/score.pt")
+    # Build the filename components
+    filename_parts = ["score"]
+
+    if args.proj is not None:
+        filename_parts.append(f"{proj_method}-{proj_dim}")
+    if args.threshold is not None:
+        filename_parts.append(f"threshold-{args.threshold}")
+
+    filename_parts.append(f"{tda_method}-{tda_mode}")
+
+    # Join parts and save the file
+    filename = f"./result/{'_'.join(filename_parts)}.pt"
+    torch.save(score, filename)
 
 
 if __name__ == "__main__":
