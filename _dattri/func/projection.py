@@ -122,6 +122,7 @@ class BasicProjector(AbstractProjector):
         dtype: torch.dtype = torch.float32,
         ensemble_id: int = 0,
         method: str = "Gaussian",
+        threshold: float = 1e-7,
     ) -> None:
         """Initializes hyperparameters for BasicProjector.
 
@@ -151,6 +152,8 @@ class BasicProjector(AbstractProjector):
         self.dtype = dtype
         self.proj_type = proj_type
         self.ensemble_id = ensemble_id
+        self.method = method #TODO: currently unused
+        self.threshold = threshold #TODO: currently unused
 
         self.proj_matrix = torch.empty(
             self.feature_dim,
@@ -271,7 +274,8 @@ class CudaProjector(AbstractProjector):
         proj_type: ProjectionType,
         device: str,
         max_batch_size: int,
-        method: str
+        method: str,
+        threshold: float = 1e-7,
     ) -> None:
         """Initializes hyperparameters for CudaProjector.
 
@@ -329,6 +333,8 @@ class CudaProjector(AbstractProjector):
             # SJLT(torch.zeros(8, 1_000, device="cuda"), 512, c=5)
             pass
 
+        self.threshold = threshold
+
     def project(
         self,
         features: Union[dict, Tensor],
@@ -372,6 +378,13 @@ class CudaProjector(AbstractProjector):
             fn = getattr(fast_jl, function_name)
 
             try:
+                # threshold the features first
+                features = torch.where(
+                    torch.abs(features) < self.threshold,
+                    torch.zeros_like(features),
+                    features,
+                )
+
                 result = fn(
                     features,
                     self.proj_dim,
@@ -390,6 +403,7 @@ class CudaProjector(AbstractProjector):
             result = SJLT(
                 features,
                 self.proj_dim,
+                self.threshold,
                 seed=self.seed + int(1e4) * ensemble_id,
                 batch_size=effective_batch_size,
                 c=1,
@@ -817,6 +831,7 @@ def make_random_projector(
     method: str = "Gaussian",
     *,
     use_half_precision: bool = True,
+    threshold: float = 1e-7,
 ) -> Tensor:
     """Initialize random projector by the info of feature about to be projected.
 
@@ -908,6 +923,7 @@ def make_random_projector(
                     max_batch_size=proj_max_batch_size,
                     device=device,
                     method=method,
+                    threshold=threshold,
                 )
                 for i, chunk_size in enumerate(param_chunk_sizes)
             ]
@@ -930,6 +946,7 @@ def make_random_projector(
             max_batch_size=proj_max_batch_size,
             device=device,
             method=method,
+            threshold=threshold,
         )
     elif projector == BasicProjector:
         assigned_projector = projector(
@@ -940,6 +957,7 @@ def make_random_projector(
             dtype=dtype,
             device=device,
             method=method,
+            threshold=threshold,
         )
 
     return assigned_projector
@@ -1051,6 +1069,7 @@ def random_project(
     method: str = "Gaussian",
     *,
     use_half_precision: bool = True,
+    threshold: float = 1e-7,
 ) -> Callable:
     """Randomly projects the features to a smaller dimension.
 
@@ -1092,6 +1111,7 @@ def random_project(
         proj_seed=proj_seed,
         method=method,
         use_half_precision=use_half_precision,
+        threshold=threshold,
     )
 
     def _random_project_func(
@@ -1116,26 +1136,34 @@ def random_project(
 
     return _random_project_func
 
-def SJLT(vecs, proj_dim, rand_indices=None, rand_signs=None, seed=0, batch_size=32, c=5, blow_up=1):
+def SJLT(vecs, proj_dim, threshold=0, rand_indices_and_signs=None, seed=0, batch_size=32, c=5, blow_up=1):
     """
     Batched SJLT implementation that processes input vectors in smaller batches
+
     Args:
         vecs (torch.Tensor): Input tensor of shape [num_vectors, original_dim]
         proj_dim (int): Target projection dimension
+        threshold (float): Threshold for sparsity. Default: 0
+        rand_indices_and_signs (tuple): Precomputed random indices and signs. Default: None
         seed (int): Random seed for reproducibility. Default: 0
         batch_size (int): Number of vectors to process at once. Default: 32
         c (int): Sparsity parameter. Default: 5
         blow_up (int): Intermediate dimension multiplier. Default: 1
+
     Returns:
         torch.Tensor: Projected tensor of shape [num_vectors, proj_dim]
     """
     num_vectors, original_dim = vecs.size()
     device = vecs.device
 
-    if rand_indices is None or rand_signs is None:
+    if rand_indices_and_signs is None:
         torch.manual_seed(seed)
         rand_indices = torch.randint(proj_dim * blow_up, (original_dim, c), device=device)
         rand_signs = torch.randint(0, 2, (original_dim, c), device=device) * 2 - 1
+    else:
+        rand_indices, rand_signs = rand_indices_and_signs
+        assert rand_indices.size == (original_dim, c), "Invalid random indices shape"
+        assert rand_signs.size == (original_dim, c), "Invalid random signs shape"
 
     # Initialize output tensor
     output = torch.zeros(num_vectors, proj_dim, device=device)
@@ -1146,61 +1174,37 @@ def SJLT(vecs, proj_dim, rand_indices=None, rand_signs=None, seed=0, batch_size=
         batch = vecs[i:end_idx]
 
         # Process batch using original SJLT function
-        batch_output = sjlt(
-            batch,
-            proj_dim,
-            rand_indices=rand_indices,
-            rand_signs=rand_signs,
-            c=c,
-            blow_up=blow_up
-        )
+        batch_output = sjlt(batch, proj_dim, threshold, rand_indices, rand_signs, c, blow_up)
 
         # Store batch output
         output[i:end_idx] = batch_output
 
     return output
 
-def sjlt(vecs, proj_dim, rand_indices, rand_signs, c=5, blow_up=1):
-    """
-    Forward and batched SJLT implementation optimized for sparse inputs
-
-    Args:
-        vecs (torch.Tensor): Input tensor of shape [batch_size, original_dim]
-        proj_dim (int): Target projection dimension
-        seed (int): Random seed for reproducibility. Default: 0
-        rand_indices (torch.Tensor): Random indices of shape [original_dim, c], values in [0, proj_dim * blow_up)
-        rand_signs (torch.Tensor): Random signs of shape [original_dim, c], values in {-1, 1}
-        batch_size (int): Batch size. Default: 32
-        c (int): Sparsity parameter. Default: 2
-        blow_up (int): Intermediate dimension multiplier. Default: 1
-
-    Returns:
-        torch.Tensor: Projected tensor of shape [batch_size, proj_dim]
-    """
-    batch_size, original_dim = vecs.size()
-    assert original_dim == rand_indices.size(0), "Input dimension must match the number of random indices"
+def sjlt(vecs, proj_dim, threshold, rand_indices, rand_signs, c, blow_up):
+    batch_size, _ = vecs.size()
     device = vecs.device
 
-    # Get indices of all non-zero elements across the batch
-    batch_idx, input_idx = torch.nonzero(vecs, as_tuple=True)
-
+    # Get indices of elements above threshold in a single pass
+    batch_idx, input_idx = torch.nonzero(torch.abs(vecs) >= threshold, as_tuple=True)
     if input_idx.numel() == 0:
         return torch.zeros(batch_size, proj_dim, device=device)
 
     values = vecs[batch_idx, input_idx]
-    scaled_vals = values.unsqueeze(1) * rand_signs[input_idx]
-    output_indices = rand_indices[input_idx]
 
+    # Old implementation
+    # scaled_vals = values.unsqueeze(1) * rand_signs[input_idx]
+    # final_indices = (batch_idx.view(-1, 1) * (proj_dim * blow_up) + rand_indices[input_idx]).flatten()
+
+    scaled_vals = values.repeat_interleave(c) * rand_signs[input_idx].flatten()
+    final_indices = batch_idx.repeat_interleave(c) * (proj_dim * blow_up) + rand_indices[input_idx].flatten()
+
+    # Initialize and fill output tensor
     vecs_p = torch.zeros(batch_size, proj_dim * blow_up, device=device)
+    vecs_p.view(-1).index_add_(0, final_indices, scaled_vals)
 
-    # Create virtual repeated indices using broadcasting
-    final_indices = (batch_idx.view(-1, 1) * (proj_dim * blow_up) + output_indices).flatten()
-
-    vecs_p.view(-1).index_add_(0, final_indices, scaled_vals.flatten())
-
-    vecs_p = vecs_p.view(batch_size, proj_dim, blow_up)
-    vecs_p = vecs_p.sum(dim=2)
-
+    # Sum and normalize
+    vecs_p = vecs_p.view(batch_size, proj_dim, blow_up).sum(dim=2)
     return vecs_p / (c ** 0.5)
 
 def SJLT_reverse(batch_vec, proj_dim, pos_indices=None, neg_indices=None, c=5):

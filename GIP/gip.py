@@ -113,30 +113,25 @@ def _chunked_matmul(A1, A2, chunk_size=128):
     return result
 
 class GhostInnerProductAttributor():
-    def __init__(self,
-                 model,
-                 lr: float = 1e-3,
-                 layer_name: Optional[Union[str, List[str]]] = None,
-                 projector_kwargs: Optional[Dict[str, Any]] = None,
-                 mode: str = "default",
-                 device: str = 'cpu'
+    def __init__(
+        self,
+        model,
+        lr: float = 1e-3,
+        layer_name: Optional[Union[str, List[str]]] = None,
+        projector_kwargs: Optional[Dict[str, Any]] = None,
+        mode: str = "default",
+        device: str = 'cpu'
     ) -> None:
 
         self.model = model
-        if layer_name is None:
-            self.layer_name = find_GIPlayers(model)
-        else:
-            self.layer_name = layer_name
-
-        self.mode = mode
+        self.lr = lr
+        self.layer_name = find_GIPlayers(model) if layer_name is None else layer_name
 
         # determine the proj_dim in proj_kwargs for each layer depending on the mode
-        if projector_kwargs is not None:
-            self.threshold = projector_kwargs.get("threshold", None)
+        if projector_kwargs is not None: # need more complex control of proj_seed and proj_dim for different layers, extract first
             self.proj_seed = projector_kwargs.get("proj_seed", 0)
             proj_dim = projector_kwargs.get("proj_dim", 512)
 
-            projector_kwargs.pop("threshold")
             projector_kwargs.pop("proj_seed")
             projector_kwargs.pop("proj_dim")
 
@@ -161,9 +156,10 @@ class GhostInnerProductAttributor():
             print(f"proj_dim: {self.proj_dim}")
 
         self.projector_kwargs = projector_kwargs
-        self.lr = lr
-        self.full_train_dataloader = None
+        self.mode = mode
         self.device = device
+
+        self.full_train_dataloader = None
 
     def cache(self,
               full_train_dataloader: torch.utils.data.DataLoader
@@ -201,9 +197,9 @@ class GhostInnerProductAttributor():
                     val_1, val_2 = layer.pe_grad_gradcomp(z_grad_full, per_sample=True)
                     if self.projector_kwargs is not None:
                         # Apply threshold is specified
-                        if self.threshold is not None:
-                            val_1 = torch.where(val_1.abs() > self.threshold, val_1, torch.zeros_like(val_1))
-                            val_2 = torch.where(val_2.abs() > self.threshold, val_2, torch.zeros_like(val_2))
+                        # if self.threshold is not None:
+                        #     val_1 = torch.where(val_1.abs() > self.threshold, val_1, torch.zeros_like(val_1))
+                        #     val_2 = torch.where(val_2.abs() > self.threshold, val_2, torch.zeros_like(val_2))
 
                         val_1 = val_1.view(val_1.shape[0], -1)
                         val_2 = val_2.view(val_2.shape[0], -1)
@@ -349,9 +345,9 @@ class GhostInnerProductAttributor():
                         val_1, val_2 = layer.pe_grad_gradcomp(z_grad_full, per_sample=True)
                         if self.projector_kwargs is not None:
                             # Apply threshold is specified
-                            if self.threshold is not None:
-                                val_1 = torch.where(val_1.abs() > self.threshold, val_1, torch.zeros_like(val_1))
-                                val_2 = torch.where(val_2.abs() > self.threshold, val_2, torch.zeros_like(val_2))
+                            # if self.threshold is not None:
+                            #     val_1 = torch.where(val_1.abs() > self.threshold, val_1, torch.zeros_like(val_1))
+                            #     val_2 = torch.where(val_2.abs() > self.threshold, val_2, torch.zeros_like(val_2))
 
                             val_1 = val_1.view(val_1.shape[0], -1)
                             val_2 = val_2.view(val_2.shape[0], -1)
@@ -423,9 +419,9 @@ class GhostInnerProductAttributor():
                     val_1, val_2 = layer.pe_grad_gradcomp(z_grad_test, per_sample=True)
                     if self.projector_kwargs is not None:
                         # Apply threshold is specified
-                        if self.threshold is not None:
-                            val_1 = torch.where(val_1.abs() > self.threshold, val_1, torch.zeros_like(val_1))
-                            val_2 = torch.where(val_2.abs() > self.threshold, val_2, torch.zeros_like(val_2))
+                        # if self.threshold is not None:
+                        #     val_1 = torch.where(val_1.abs() > self.threshold, val_1, torch.zeros_like(val_1))
+                        #     val_2 = torch.where(val_2.abs() > self.threshold, val_2, torch.zeros_like(val_2))
 
                         val_1 = val_1.view(val_1.shape[0], -1)
                         val_2 = val_2.view(val_2.shape[0], -1)
@@ -520,9 +516,9 @@ class GhostInnerProductAttributor():
                 val_1, val_2 = layer.pe_grad_gradcomp(z_grad_full, per_sample=True)
                 if self.projector_kwargs is not None:
                     # Apply threshold is specified
-                    if self.threshold is not None:
-                        val_1 = torch.where(val_1.abs() > self.threshold, val_1, torch.zeros_like(val_1))
-                        val_2 = torch.where(val_2.abs() > self.threshold, val_2, torch.zeros_like(val_2))
+                    # if self.threshold is not None:
+                    #     val_1 = torch.where(val_1.abs() > self.threshold, val_1, torch.zeros_like(val_1))
+                    #     val_2 = torch.where(val_2.abs() > self.threshold, val_2, torch.zeros_like(val_2))
 
                     val_1 = val_1.view(val_1.shape[0], -1)
                     val_2 = val_2.view(val_2.shape[0], -1)
@@ -549,8 +545,7 @@ class GhostInnerProductAttributor():
 
                 dLdZ_train, z_train = val_1[:num_train], val_2[:num_train]
                 dLdZ_val, z_val = val_1[num_train:], val_2[num_train:]
-                result = grad_dotprod(dLdZ_train, z_train, dLdZ_val, z_val) * self.lr
-                grad_dot += result
+                grad_dot += grad_dotprod(dLdZ_train, z_train, dLdZ_val, z_val) * self.lr
 
         return grad_dot
 

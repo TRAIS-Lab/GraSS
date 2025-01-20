@@ -42,6 +42,9 @@ dist
 */log
 */data/*
 
+# debug
+*debug*
+
 # all files in result folder
 */result/*
 */checkpoints/*
