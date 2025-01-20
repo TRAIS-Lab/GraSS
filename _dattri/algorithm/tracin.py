@@ -31,6 +31,7 @@ class TracInAttributor(BaseAttributor):
         normalized_grad: bool,
         projector_kwargs: Optional[Dict[str, Any]] = None,
         layer_name: Optional[Union[str, List[str]]] = None,
+        batch: bool = False,
         device: str = "cpu",
     ) -> None:
         """Initialize the TracIn attributor.
@@ -63,6 +64,7 @@ class TracInAttributor(BaseAttributor):
         self.normalized_grad = normalized_grad
         self.layer_name = layer_name
         self.device = device
+        self.batch = batch
         self.full_train_dataloader = None
         # to get per-sample gradients for a mini-batch of train/test samples
         self.grad_target_func = self.task.get_grad_target_func(in_dims=(None, 0))
@@ -113,8 +115,7 @@ class TracInAttributor(BaseAttributor):
 
                 # Compute gradients
                 grad_t = self.grad_loss_func(parameters, train_batch_data)
-                # save for inspection
-                torch.save(grad_t, f"train_grad_{ckpt_idx}.pt")
+                grad_t = torch.nan_to_num(grad_t)
                 # Apply projection if specified
                 if self.projector_kwargs is not None:
                     # Apply thresholding if specified
@@ -130,11 +131,9 @@ class TracInAttributor(BaseAttributor):
                         **self.projector_kwargs,
                     )
                     grad_t = train_random_project(
-                        torch.nan_to_num(grad_t),
+                        grad_t,
                         ensemble_id=ckpt_idx,
                     )
-                else:
-                    grad_t = torch.nan_to_num(grad_t)
 
                 # Apply normalization if specified
                 if self.normalized_grad:
@@ -175,15 +174,54 @@ class TracInAttributor(BaseAttributor):
 
         # Check if trying to use both cache and new training data
         if train_dataloader is not None and self.full_train_dataloader is not None:
-            raise ValueError(
-                "Cannot provide train_dataloader when cached gradients exist. "
-                "Either use cached gradients (train_dataloader=None) or clear the cache."
-            )
+            message = "You have cached a training loader by .cache()\
+                       and you are trying to attribute a different training loader.\
+                       If this new training loader is a subset of the cached training\
+                       loader, please don't input the training dataloader in\
+                       .attribute() and directly use index to select the corresponding\
+                       scores."
+            raise ValueError(message)
+        if train_dataloader is None and self.full_train_dataloader is None:
+            message = "You did not state a training loader in .attribute() and you\
+                       did not cache a training loader by .cache(). Please provide a\
+                       training loader or cache a training loader."
+            raise ValueError(message)
 
         # Check checkpoint and weight list lengths match
         if len(self.task.get_checkpoints()) != len(self.weight_list):
             raise ValueError("The length of checkpoints and weights lists don't match.")
 
+        if self.batch: # process batch-wise
+            tda_output = self.attribute_batch(test_dataloader, train_dataloader)
+        else:
+            tda_output = self.attribute_full(test_dataloader, train_dataloader)
+
+        return tda_output
+
+    def attribute_full(
+        self,
+        test_dataloader: torch.utils.data.DataLoader,
+        train_dataloader: Optional[torch.utils.data.DataLoader] = None,
+    ) -> Tensor:
+        """Calculate the influence of the training set on the test set.
+
+        Args:
+            test_dataloader (torch.utils.data.DataLoader): The dataloader for
+                test samples to calculate the influence. The dataloader should not
+                be shuffled.
+            train_dataloader (Optional[torch.utils.data.DataLoader]): The dataloader for
+                training samples to calculate the influence. If None and cache was called,
+                uses cached gradients. If provided with cached gradients, raises an error.
+                The dataloader should not be shuffled.
+
+        Raises:
+            ValueError: If the length of params_list and weight_list don't match,
+                or if train_dataloader is provided when cached gradients exist.
+
+        Returns:
+            Tensor: The influence of the training set on the test set, with
+                the shape of (num_train_samples, num_test_samples).
+        """
         # Initialize output tensor
         if train_dataloader is not None:
             num_train = len(train_dataloader.sampler)
@@ -194,7 +232,6 @@ class TracInAttributor(BaseAttributor):
             size=(num_train, len(test_dataloader.sampler)),
         )
 
-        # Iterate over checkpoints
         for ckpt_idx, ckpt_weight in enumerate(self.weight_list):
             parameters, _ = self.task.get_param(
                 ckpt_idx=ckpt_idx,
@@ -214,7 +251,6 @@ class TracInAttributor(BaseAttributor):
                         ckpt_idx=ckpt_idx,
                     )
 
-            # Handle training gradients - either compute or use cached
             if train_dataloader is not None:
                 train_grads = []
                 for train_batch_data_ in tqdm(
@@ -232,6 +268,7 @@ class TracInAttributor(BaseAttributor):
 
                     # Compute gradients
                     grad_t = self.grad_loss_func(parameters, train_batch_data)
+                    grad_t = torch.nan_to_num(grad_t)
                     # Apply projection if specified
                     if self.projector_kwargs is not None:
                         # Apply thresholding if specified
@@ -247,11 +284,9 @@ class TracInAttributor(BaseAttributor):
                             **self.projector_kwargs,
                         )
                         grad_t = train_random_project(
-                            torch.nan_to_num(grad_t),
+                            grad_t,
                             ensemble_id=ckpt_idx,
                         )
-                    else:
-                        grad_t = torch.nan_to_num(grad_t)
 
                     # Apply normalization if specified
                     if self.normalized_grad:
@@ -281,8 +316,7 @@ class TracInAttributor(BaseAttributor):
 
                 # Compute test gradients
                 grad_t = self.grad_target_func(parameters, test_batch_data)
-                # save for inspection
-                torch.save(grad_t, f"test_grad_{ckpt_idx}.pt")
+                torch.nan_to_num(grad_t)
                 # Apply projection if specified
                 if self.projector_kwargs is not None:
                     # Apply thresholding if specified
@@ -298,11 +332,9 @@ class TracInAttributor(BaseAttributor):
                         **self.projector_kwargs,
                     )
                     test_batch_grad = test_random_project(
-                        torch.nan_to_num(grad_t),
+                        grad_t,
                         ensemble_id=ckpt_idx,
                     )
-                else:
-                    test_batch_grad = torch.nan_to_num(grad_t)
 
                 # Apply normalization if specified
                 if self.normalized_grad:
@@ -317,5 +349,159 @@ class TracInAttributor(BaseAttributor):
                 )
                 curr_col += batch_size
 
+
+        return tda_output
+
+    def attribute_batch(
+        self,
+        test_dataloader: torch.utils.data.DataLoader,
+        train_dataloader: Optional[torch.utils.data.DataLoader] = None,
+    ) -> Tensor:
+        """Calculate the influence of the training set on the test set.
+
+        Args:
+            test_dataloader (torch.utils.data.DataLoader): The dataloader for
+                test samples to calculate the influence. The dataloader should not
+                be shuffled.
+            train_dataloader (Optional[torch.utils.data.DataLoader]): The dataloader for
+                training samples to calculate the influence. If None and cache was called,
+                uses cached gradients. If provided with cached gradients, raises an error.
+                The dataloader should not be shuffled.
+
+        Raises:
+            ValueError: If the length of params_list and weight_list don't match,
+                or if train_dataloader is provided when cached gradients exist.
+
+        Returns:
+            Tensor: The influence of the training set on the test set, with
+                the shape of (num_train_samples, num_test_samples).
+        """
+        # Initialize output tensor
+        if train_dataloader is not None:
+            num_train = len(train_dataloader.sampler)
+        else:
+            num_train = len(self.full_train_dataloader.sampler)
+
+        tda_output = torch.zeros(
+            size=(num_train, len(test_dataloader.sampler)),
+        )
+
+        # iterate over each checkpoint (each ensemble)
+        for ckpt_idx, ckpt_weight in zip(
+            range(len(self.task.get_checkpoints())),
+            self.weight_list,
+        ):
+            parameters, _ = self.task.get_param(
+                ckpt_idx=ckpt_idx,
+                layer_name=self.layer_name,
+            )
+            if self.layer_name is not None:
+                self.grad_target_func = self.task.get_grad_target_func(
+                    in_dims=(None, 0),
+                    layer_name=self.layer_name,
+                    ckpt_idx=ckpt_idx,
+                )
+                self.grad_loss_func = self.task.get_grad_loss_func(
+                    in_dims=(None, 0),
+                    layer_name=self.layer_name,
+                    ckpt_idx=ckpt_idx,
+                )
+
+            for train_batch_idx, train_batch_data_ in enumerate(
+                tqdm(
+                    train_dataloader,
+                    desc="calculating gradient of training set...",
+                    leave=False,
+                ),
+            ):
+                # Process training batch
+                if isinstance(train_batch_data_, (tuple, list)):
+                    train_batch_data = tuple(
+                        data.to(self.device) for data in train_batch_data_
+                    )
+                else:
+                    train_batch_data = train_batch_data_
+
+                # get gradient of train
+                grad_t = self.grad_loss_func(parameters, train_batch_data)
+                grad_t = torch.nan_to_num(grad_t)
+                if self.projector_kwargs is not None:
+                    # define the projector for this batch of data
+                    self.train_random_project = random_project(
+                        grad_t,
+                        # get the batch size, prevent edge case
+                        grad_t.shape[0],
+                        **self.projector_kwargs,
+                    )
+                    # param index as ensemble id
+                    train_batch_grad = self.train_random_project(
+                        grad_t,
+                        ensemble_id=ckpt_idx,
+                    )
+                else:
+                    train_batch_grad = grad_t
+
+                for test_batch_idx, test_batch_data_ in enumerate(
+                    tqdm(
+                        test_dataloader,
+                        desc="calculating gradient of test set...",
+                        leave=False,
+                    ),
+                ):
+                    # move to device
+                    if isinstance(test_batch_data_, (tuple, list)):
+                        test_batch_data = tuple(
+                            data.to(self.device) for data in test_batch_data_
+                        )
+                    else:
+                        test_batch_data = test_batch_data_
+
+                    # get gradient of test
+                    grad_t = self.grad_target_func(parameters, test_batch_data)
+                    grad_t = torch.nan_to_num(grad_t)
+                    if self.projector_kwargs is not None:
+                        # define the projector for this batch of data
+                        self.test_random_project = random_project(
+                            grad_t,
+                            grad_t.shape[0],
+                            **self.projector_kwargs,
+                        )
+
+                        test_batch_grad = self.test_random_project(
+                            grad_t,
+                            ensemble_id=ckpt_idx,
+                        )
+                    else:
+                        test_batch_grad = grad_t
+
+                    # results position based on batch info
+                    row_st = train_batch_idx * train_dataloader.batch_size
+                    row_ed = min(
+                        (train_batch_idx + 1) * train_dataloader.batch_size,
+                        len(train_dataloader.sampler),
+                    )
+
+                    col_st = test_batch_idx * test_dataloader.batch_size
+                    col_ed = min(
+                        (test_batch_idx + 1) * test_dataloader.batch_size,
+                        len(test_dataloader.sampler),
+                    )
+                    # accumulate the TDA score in corresponding positions (blocks)
+                    if self.normalized_grad:
+                        tda_output[row_st:row_ed, col_st:col_ed] += (
+                            (
+                                normalize(train_batch_grad)
+                                @ normalize(test_batch_grad).T
+                                * ckpt_weight
+                            )
+                            .detach()
+                            .cpu()
+                        )
+                    else:
+                        tda_output[row_st:row_ed, col_st:col_ed] += (
+                            (train_batch_grad @ test_batch_grad.T * ckpt_weight)
+                            .detach()
+                            .cpu()
+                        )
 
         return tda_output

@@ -392,7 +392,7 @@ class CudaProjector(AbstractProjector):
                 self.proj_dim,
                 seed=self.seed + int(1e4) * ensemble_id,
                 batch_size=effective_batch_size,
-                c=5,
+                c=1,
             )
 
         return result

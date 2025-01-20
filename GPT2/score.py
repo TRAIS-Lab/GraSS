@@ -27,6 +27,7 @@ import json
 import logging
 import math
 import os
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import random
 from itertools import chain
 from pathlib import Path
@@ -256,6 +257,11 @@ def parse_args():
         "--GIP",
         action="store_true",
         help="Use Ghost Inner-Product (GIP) for Grad-Dot calculation.",
+    )
+    parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="If memory is a constraint, with this flag the attribution will process training and testing data in batches (this will cause repetitive computation).",
     )
     parser.add_argument(
         "--proj",
@@ -526,13 +532,11 @@ def main():
     from _dattri.benchmark.utils import SubsetSampler
     from _dattri.task import AttributionTask
     from _dattri.algorithm.tracin import TracInAttributor
+    from GIP.helper import find_GIPlayers, Ghost_Inner_Product
 
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     train_dataset = lm_datasets["train"]
     eval_dataset = lm_datasets["validation"]
-
-    # # TODO debugging: just include the first eval test point in the eval_dataset
-    train_dataset = train_dataset.select(range(4))
-    eval_dataset = eval_dataset.select(range(1))
 
     train_sampler = SubsetSampler(range(len(train_dataset)))
 
@@ -541,11 +545,22 @@ def main():
     logger.info(f"The eval dataset length: {len(eval_dataset)}.")
 
     # DataLoaders creation:
+    if args.GIP:
+        train_batch_size = 8
+        eval_batch_size = 8
+    else:
+        if args.batch:
+            train_batch_size = 4
+            eval_batch_size = 8
+        else:
+            train_batch_size = 2
+            eval_batch_size = 2
+
     train_dataloader = DataLoader(
-        train_dataset, collate_fn=default_data_collator, batch_size=4, sampler=train_sampler
+        train_dataset, collate_fn=default_data_collator, batch_size=train_batch_size, sampler=train_sampler
     )
     eval_dataloader = DataLoader(
-        eval_dataset, collate_fn=default_data_collator, batch_size=4, shuffle=False
+        eval_dataset, collate_fn=default_data_collator, batch_size=eval_batch_size, shuffle=False
     )
 
     proj_method, proj_dim = None, None
@@ -555,82 +570,64 @@ def main():
 
     if proj_method is None:
         projector_kwargs = None
-    elif proj_method == "Gaussian":
+    else:
         projector_kwargs = {
             "proj_dim": proj_dim,
             "proj_max_batch_size": 32,
             "proj_seed": 0,
-            "method": "Gaussian",
-            "device": "cuda",
-            "use_half_precision": False,
-            "threshold": args.threshold,
-        }
-    elif proj_method == "FJLT":
-        projector_kwargs = {
-            "proj_dim": proj_dim,
-            "proj_max_batch_size": 32,
-            "proj_seed": 0,
-            "method": "FJLT",
-            "device": "cuda",
-            "use_half_precision": False,
-            "threshold": args.threshold,
-        }
-    elif proj_method == "SJLT":
-        projector_kwargs = {
-            "proj_dim": proj_dim,
-            "proj_max_batch_size": 32,
-            "proj_seed": 0,
-            "device": "cuda",
-            "method": "SJLT",
+            "device": device,
+            "method": proj_method,
             "use_half_precision": False,
             "threshold": args.threshold,
         }
 
     model_id = 0
     checkpoint = f"{args.output_dir}/{model_id}"
-    model = GIPGPT2LMHeadModel.from_pretrained(checkpoint).cuda()
+    model = GIPGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
+    model.eval()
 
     if args.GIP:
         print("Grad-Dot with Ghost Inner-Product")
 
-        from GIP.helper import find_GIPlayers, Ghost_Inner_Product
-
-
+        from GIP.layers.layer_norm import GIPLayerNorm
 
         trainable_layers = find_GIPlayers(model)
         trainable_layers = trainable_layers[1:] # Omit the first embedding layer due to weight tying with the last linear layer
+        # remove all layer norm layers
+        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GIPLayerNorm)]
 
-        torch.cuda.reset_peak_memory_stats("cuda")
+        torch.cuda.reset_peak_memory_stats(device)
 
         # time the attribution
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(device)
         start = time.time()
 
         score = Ghost_Inner_Product(
-            model=model.cuda(),
+            model=model,
             train_dataloader=train_dataloader,
             test_dataloader=eval_dataloader,
-            trainable_layers=trainable_layers,
+            layer_name=trainable_layers,
             projector_kwargs=projector_kwargs,
             lr=1e-3,
-            device="cuda",
+            batch=args.batch,
+            device=device,
         )
 
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(device)
         end = time.time()
 
-        peak_memory = torch.cuda.max_memory_allocated("cuda") / 1e6  # Convert to MB
+        peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
     else:
         print("Vanilla Grad-Dot (by dattri)")
         def f(params, batch):
-            outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(),
-                                                kwargs={"attention_mask": batch["attention_mask"].cuda(),
-                                                        "labels": batch["labels"].cuda()})
+            outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
+                                                kwargs={"attention_mask": batch["attention_mask"].cuda(device),
+                                                        "labels": batch["labels"].cuda(device)})
             logp = -outputs.loss
             return logp - torch.log(1 - torch.exp(logp))
 
         def checkpoints_load_func(model, checkpoint):
-            model = GIPGPT2LMHeadModel.from_pretrained(checkpoint).cuda()
+            model = GIPGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
             model.eval()
             return model
 
@@ -639,35 +636,34 @@ def main():
                             checkpoints=checkpoint,
                             checkpoints_load_func=checkpoints_load_func)
 
-        normalized_grad = False # For Grad-Dot, True if Grad-Cos
-
-
-        # Initialize TracInAttributor with multiple layers
         attributor = TracInAttributor(
             task=task,
             weight_list=torch.ones(1) * 1e-3,
-            normalized_grad=normalized_grad,
+            normalized_grad=False, # For Grad-Dot, True if Grad-Cos
             projector_kwargs=projector_kwargs,
-            device="cuda",
-            layer_name=[name for name, _ in model.named_parameters() if 'ln' not in name.lower()],  # Pass all parameter names for this layer
+            device=device,
+            layer_name=[name for name, _ in model.named_parameters() if 'ln' not in name.lower()],  # Consider only Linear layers (exclude LayerNorm).
+            batch=args.batch,
         )
 
-
-        attributor.cache(train_dataloader)
-
-        torch.cuda.reset_peak_memory_stats("cuda")
+        torch.cuda.reset_peak_memory_stats(device)
 
         # time the attribution
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(device)
         start = time.time()
 
-        with torch.no_grad():
-            score = attributor.attribute(test_dataloader=eval_dataloader)
+        if args.batch:
+            with torch.no_grad():
+                score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=eval_dataloader)
+        else:
+            attributor.cache(train_dataloader)
+            with torch.no_grad():
+                score = attributor.attribute(test_dataloader=eval_dataloader)
 
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(device)
         end = time.time()
 
-        peak_memory = torch.cuda.max_memory_allocated("cuda") / 1e6  # Convert to MB
+        peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
 
     print(f"Time taken: {end - start} seconds")
     print(f"Peak memory usage: {peak_memory} MB")
