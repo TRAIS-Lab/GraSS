@@ -197,30 +197,33 @@ class GhostInnerProductAttributor():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
                     val_1, val_2 = layer.pe_grad_gradcomp(z_grad_full, per_sample=True)
                     if self.projector_kwargs is not None:
-                        val_1_flatten = val_1.view(-1, val_1.shape[1])
-                        val_2_flatten = val_2.view(-1, val_1.shape[1])
+                        val_1_flatten = val_1.view(-1, val_1.shape[-1])
+                        val_2_flatten = val_2.view(-1, val_2.shape[-1])
+
+                        base_seed = self.proj_seed + int(1e4) * layer_id
+                        proj_dim = self.proj_dim[layer_id]
 
                         # input projector
                         random_project_1 = random_project(
                             val_1_flatten,
                             val_1_flatten.shape[0],
-                            proj_seed=self.proj_seed + int(1e4) * layer_id,
-                            proj_dim=self.proj_dim[layer_id],
+                            proj_seed=base_seed,
+                            proj_dim=proj_dim,
                             **self.projector_kwargs,
                         )
                         # output_grad projector
                         random_project_2 = random_project(
                             val_2_flatten,
                             val_2_flatten.shape[0],
-                            proj_seed=self.proj_seed + int(1e4) * layer_id + 1,
-                            proj_dim=self.proj_dim[layer_id],
+                            proj_seed=base_seed + 1,
+                            proj_dim=proj_dim,
                             **self.projector_kwargs,
                         )
 
                         # when input is sequence
                         if val_1.dim() == 3:
-                            val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], -1, val_1.shape[2])
-                            val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], -1, val_2.shape[2])
+                            val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], val_1.shape[1], -1)
+                            val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], val_2.shape[1], -1)
                         else:
                             val_1 = random_project_1(val_1_flatten)
                             val_2 = random_project_2(val_2_flatten)
@@ -346,30 +349,33 @@ class GhostInnerProductAttributor():
                     for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
                         val_1, val_2 = layer.pe_grad_gradcomp(z_grad_full, per_sample=True)
                         if self.projector_kwargs is not None:
-                            val_1_flatten = val_1.view(-1, val_1.shape[1])
-                            val_2_flatten = val_2.view(-1, val_1.shape[1])
+                            val_1_flatten = val_1.view(-1, val_1.shape[-1])
+                            val_2_flatten = val_2.view(-1, val_2.shape[-1])
+
+                            base_seed = self.proj_seed + int(1e4) * layer_id
+                            proj_dim = self.proj_dim[layer_id]
 
                             # input projector
                             random_project_1 = random_project(
                                 val_1_flatten,
                                 val_1_flatten.shape[0],
-                                proj_seed=self.proj_seed + int(1e4) * layer_id,
-                                proj_dim=self.proj_dim[layer_id],
+                                proj_seed=base_seed,
+                                proj_dim=proj_dim,
                                 **self.projector_kwargs,
                             )
                             # output_grad projector
                             random_project_2 = random_project(
                                 val_2_flatten,
                                 val_2_flatten.shape[0],
-                                proj_seed=self.proj_seed + int(1e4) * layer_id + 1,
-                                proj_dim=self.proj_dim[layer_id],
+                                proj_seed=base_seed + 1,
+                                proj_dim=proj_dim,
                                 **self.projector_kwargs,
                             )
 
                             # when input is sequence
                             if val_1.dim() == 3:
-                                val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], -1, val_1.shape[2])
-                                val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], -1, val_2.shape[2])
+                                val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], val_1.shape[1], -1)
+                                val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], val_2.shape[1], -1)
                             else:
                                 val_1 = random_project_1(val_1_flatten)
                                 val_2 = random_project_2(val_2_flatten)
@@ -420,30 +426,33 @@ class GhostInnerProductAttributor():
                 for layer_id, (layer, z_grad_test) in enumerate(zip(self.layer_name, Z_grad_test)):
                     val_1, val_2 = layer.pe_grad_gradcomp(z_grad_test, per_sample=True)
                     if self.projector_kwargs is not None:
-                        val_1_flatten = val_1.view(-1, val_1.shape[1])
-                        val_2_flatten = val_2.view(-1, val_1.shape[1])
+                        val_1_flatten = val_1.view(-1, val_1.shape[-1])
+                        val_2_flatten = val_2.view(-1, val_2.shape[-1])
+
+                        base_seed = self.proj_seed + int(1e4) * layer_id
+                        proj_dim = self.proj_dim[layer_id]
 
                         # input projector
                         random_project_1 = random_project(
                             val_1_flatten,
                             val_1_flatten.shape[0],
-                            proj_seed=self.proj_seed + int(1e4) * layer_id,
-                            proj_dim=self.proj_dim[layer_id],
+                            proj_seed=base_seed,
+                            proj_dim=proj_dim,
                             **self.projector_kwargs,
                         )
                         # output_grad projector
                         random_project_2 = random_project(
                             val_2_flatten,
                             val_2_flatten.shape[0],
-                            proj_seed=self.proj_seed + int(1e4) * layer_id + 1,
-                            proj_dim=self.proj_dim[layer_id],
+                            proj_seed=base_seed + 1,
+                            proj_dim=proj_dim,
                             **self.projector_kwargs,
                         )
 
                         # when input is sequence
                         if val_1.dim() == 3:
-                            val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], -1, val_1.shape[2])
-                            val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], -1, val_2.shape[2])
+                            val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], val_1.shape[1], -1)
+                            val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], val_2.shape[1], -1)
                         else:
                             val_1 = random_project_1(val_1_flatten)
                             val_2 = random_project_2(val_2_flatten)
@@ -518,30 +527,33 @@ class GhostInnerProductAttributor():
             for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_full)):
                 val_1, val_2 = layer.pe_grad_gradcomp(z_grad_full, per_sample=True)
                 if self.projector_kwargs is not None:
-                    val_1_flatten = val_1.view(-1, val_1.shape[1])
-                    val_2_flatten = val_2.view(-1, val_1.shape[1])
+                    val_1_flatten = val_1.view(-1, val_1.shape[-1])
+                    val_2_flatten = val_2.view(-1, val_2.shape[-1])
+
+                    base_seed = self.proj_seed + int(1e4) * layer_id
+                    proj_dim = self.proj_dim[layer_id]
 
                     # input projector
                     random_project_1 = random_project(
                         val_1_flatten,
                         val_1_flatten.shape[0],
-                        proj_seed=self.proj_seed + int(1e4) * layer_id,
-                        proj_dim=self.proj_dim[layer_id],
+                        proj_seed=base_seed,
+                        proj_dim=proj_dim,
                         **self.projector_kwargs,
                     )
                     # output_grad projector
                     random_project_2 = random_project(
                         val_2_flatten,
                         val_2_flatten.shape[0],
-                        proj_seed=self.proj_seed + int(1e4) * layer_id + 1,
-                        proj_dim=self.proj_dim[layer_id],
+                        proj_seed=base_seed + 1,
+                        proj_dim=proj_dim,
                         **self.projector_kwargs,
                     )
 
                     # when input is sequence
                     if val_1.dim() == 3:
-                        val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], -1, val_1.shape[2])
-                        val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], -1, val_2.shape[2])
+                        val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], val_1.shape[1], -1)
+                        val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], val_2.shape[1], -1)
                     else:
                         val_1 = random_project_1(val_1_flatten)
                         val_2 = random_project_2(val_2_flatten)

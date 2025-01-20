@@ -54,13 +54,7 @@ class TracInAttributor(BaseAttributor):
         """
         self.task = task
         self.weight_list = weight_list
-        # these are projector kwargs shared by train/test projector
         self.projector_kwargs = projector_kwargs
-        # set proj seed
-        if projector_kwargs is not None:
-            self.threshold = self.projector_kwargs.get("threshold", None)
-            self.projector_kwargs.pop("threshold")
-
         self.normalized_grad = normalized_grad
         self.layer_name = layer_name
         self.device = device
@@ -118,13 +112,6 @@ class TracInAttributor(BaseAttributor):
                 grad_t = torch.nan_to_num(grad_t)
                 # Apply projection if specified
                 if self.projector_kwargs is not None:
-                    # Apply thresholding if specified
-                    if self.threshold is not None:
-                        grad_t = torch.where(
-                            grad_t.abs() > self.threshold,
-                            grad_t,
-                            torch.zeros_like(grad_t),
-                        )
                     train_random_project = random_project(
                         grad_t,
                         grad_t.shape[0],
@@ -252,13 +239,6 @@ class TracInAttributor(BaseAttributor):
                     grad_t = torch.nan_to_num(grad_t)
                     # Apply projection if specified
                     if self.projector_kwargs is not None:
-                        # Apply thresholding if specified
-                        if self.threshold is not None:
-                            grad_t = torch.where(
-                                grad_t.abs() > self.threshold,
-                                grad_t,
-                                torch.zeros_like(grad_t),
-                            )
                         train_random_project = random_project(
                             grad_t,
                             grad_t.shape[0],
@@ -281,11 +261,12 @@ class TracInAttributor(BaseAttributor):
                 train_grads = self.cached_train_grads[ckpt_idx].to(self.device)
 
             # Process test data batches
-            curr_col = 0
-            for test_batch_data_ in tqdm(
-                test_dataloader,
-                desc="calculating gradient of test set...",
-                leave=False,
+            for test_batch_idx, test_batch_data_ in enumerate(
+                tqdm(
+                    test_dataloader,
+                    desc="calculating gradient of test set...",
+                    leave=False,
+                ),
             ):
                 # Process test batch
                 if isinstance(test_batch_data_, (tuple, list)):
@@ -300,13 +281,6 @@ class TracInAttributor(BaseAttributor):
                 torch.nan_to_num(grad_t)
                 # Apply projection if specified
                 if self.projector_kwargs is not None:
-                    # Apply thresholding if specified
-                    if self.threshold is not None:
-                        grad_t = torch.where(
-                            grad_t.abs() > self.threshold,
-                            grad_t,
-                            torch.zeros_like(grad_t),
-                        )
                     test_random_project = random_project(
                         grad_t,
                         grad_t.shape[0],
@@ -316,19 +290,24 @@ class TracInAttributor(BaseAttributor):
                         grad_t,
                         ensemble_id=ckpt_idx,
                     )
+                else:
+                    test_batch_grad = grad_t
 
                 # Apply normalization if specified
                 if self.normalized_grad:
                     test_batch_grad = normalize(test_batch_grad)
 
                 # Calculate influence scores for this batch
-                batch_size = test_batch_grad.shape[0]
-                tda_output[:, curr_col:curr_col + batch_size] += (
+                col_st = test_batch_idx * test_dataloader.batch_size
+                col_ed = min(
+                    (test_batch_idx + 1) * test_dataloader.batch_size,
+                    len(test_dataloader.sampler),
+                )
+                tda_output[:, col_st:col_ed] += (
                     (train_grads @ test_batch_grad.T * ckpt_weight)
                     .detach()
                     .cpu()
                 )
-                curr_col += batch_size
 
         return tda_output
 
@@ -390,7 +369,6 @@ class TracInAttributor(BaseAttributor):
                     # define the projector for this batch of data
                     self.train_random_project = random_project(
                         grad_t,
-                        # get the batch size, prevent edge case
                         grad_t.shape[0],
                         **self.projector_kwargs,
                     )

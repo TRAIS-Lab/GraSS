@@ -271,6 +271,11 @@ def parse_args():
         default=0.0,
         help="Threshold to be used for projection when attributing.",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Debug mode.",
+    )
 
     args = parser.parse_args()
 
@@ -530,8 +535,7 @@ def main():
     from _dattri.algorithm.tracin import TracInAttributor
     from GIP.gip import find_GIPlayers, GhostInnerProductAttributor
 
-    debug = False
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
 
     model_id = 0
@@ -541,8 +545,9 @@ def main():
     train_dataset = lm_datasets["train"]
     test_dataset = lm_datasets["validation"]
 
-    # train_dataset = train_dataset.select(range(5))
-    # test_dataset = test_dataset.select(range(2))
+    if args.debug: # toy dataset
+        train_dataset = train_dataset.select(range(10))
+        test_dataset = test_dataset.select(range(5))
 
     train_sampler = SubsetSampler(range(len(train_dataset)))
 
@@ -704,7 +709,7 @@ def main():
         filename_parts.append(f"thrd-{args.threshold}")
 
     # Join parts and save the file
-    if debug:
+    if args.debug:
         filename = f"./result/debug/{'_'.join(filename_parts)}.pt"
     else:
         filename = f"./result/{'_'.join(filename_parts)}.pt"
