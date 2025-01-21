@@ -93,11 +93,13 @@ class TracInAttributor(BaseAttributor):
                     ckpt_idx=ckpt_idx,
                 )
 
-            train_batch_grads = []
-            for train_data in tqdm(
-                full_train_dataloader,
-                desc=f"caching gradients for checkpoint {ckpt_idx}...",
-                leave=False,
+            train_batch_grads = None
+            for train_batch_idx, train_data in enumerate(
+                tqdm(
+                    full_train_dataloader,
+                    desc=f"caching gradients for checkpoint {ckpt_idx}...",
+                    leave=False,
+                ),
             ):
                 # Handle different data formats
                 if isinstance(train_data, (tuple, list)):
@@ -110,6 +112,7 @@ class TracInAttributor(BaseAttributor):
                 # Compute gradients
                 grad_t = self.grad_loss_func(parameters, train_batch_data)
                 grad_t = torch.nan_to_num(grad_t)
+
                 # Apply projection if specified
                 if self.projector_kwargs is not None:
                     train_random_project = random_project(
@@ -126,10 +129,18 @@ class TracInAttributor(BaseAttributor):
                 if self.normalized_grad:
                     grad_t = normalize(grad_t)
 
-                train_batch_grads.append(grad_t.detach())
+                if train_batch_grads is None:
+                    total_samples = len(full_train_dataloader.sampler)
+                    train_batch_grads = torch.zeros((total_samples, *grad_t.shape[1:]), device=self.device)
 
-            # Store concatenated gradients for this checkpoint
-            self.cached_train_grads.append(torch.cat(train_batch_grads, dim=0))
+                col_st = train_batch_idx * full_train_dataloader.batch_size
+                col_ed = min(
+                    (train_batch_idx + 1) * full_train_dataloader.batch_size,
+                    len(full_train_dataloader.sampler),
+                )
+                train_batch_grads[col_st:col_ed] = grad_t.detach()
+
+            self.cached_train_grads.append(train_batch_grads)
 
     def attribute(
         self,
@@ -220,11 +231,13 @@ class TracInAttributor(BaseAttributor):
                     )
 
             if train_dataloader is not None:
-                train_grads = []
-                for train_batch_data_ in tqdm(
-                    train_dataloader,
-                    desc="calculating gradient of training set...",
-                    leave=False,
+                train_grads = None
+                for train_batch_idx, train_batch_data_ in enumerate(
+                    tqdm(
+                        train_dataloader,
+                        desc="calculating gradient of training set...",
+                        leave=False,
+                    ),
                 ):
                     # Process training batch
                     if isinstance(train_batch_data_, (tuple, list)):
@@ -237,6 +250,7 @@ class TracInAttributor(BaseAttributor):
                     # Compute gradients
                     grad_t = self.grad_loss_func(parameters, train_batch_data)
                     grad_t = torch.nan_to_num(grad_t)
+
                     # Apply projection if specified
                     if self.projector_kwargs is not None:
                         train_random_project = random_project(
@@ -253,9 +267,16 @@ class TracInAttributor(BaseAttributor):
                     if self.normalized_grad:
                         grad_t = normalize(grad_t)
 
-                    train_grads.append(grad_t)
+                    if train_grads is None:
+                        total_samples = len(train_dataloader.sampler)
+                        train_grads = torch.zeros((total_samples, *grad_t.shape[1:]), device=self.device)
 
-                train_grads = torch.cat(train_grads, dim=0)
+                    col_st = train_batch_idx * train_dataloader.batch_size
+                    col_ed = min(
+                        (train_batch_idx + 1) * train_dataloader.batch_size,
+                        len(train_dataloader.sampler),
+                    )
+                    train_grads[col_st:col_ed] = grad_t.detach()
             else:
                 # Use cached gradients
                 train_grads = self.cached_train_grads[ckpt_idx].to(self.device)
@@ -279,6 +300,7 @@ class TracInAttributor(BaseAttributor):
                 # Compute test gradients
                 grad_t = self.grad_target_func(parameters, test_batch_data)
                 torch.nan_to_num(grad_t)
+
                 # Apply projection if specified
                 if self.projector_kwargs is not None:
                     test_random_project = random_project(

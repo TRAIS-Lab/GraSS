@@ -531,9 +531,6 @@ def main():
 
     # >>>>>>>>>>>>>>>>>>>>> dattri Code begins here >>>>>>>>>>>>>>>>>>>>>
     from _dattri.benchmark.utils import SubsetSampler
-    from _dattri.task import AttributionTask
-    from _dattri.algorithm.tracin import TracInAttributor
-    from GIP.gip import find_GIPlayers, GhostInnerProductAttributor
 
     device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
@@ -563,8 +560,8 @@ def main():
 
     if tda_method == "GIP":
         if tda_mode == "default": # default will first store all the information for train. Only used with projection.
-            train_batch_size = 2
-            test_batch_size = 2
+            train_batch_size = 4
+            test_batch_size = 4
         elif tda_mode == "iterate": # For iterate, #repeated computation over test set is n / train_bat_size.
             if args.proj is not None: # need extra memory for projection
                 train_batch_size = 8
@@ -628,19 +625,32 @@ def main():
     logger.info("***** Running attribution *****")
 
     if tda_method == "GIP":
+        from GIP.gip import GhostInnerProductAttributor
+        from GIP.mem_gip import MemEffGhostInnerProductAttributor
+        from GIP.helper import find_GIPlayers
         from GIP.layers.layer_norm import GIPLayerNorm
 
         trainable_layers = find_GIPlayers(model)
         trainable_layers = trainable_layers[1:] # Omit the first embedding layer due to weight tying with the last linear layer
         trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GIPLayerNorm)] # remove all LayerNorm layers
 
-        attributor = GhostInnerProductAttributor(
+        # attributor = GhostInnerProductAttributor(
+        #     model=model,
+        #     lr=1e-3,
+        #     layer_name=trainable_layers,
+        #     projector_kwargs=projector_kwargs,
+        #     mode=tda_mode,
+        #     device=device,
+        # )
+
+        attributor = MemEffGhostInnerProductAttributor(
             model=model,
             lr=1e-3,
             layer_name=trainable_layers,
             projector_kwargs=projector_kwargs,
-            mode=tda_mode,
             device=device,
+            chunk_size=test_batch_size,
+            max_test_batches=12,
         )
 
         torch.cuda.reset_peak_memory_stats(device)
@@ -648,13 +658,19 @@ def main():
         torch.cuda.synchronize(device)
         start = time.time()
 
-        score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
+        try:
+            score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
+        finally:
+            attributor.cleanup()
 
         torch.cuda.synchronize(device)
         end = time.time()
 
         peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
     elif tda_method == "GD":
+        from _dattri.task import AttributionTask
+        from _dattri.algorithm.tracin import TracInAttributor
+
         def f(params, batch):
             outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
                                                 kwargs={"attention_mask": batch["attention_mask"].cuda(device),

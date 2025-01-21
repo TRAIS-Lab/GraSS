@@ -44,7 +44,8 @@ dist
 
 # debug
 *debug*
+*cache*
 
 # all files in result folder
 */result/*
-*/checkpoints/*
+**/checkpoints*/
