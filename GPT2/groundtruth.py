@@ -554,7 +554,7 @@ def main():
         result_list.append(result_iter)
     result = torch.stack(result_list)
 
-    torch.save(result, "./result/gt.pt")
+    torch.save(result, f"./{args.output_dir}/gt.pt")
     print(result.shape)
 
 

@@ -266,6 +266,12 @@ def parse_args():
         help="The projection method to be used when attributing. Format: proj_method-proj_dim",
     )
     parser.add_argument(
+        "--device",
+        type=int,
+        default=0,
+        help="cuda device to be used",
+    )
+    parser.add_argument(
         "--threshold",
         type=float,
         default=0.0,
@@ -532,7 +538,7 @@ def main():
     # >>>>>>>>>>>>>>>>>>>>> dattri Code begins here >>>>>>>>>>>>>>>>>>>>>
     from _dattri.benchmark.utils import SubsetSampler
 
-    device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
 
     model_id = 0
@@ -573,12 +579,11 @@ def main():
             train_batch_size = 4
             test_batch_size = 4
         else:
-            message = "Invalid mode type for Grad-Dot with Ghost Inner-Product. Choose from 'default', 'iterate', 'one_run'."
-            raise ValueError(message)
+            raise ValueError("Invalid mode type for Grad-Dot with Ghost Inner-Product. Choose from 'default', 'iterate', 'one_run'.")
     elif tda_method == "GD":
         if tda_mode == "default":
-            train_batch_size = 2
-            test_batch_size = 2
+            train_batch_size = 4
+            test_batch_size = 4
         elif tda_mode == "iterate":
             if args.proj is not None:
                 train_batch_size = 4
@@ -587,8 +592,15 @@ def main():
                 train_batch_size = 8
                 test_batch_size = 8
         else:
-            message = "Invalid model type for vanilla Grad-Dot. Choose from 'default', 'iterate'."
-            raise ValueError(message)
+            raise ValueError("Invalid model type for vanilla Grad-Dot. Choose from 'default', 'iterate'.")
+    elif tda_method =="TRAK":
+        if tda_mode == "default":
+            train_batch_size = 4
+            test_batch_size = 4
+        else:
+            raise ValueError("Invalid method type. Choose from 'default'.")
+    elif tda_method == "LoGra":
+        pass
     else:
         raise ValueError("Invalid method type. Choose from 'GIP' or 'GD'.")
 
@@ -634,34 +646,36 @@ def main():
         trainable_layers = trainable_layers[1:] # Omit the first embedding layer due to weight tying with the last linear layer
         trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GIPLayerNorm)] # remove all LayerNorm layers
 
-        # attributor = GhostInnerProductAttributor(
-        #     model=model,
-        #     lr=1e-3,
-        #     layer_name=trainable_layers,
-        #     projector_kwargs=projector_kwargs,
-        #     mode=tda_mode,
-        #     device=device,
-        # )
-
-        attributor = MemEffGhostInnerProductAttributor(
+        attributor = GhostInnerProductAttributor(
             model=model,
             lr=1e-3,
             layer_name=trainable_layers,
             projector_kwargs=projector_kwargs,
+            mode=tda_mode,
             device=device,
-            chunk_size=test_batch_size,
-            max_test_batches=12,
         )
+
+        # attributor = MemEffGhostInnerProductAttributor(
+        #     model=model,
+        #     lr=1e-3,
+        #     layer_name=trainable_layers,
+        #     projector_kwargs=projector_kwargs,
+        #     device=device,
+        #     chunk_size=test_batch_size,
+        #     max_test_batches=12,
+        # )
 
         torch.cuda.reset_peak_memory_stats(device)
 
         torch.cuda.synchronize(device)
         start = time.time()
 
-        try:
-            score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
-        finally:
-            attributor.cleanup()
+        score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
+
+        # try:
+        #     score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
+        # finally:
+        #     attributor.cleanup()
 
         torch.cuda.synchronize(device)
         end = time.time()
@@ -682,7 +696,6 @@ def main():
             model = GIPGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
             model.eval()
             return model
-
 
         task = AttributionTask(loss_func=f, model=model,
                             checkpoints=checkpoint,
@@ -710,6 +723,58 @@ def main():
         end = time.time()
 
         peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
+    elif tda_method == "TRAK":
+        from _dattri.task import AttributionTask
+        from _dattri.algorithm.trak import TRAKAttributor
+
+        def f(params, batch):
+            outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
+                                                kwargs={"attention_mask": batch["attention_mask"].cuda(device),
+                                                        "labels": batch["labels"].cuda(device)})
+            logp = -outputs.loss
+            return logp - torch.log(1 - torch.exp(logp))
+
+        def m(params, batch):
+            outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
+                                                kwargs={"attention_mask": batch["attention_mask"].cuda(device),
+                                                        "labels": batch["labels"].cuda(device)})
+            p = torch.exp(-outputs.loss)
+            return p
+
+        checkpoints = [f"{args.output_dir}/{i}"
+                    for i in range(5)]
+
+        def checkpoints_load_func(model, checkpoint):
+            model = GIPGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
+            model.eval()
+            return model
+
+        task = AttributionTask(loss_func=f, model=model,
+                           checkpoints=checkpoints,
+                           checkpoints_load_func=checkpoints_load_func)
+
+        attributor = TRAKAttributor(
+            task=task,
+            correct_probability_func=m,
+            device=device,
+            projector_kwargs=projector_kwargs,
+        )
+
+        torch.cuda.reset_peak_memory_stats(device)
+
+        torch.cuda.synchronize(device)
+        start = time.time()
+
+        attributor.cache(train_dataloader)
+        with torch.no_grad():
+            score = attributor.attribute(test_dataloader)
+
+        torch.cuda.synchronize(device)
+        end = time.time()
+
+        peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
+    elif tda_method == "LoGra":
+        pass
 
     logger.info(f"Time taken: {end - start} seconds")
     logger.info(f"Peak memory usage: {peak_memory} MB")
@@ -721,14 +786,16 @@ def main():
 
     if args.proj is not None:
         filename_parts.append(f"{proj_method}-{proj_dim}")
-    if args.threshold is not None:
-        filename_parts.append(f"thrd-{args.threshold}")
 
+        if args.threshold is not None:
+            filename_parts.append(f"thrd-{args.threshold}")
+
+    training_setting = args.output_dir.split("/")[-1]
     # Join parts and save the file
     if args.debug:
-        filename = f"./result/debug/{'_'.join(filename_parts)}.pt"
+        filename = f"./results/{training_setting}/debug/{'_'.join(filename_parts)}.pt"
     else:
-        filename = f"./result/{'_'.join(filename_parts)}.pt"
+        filename = f"./results/{training_setting}/{'_'.join(filename_parts)}.pt"
     torch.save(score, filename)
 
 
