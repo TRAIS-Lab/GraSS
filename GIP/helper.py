@@ -32,9 +32,11 @@ def setup_projectors(
     """
     proj_seed = projector_kwargs.get("proj_seed", 0)
     proj_dim = projector_kwargs.get("proj_dim", 512)
+    proj_dim_dist = projector_kwargs.get("proj_dim_dist", "uniform")
 
     projector_kwargs.pop("proj_seed")
     projector_kwargs.pop("proj_dim")
+    projector_kwargs.pop("proj_dim_dist")
 
     layer_dim = []
     for layer in layer_name:
@@ -47,10 +49,10 @@ def setup_projectors(
         else:
             raise ValueError(f"Layer {layer} is not supported")
 
-    if mode == "default":
+    if mode == "default" and proj_dim_dist == "non-uniform":
         total_dim = sum(layer_dim)
         proj_dim = [int(proj_dim * dim / total_dim) for dim in layer_dim]
-    elif mode in ["one_run", "iterate"]:
+    elif mode in ["one_run", "iterate"] or (mode == "default" and proj_dim_dist == "uniform"):
         proj_dim = [proj_dim] * len(layer_dim)
 
     print(f"proj_dim: {proj_dim}")

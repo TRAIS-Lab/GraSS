@@ -266,6 +266,12 @@ def parse_args():
         help="The projection method to be used when attributing. Format: proj_method-proj_dim",
     )
     parser.add_argument(
+        "--proj_dim_dist",
+        type=str,
+        default="uniform",
+        help="The projection dimension distribution. Only valid when proj_method is GIP. Available options: uniform, non-uniform.",
+    )
+    parser.add_argument(
         "--device",
         type=int,
         default=0,
@@ -276,6 +282,11 @@ def parse_args():
         type=float,
         default=0.0,
         help="Threshold to be used for projection when attributing.",
+    )
+    parser.add_argument(
+        "--reverse",
+        action="store_true",
+        help="Reverse the order of iterating through the training and test set to save memory.",
     )
     parser.add_argument(
         "--debug",
@@ -562,16 +573,25 @@ def main():
     if args.mode is not None:
         tda_method, tda_mode = args.mode.split("-")
 
+    proj_method, proj_dim = None, None
+    if args.proj is not None:
+        proj_method, proj_dim = args.proj.split("-")
+        proj_dim = int(proj_dim)
+
     logger.info(f"TDA Method: {tda_method} with mode: {tda_mode}")
 
     if tda_method == "GIP":
         if tda_mode == "default": # default will first store all the information for train. Only used with projection.
-            train_batch_size = 4
-            test_batch_size = 4
+            if proj_dim is not None and proj_dim <= 1024 and args.proj_dim_dist == "non-uniform":
+                train_batch_size = 4
+                test_batch_size = 4
+            else:
+                train_batch_size = 1
+                test_batch_size = 1
         elif tda_mode == "iterate": # For iterate, #repeated computation over test set is n / train_bat_size.
             if args.proj is not None: # need extra memory for projection
-                train_batch_size = 8
-                test_batch_size = 5
+                train_batch_size = 12
+                test_batch_size = 10
             else:
                 train_batch_size = 12
                 test_batch_size = 10
@@ -582,8 +602,12 @@ def main():
             raise ValueError("Invalid mode type for Grad-Dot with Ghost Inner-Product. Choose from 'default', 'iterate', 'one_run'.")
     elif tda_method == "GD":
         if tda_mode == "default":
-            train_batch_size = 4
-            test_batch_size = 4
+            if proj_method == "SJLT":
+                train_batch_size = 5
+                test_batch_size = 5
+            else:
+                train_batch_size = 8
+                test_batch_size = 8
         elif tda_mode == "iterate":
             if args.proj is not None:
                 train_batch_size = 4
@@ -614,23 +638,30 @@ def main():
         test_dataset, collate_fn=default_data_collator, batch_size=test_batch_size, shuffle=False
     )
 
-    proj_method, proj_dim = None, None
-    if args.proj is not None:
-        proj_method, proj_dim = args.proj.split("-")
-        proj_dim = int(proj_dim)
-
     if proj_method is None:
         projector_kwargs = None
     else:
-        projector_kwargs = {
-            "proj_dim": proj_dim,
-            "proj_max_batch_size": 32,
-            "proj_seed": 0,
-            "device": device,
-            "method": proj_method,
-            "use_half_precision": False,
-            "threshold": args.threshold,
-        }
+        if tda_method == "GIP":
+            projector_kwargs = {
+                "proj_dim": proj_dim,
+                "proj_dim_dist": args.proj_dim_dist,
+                "proj_max_batch_size": 32,
+                "proj_seed": args.seed,
+                "device": device,
+                "method": proj_method,
+                "use_half_precision": False,
+                "threshold": args.threshold,
+            }
+        else:
+            projector_kwargs = {
+                "proj_dim": proj_dim,
+                "proj_max_batch_size": 32,
+                "proj_seed": args.seed,
+                "device": device,
+                "method": proj_method,
+                "use_half_precision": False,
+                "threshold": args.threshold,
+            }
 
         logger.info(f"Projector: {projector_kwargs}")
 
@@ -670,7 +701,7 @@ def main():
         torch.cuda.synchronize(device)
         start = time.time()
 
-        score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
+        score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
 
         # try:
         #     score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
@@ -785,7 +816,15 @@ def main():
     filename_parts = [f"{tda_method}-{tda_mode}"]
 
     if args.proj is not None:
-        filename_parts.append(f"{proj_method}-{proj_dim}")
+        if tda_method == "GIP":
+            if args.proj_dim_dist == "non-uniform":
+                filename_parts.append(f"{proj_method}-{proj_dim}(NU)")
+            elif args.proj_dim_dist == "uniform":
+                filename_parts.append(f"{proj_method}-{proj_dim}(U)")
+            else:
+                raise ValueError("Invalid projection dimension distribution. Choose from 'uniform' or 'non-uniform'.")
+        else:
+            filename_parts.append(f"{proj_method}-{proj_dim}")
 
         if args.threshold is not None:
             filename_parts.append(f"thrd-{args.threshold}")
