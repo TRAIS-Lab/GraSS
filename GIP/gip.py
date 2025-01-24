@@ -547,3 +547,57 @@ class GhostInnerProductAttributor():
                 grad_dot[row_st:row_ed, col_st:col_ed] += self.attribute_one_run(test_batch_loader, train_batch_loader)
 
         return grad_dot
+
+    def sparsity(
+        self,
+        dataloader: torch.utils.data.DataLoader,
+        thresholds: List[float] = [0.1, 0.5, 0.9],
+    ):
+        if dataloader is None:
+            raise ValueError("Please provide a dataloader to calculate sparsity.")
+
+        # Initialize dictionary to store sparsity values for each layer and threshold
+        sparsity = {threshold: {f"layer_{i}": {"val_1": [], "val_2": []}
+                    for i in range(len(self.layer_name))}
+                    for threshold in thresholds}
+
+        for batch in tqdm(
+            dataloader,
+            desc="calculating sparsity of the dataset...",
+            leave=False,
+        ):
+            input_ids = batch["input_ids"].to(self.device)
+            attention_masks = batch["attention_mask"].to(self.device)
+            labels = batch["labels"].to(self.device)
+
+            outputs = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_masks,
+                labels=labels
+            )
+            loss = outputs.loss
+            pre_acts = [layer.pre_activation for layer in self.layer_name]
+            Z_grad = torch.autograd.grad(loss, pre_acts, retain_graph=True)
+
+            with torch.no_grad():
+                for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad)):
+                    val_1, val_2 = layer.pe_grad_gradcomp(z_grad_full, per_sample=True)
+
+                    # Calculate sparsity for each threshold
+                    for threshold in thresholds:
+                        # Calculate ratio of elements below threshold
+                        val_1_sparsity = (torch.abs(val_1) < threshold).float().mean().item()
+                        val_2_sparsity = (torch.abs(val_2) < threshold).float().mean().item()
+
+                        # Store results
+                        sparsity[threshold][f"layer_{layer_id}"]["val_1"].append(val_1_sparsity)
+                        sparsity[threshold][f"layer_{layer_id}"]["val_2"].append(val_2_sparsity)
+
+        # Average sparsity across batches
+        for threshold in thresholds:
+            for layer_id in range(len(self.layer_name)):
+                for val_type in ["val_1", "val_2"]:
+                    sparsity[threshold][f"layer_{layer_id}"][val_type] = \
+                        sum(sparsity[threshold][f"layer_{layer_id}"][val_type]) / len(sparsity[threshold][f"layer_{layer_id}"][val_type])
+
+        return sparsity

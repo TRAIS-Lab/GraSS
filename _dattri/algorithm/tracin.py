@@ -466,3 +466,57 @@ class TracInAttributor(BaseAttributor):
                         )
 
         return tda_output
+
+    def sparsity(
+            self,
+            data_loader: torch.utils.data.DataLoader,
+            thresholds: List[float] = [0.1, 0.5, 0.9],
+        ):
+        if data_loader is None:
+            raise ValueError("Please provide a dataloader to calculate sparsity.")
+
+        sparsity = {threshold: {f"checkpoint_{i}": []
+                    for i in range(len(self.task.get_checkpoints()))}
+                    for threshold in thresholds}
+
+        for ckpt_idx in range(len(self.task.get_checkpoints())):
+            parameters, _ = self.task.get_param(
+                ckpt_idx=ckpt_idx,
+                layer_name=self.layer_name,
+            )
+
+            if self.layer_name is not None:
+                self.grad_loss_func = self.task.get_grad_loss_func(
+                    in_dims=(None, 0),
+                    layer_name=self.layer_name,
+                    ckpt_idx=ckpt_idx,
+                )
+
+            for batch in tqdm(
+                data_loader,
+                desc=f"calculating sparsity for checkpoint {ckpt_idx}...",
+                leave=False,
+            ):
+                if isinstance(batch, (tuple, list)):
+                    batch = tuple(data.to(self.device) for data in batch)
+                else:
+                    batch = batch
+
+                grad_t = self.grad_loss_func(parameters, batch)
+                grad_t = torch.nan_to_num(grad_t)
+
+                if self.normalized_grad:
+                    grad_t = normalize(grad_t)
+
+                with torch.no_grad():
+                    for threshold in thresholds:
+                        grad_sparsity = (torch.abs(grad_t) < threshold).float().mean().item()
+                        sparsity[threshold][f"checkpoint_{ckpt_idx}"].append(grad_sparsity)
+
+        # Average sparsity across batches
+        for threshold in thresholds:
+            for ckpt_idx in range(len(self.task.get_checkpoints())):
+                sparsity[threshold][f"checkpoint_{ckpt_idx}"] = \
+                    sum(sparsity[threshold][f"checkpoint_{ckpt_idx}"]) / len(sparsity[threshold][f"checkpoint_{ckpt_idx}"])
+
+        return sparsity
