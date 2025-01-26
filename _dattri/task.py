@@ -421,7 +421,7 @@ class AttributionTask:
             Tuple[Union[torch.Tensor, List[torch.Tensor]], Optional[List[int]]]: If
                 layer_split is True, the return value will be a tuple of the parameters
                 of each layer and the param_layer_map. If layer_split is False, the
-                return value will be aflattened parameter of the model and None.
+                return value will be a flattened parameter of the model and None.
 
         Raises:
             ValueError: If the length of param_layer_map is not the same as the length

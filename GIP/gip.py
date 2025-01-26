@@ -8,9 +8,7 @@ if TYPE_CHECKING:
 import torch
 from torch import Tensor
 from tqdm import tqdm
-
-from .layers.linear import GIPLinear, GIPEmbedding
-from .layers.layer_norm import GIPLayerNorm
+from .layers.linear import GIPEmbedding
 from .helper import find_GIPlayers, grad_dotprod, setup_projectors
 
 from _dattri.func.projection import random_project
@@ -52,18 +50,9 @@ class GhostInnerProductAttributor():
         self.model = model
         self.lr = lr
         self.layer_name = find_GIPlayers(model) if layer_name is None else layer_name
-
-        # need more complex control of proj_seed and proj_dim for different layers, extract first
-        if projector_kwargs is not None:
-            self.projector_kwargs, self.proj_dim, self.proj_seed = setup_projectors(projector_kwargs, self.layer_name, mode)
-        else:
-            self.projector_kwargs = None
-            self.proj_dim = None
-            self.proj_seed = None
-
+        self.projector_kwargs, self.proj_dim, self.proj_seed = setup_projectors(projector_kwargs, self.layer_name, mode)
         self.mode = mode
         self.device = device
-
         self.full_train_dataloader = None
 
     def cache(
@@ -475,6 +464,7 @@ class GhostInnerProductAttributor():
                 dLdZ_train, z_train = val_1[:num_train], val_2[:num_train]
                 dLdZ_val, z_val = val_1[num_train:], val_2[num_train:]
                 grad_dot += grad_dotprod(dLdZ_train, z_train, dLdZ_val, z_val) * self.lr
+                print(grad_dotprod(dLdZ_train, z_train, dLdZ_val, z_val) * self.lr)
 
         return grad_dot
 

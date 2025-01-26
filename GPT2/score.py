@@ -560,10 +560,8 @@ def main():
     test_dataset = lm_datasets["validation"]
 
     if args.debug: # toy dataset
-        train_dataset = train_dataset.select(range(10))
-        test_dataset = test_dataset.select(range(5))
-
-    train_sampler = SubsetSampler(range(len(train_dataset)))
+        train_dataset = train_dataset.select(range(4))
+        test_dataset = test_dataset.select(range(4))
 
     # Dataset length
     logger.info(f"The training dataset length: {len(train_dataset)}.")
@@ -603,11 +601,11 @@ def main():
     elif tda_method == "GD":
         if tda_mode == "default":
             if proj_method == "SJLT":
-                train_batch_size = 5
-                test_batch_size = 5
+                train_batch_size = 2
+                test_batch_size = 2
             else:
-                train_batch_size = 8
-                test_batch_size = 8
+                train_batch_size = 2
+                test_batch_size = 2
         elif tda_mode == "iterate":
             if args.proj is not None:
                 train_batch_size = 4
@@ -631,6 +629,7 @@ def main():
     logger.info(f"The training batch size: {train_batch_size}")
     logger.info(f"The eval batch size: {test_batch_size}")
 
+    train_sampler = SubsetSampler(range(len(train_dataset)))
     train_dataloader = DataLoader(
         train_dataset, collate_fn=default_data_collator, batch_size=train_batch_size, sampler=train_sampler
     )
@@ -672,10 +671,12 @@ def main():
         from GIP.mem_gip import MemEffGhostInnerProductAttributor
         from GIP.helper import find_GIPlayers
         from GIP.layers.layer_norm import GIPLayerNorm
+        from GIP.layers.linear import GIPEmbedding
+
+        model.eval()
 
         trainable_layers = find_GIPlayers(model)
-        trainable_layers = trainable_layers[1:] # Omit the first embedding layer due to weight tying with the last linear layer
-        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GIPLayerNorm)] # remove all LayerNorm layers
+        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GIPLayerNorm) and not isinstance(layer, GIPEmbedding)] # remove all LayerNorm and Embedding layers
 
         attributor = GhostInnerProductAttributor(
             model=model,
@@ -716,12 +717,14 @@ def main():
         from _dattri.task import AttributionTask
         from _dattri.algorithm.tracin import TracInAttributor
 
+        # need to ensure model is in eval before defining f
+        model.eval()
         def f(params, batch):
             outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
                                                 kwargs={"attention_mask": batch["attention_mask"].cuda(device),
                                                         "labels": batch["labels"].cuda(device)})
-            logp = -outputs.loss
-            return logp - torch.log(1 - torch.exp(logp))
+            logp = -outputs.loss # negative log-likelihood
+            return logp
 
         def checkpoints_load_func(model, checkpoint):
             model = GIPGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
@@ -744,20 +747,21 @@ def main():
 
         torch.cuda.reset_peak_memory_stats(device)
 
-        torch.cuda.synchronize(device)
-        start = time.time()
+        #     with torch.no_grad():
+        #         result = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
 
-        with torch.no_grad():
-            score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
+        #     print(result)
+        #     score += result
 
-        torch.cuda.synchronize(device)
-        end = time.time()
+        #     torch.cuda.synchronize(device)
+        #     end = time.time()
 
-        peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
+        #     peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
     elif tda_method == "TRAK":
         from _dattri.task import AttributionTask
         from _dattri.algorithm.trak import TRAKAttributor
 
+        model.eval()
         def f(params, batch):
             outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
                                                 kwargs={"attention_mask": batch["attention_mask"].cuda(device),

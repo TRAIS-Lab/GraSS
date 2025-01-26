@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 class GIPLinear(nn.Linear):
     """LayerNorm implementation with Ghost Inner-Product computation support.
     """
@@ -64,48 +63,55 @@ class GIPLinear(nn.Linear):
         return output_gradient, input_features
 
 class GIPEmbedding(nn.Embedding):
-    def __init__(self, num_embeddings, embedding_dim):
-        super(GIPEmbedding, self).__init__(num_embeddings, embedding_dim)
-        self.pre_activation = None
-        self.indices = None
-        self.name = 'embedding'
-        self.token_output = None
-        self.combined_output = None
+    def __init__(self, *args, **kwargs):
+        # Simply call the parent class's constructor
+        super().__init__(*args, **kwargs)
 
-    def forward(self, input):
-        self.indices = input
-        embedded = super().forward(input)
-        return embedded
+# class GIPEmbedding(nn.Embedding):
+#     def __init__(self, num_embeddings, embedding_dim):
+#         super(GIPEmbedding, self).__init__(num_embeddings, embedding_dim)
+#         self.pre_activation = None
+#         self.indices = None
+#         self.name = 'embedding'
+#         self.token_output = None
+#         self.combined_output = None
 
-    def pe_grad_gradcomp(self, deriv_pre_activ, per_sample=True):
-        """
-        Prepare components for gradient computation in embedding layer.
-        Similar to linear layer's pe_grad_gradcomp but handles sparse embedding lookups.
+#     def forward(self, input):
+#         self.indices = input
+#         embedded = super().forward(input)
+#         self.pre_activation = embedded
+#         return embedded
 
-        Parameters:
-        -------------------
-        deriv_pre_activ: derivative of cost function w.r.t. the pre-activation of layer
-        per_sample: whether to return per-sample gradients
-        """
-        batch_size = deriv_pre_activ.size(0)
+#     def pe_grad_gradcomp(self, deriv_pre_activ, per_sample=True):
+#         """
+#         Prepare components for gradient computation in embedding layer.
+#         Similar to linear layer's pe_grad_gradcomp but handles sparse embedding lookups.
 
-        # Scale gradients by batch size as in linear layer
-        dLdZ = deriv_pre_activ * batch_size
+#         Parameters:
+#         -------------------
+#         deriv_pre_activ: derivative of cost function w.r.t. the pre-activation of layer
+#         per_sample: whether to return per-sample gradients
+#         """
+#         batch_size = deriv_pre_activ.size(0)
 
-        # For sequence inputs (3D)
-        if deriv_pre_activ.dim() == 3:
-            # Create one-hot encoding matrix for the sequence
-            # [batch_size, seq_len, num_embeddings]
-            H = torch.zeros(batch_size, self.indices.size(1), self.num_embeddings,
-                          device=deriv_pre_activ.device)
-            # Fill in ones at the positions indicated by indices
-            H.scatter_(2, self.indices.unsqueeze(-1), 1)
-        else:
-            # For single token inputs (2D)
-            # Create one-hot encoding matrix [batch_size, num_embeddings]
-            H = torch.zeros(batch_size, self.num_embeddings,
-                          device=deriv_pre_activ.device)
-            # Fill in ones at the positions indicated by indices
-            H.scatter_(1, self.indices.unsqueeze(1), 1)
+#         # Scale gradients by batch size as in linear layer
+#         dLdZ = deriv_pre_activ * batch_size
 
-        return dLdZ, H
+#         # For sequence inputs (3D)
+#         if deriv_pre_activ.dim() == 3:
+#             # Create one-hot encoding matrix for the sequence
+#             # [batch_size, seq_len, num_embeddings]
+#             H = torch.zeros(batch_size, self.indices.size(1), self.num_embeddings,
+#                           device=deriv_pre_activ.device)
+#             # Fill in ones at the positions indicated by indices
+#             H.scatter_(2, self.indices.unsqueeze(-1), 1)
+#         else:
+#             # For single token inputs (2D)
+#             # Create one-hot encoding matrix [batch_size, num_embeddings]
+#             H = torch.zeros(batch_size, self.num_embeddings,
+#                           device=deriv_pre_activ.device)
+#             # Fill in ones at the positions indicated by indices
+#             H.scatter_(1, self.indices.unsqueeze(1), 1)
+
+#         print(f"Embedding: {H}", f"Gradient: {dLdZ}")
+#         return dLdZ, H
