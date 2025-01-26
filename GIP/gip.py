@@ -190,7 +190,7 @@ class GhostInnerProductAttributor():
             raise ValueError(f"Unknown mode: {self.mode}")
 
         if reverse:
-            tda_output = tda_output.t()
+            tda_output = tda_output.T
         return tda_output
 
     def attribute_default(

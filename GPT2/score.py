@@ -54,7 +54,7 @@ from transformers import (
     CONFIG_MAPPING,
     MODEL_MAPPING,
     AutoConfig,
-    AutoModelForCausalLM,
+    AutoModelForCausalLM as GIPGPT2LMHeadModel,
     AutoTokenizer,
     SchedulerType,
     default_data_collator,
@@ -747,16 +747,16 @@ def main():
 
         torch.cuda.reset_peak_memory_stats(device)
 
-        #     with torch.no_grad():
-        #         result = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
+        torch.cuda.synchronize(device)
+        start = time.time()
 
-        #     print(result)
-        #     score += result
+        with torch.no_grad():
+            score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
 
-        #     torch.cuda.synchronize(device)
-        #     end = time.time()
+        torch.cuda.synchronize(device)
+        end = time.time()
 
-        #     peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
+        peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
     elif tda_method == "TRAK":
         from _dattri.task import AttributionTask
         from _dattri.algorithm.trak import TRAKAttributor
@@ -815,7 +815,7 @@ def main():
     logger.info(f"Peak memory usage: {peak_memory} MB")
 
     print(score)
-
+    exit()
     # Build the filename components
     filename_parts = [f"{tda_method}-{tda_mode}"]
 

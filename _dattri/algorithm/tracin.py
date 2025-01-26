@@ -146,6 +146,7 @@ class TracInAttributor(BaseAttributor):
         self,
         test_dataloader: torch.utils.data.DataLoader,
         train_dataloader: Optional[torch.utils.data.DataLoader] = None,
+        reverse: bool = False,
     ) -> Tensor:
         """Calculate the influence of the training set on the test set.
 
@@ -157,6 +158,7 @@ class TracInAttributor(BaseAttributor):
                 training samples to calculate the influence. If None and cache was called,
                 uses cached gradients. If provided with cached gradients, raises an error.
                 The dataloader should not be shuffled.
+            reverse (bool, optional): Reverse the test and train dataloader for memory efficiency. Defaults to False.
 
         Raises:
             ValueError: If the length of params_list and weight_list don't match,
@@ -185,6 +187,12 @@ class TracInAttributor(BaseAttributor):
                        training loader or cache a training loader."
             raise ValueError(message)
 
+        if reverse and self.full_train_dataloader is not None:
+            message = "You can't reverse the attribution when you have cached the training loader."
+            raise ValueError(message)
+        elif reverse:
+            test_dataloader, train_dataloader = train_dataloader, test_dataloader
+
         # Check checkpoint and weight list lengths match
         if len(self.task.get_checkpoints()) != len(self.weight_list):
             raise ValueError("The length of checkpoints and weights lists don't match.")
@@ -194,6 +202,8 @@ class TracInAttributor(BaseAttributor):
         elif self.mode == "iterate":
             tda_output = self.attribute_iterate(test_dataloader, train_dataloader)
 
+        if reverse:
+            tda_output = tda_output.T
         return tda_output
 
     def attribute_default(
