@@ -81,7 +81,8 @@ class GhostInnerProductAttributor():
                 attention_mask=train_attention_masks,
                 labels=train_labels
             )
-            train_loss = outputs.loss
+            logp = -outputs.loss
+            train_loss = logp - torch.log(1 - torch.exp(logp))
 
             # Get pre-activations from trainable layers
             train_pre_acts = [layer.pre_activation for layer in self.layer_name]
@@ -235,7 +236,8 @@ class GhostInnerProductAttributor():
                     attention_mask=train_attention_masks,
                     labels=train_labels
                 )
-                train_loss = outputs.loss
+                logp = -outputs.loss
+                train_loss = -(logp - torch.log(1 - torch.exp(logp)))
 
                 # Get pre-activations from trainable layers
                 train_pre_acts = [layer.pre_activation for layer in self.layer_name]
@@ -304,20 +306,15 @@ class GhostInnerProductAttributor():
             test_attention_masks = test_batch["attention_mask"].to(self.device)
             test_labels = test_batch["labels"].to(self.device)
 
-            outputs = self.model(
-                input_ids=test_input_ids,
-                attention_mask=test_attention_masks,
-                labels=test_labels
-            )
-            test_loss = outputs.loss
-
             # Forward pass with all data
             outputs = self.model(
                 input_ids=test_input_ids,
                 attention_mask=test_attention_masks,
                 labels=test_labels
             )
-            test_loss = outputs.loss
+
+            logp = -outputs.loss
+            test_loss = -(logp - torch.log(1 - torch.exp(logp)))
 
             # Get pre-activations from trainable layers
             test_pre_acts = [layer.pre_activation for layer in self.layer_name]
@@ -417,7 +414,8 @@ class GhostInnerProductAttributor():
             attention_mask=combined_attention_masks,
             labels=combined_labels
         )
-        full_loss = outputs.loss
+        logp = -outputs.loss
+        full_loss = -(logp - torch.log(1 - torch.exp(logp)))
 
         # Get pre-activations from trainable layers
         full_pre_acts = [layer.pre_activation for layer in self.layer_name]
@@ -464,7 +462,6 @@ class GhostInnerProductAttributor():
                 dLdZ_train, z_train = val_1[:num_train], val_2[:num_train]
                 dLdZ_val, z_val = val_1[num_train:], val_2[num_train:]
                 grad_dot += grad_dotprod(dLdZ_train, z_train, dLdZ_val, z_val) * self.lr
-                print(grad_dotprod(dLdZ_train, z_train, dLdZ_val, z_val) * self.lr)
 
         return grad_dot
 

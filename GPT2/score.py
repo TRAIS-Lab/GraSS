@@ -54,7 +54,7 @@ from transformers import (
     CONFIG_MAPPING,
     MODEL_MAPPING,
     AutoConfig,
-    AutoModelForCausalLM as GIPGPT2LMHeadModel,
+    AutoModelForCausalLM,
     AutoTokenizer,
     SchedulerType,
     default_data_collator,
@@ -584,14 +584,14 @@ def main():
                 train_batch_size = 4
                 test_batch_size = 4
             else:
-                train_batch_size = 1
+                train_batch_size = 2
                 test_batch_size = 1
         elif tda_mode == "iterate": # For iterate, #repeated computation over test set is n / train_bat_size.
             if args.proj is not None: # need extra memory for projection
                 train_batch_size = 12
                 test_batch_size = 10
             else:
-                train_batch_size = 12
+                train_batch_size = 10
                 test_batch_size = 10
         elif tda_mode == "one_run":
             train_batch_size = 4
@@ -723,8 +723,8 @@ def main():
             outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
                                                 kwargs={"attention_mask": batch["attention_mask"].cuda(device),
                                                         "labels": batch["labels"].cuda(device)})
-            logp = -outputs.loss # negative log-likelihood
-            return logp
+            logp = -outputs.loss
+            return logp - torch.log(1 - torch.exp(logp))
 
         def checkpoints_load_func(model, checkpoint):
             model = GIPGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
@@ -761,6 +761,7 @@ def main():
         from _dattri.task import AttributionTask
         from _dattri.algorithm.trak import TRAKAttributor
 
+        # need to ensure model is in eval before defining f
         model.eval()
         def f(params, batch):
             outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
@@ -815,7 +816,7 @@ def main():
     logger.info(f"Peak memory usage: {peak_memory} MB")
 
     print(score)
-    exit()
+
     # Build the filename components
     filename_parts = [f"{tda_method}-{tda_mode}"]
 
