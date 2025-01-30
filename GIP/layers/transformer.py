@@ -215,9 +215,9 @@ class MultiheadAttention(nn.Module):
     def collect_layers(self):
         return (self.in_proj, self.out_proj)
 
-    def pe_grad_gradcomp(self, deriv_pre_activ, per_sample=True):
+    def GIP_components(self, deriv_pre_activ, per_sample=True):
         deriv_pre_activ_in, deriv_pre_activ_out = deriv_pre_activ
-        return [self.in_proj.pe_grad_gradcomp(deriv_pre_activ_in), self.out_proj.pe_grad_gradcomp(deriv_pre_activ_out)]
+        return [self.in_proj.GIP_components(deriv_pre_activ_in), self.out_proj.GIP_components(deriv_pre_activ_out)]
 
 
 
@@ -299,10 +299,10 @@ class TransformerEncoderLayer(nn.Module):
         layer_lst.append( self.linear2 )
         return layer_lst
 
-    def pe_grad_gradcomp(self, deriv_pre_activ, per_sample=True):
-        result_attn = self.self_attn.pe_grad_gradcomp(deriv_pre_activ[:2])
-        result_linear1 = self.linear1.pe_grad_gradcomp(deriv_pre_activ[2])
-        result_linear2 = self.linear1.pe_grad_gradcomp(deriv_pre_activ[3])
+    def GIP_components(self, deriv_pre_activ, per_sample=True):
+        result_attn = self.self_attn.GIP_components(deriv_pre_activ[:2])
+        result_linear1 = self.linear1.GIP_components(deriv_pre_activ[2])
+        result_linear2 = self.linear1.GIP_components(deriv_pre_activ[3])
         return result_attn + [result_linear1] + [result_linear2]
 
 

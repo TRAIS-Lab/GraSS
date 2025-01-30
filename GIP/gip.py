@@ -92,7 +92,7 @@ class GhostInnerProductAttributor():
 
             with torch.no_grad():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
-                    val_1, val_2 = layer.pe_grad_gradcomp(z_grad_full, per_sample=True)
+                    val_1, val_2 = layer.GIP_components(z_grad_full, per_sample=True)
                     if self.projector_kwargs is not None:
                         val_1_flatten = val_1.view(-1, val_1.shape[-1])
                         val_2_flatten = val_2.view(-1, val_2.shape[-1])
@@ -247,7 +247,7 @@ class GhostInnerProductAttributor():
 
                 with torch.no_grad():
                     for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
-                        val_1, val_2 = layer.pe_grad_gradcomp(z_grad_full, per_sample=True)
+                        val_1, val_2 = layer.GIP_components(z_grad_full, per_sample=True)
                         if self.projector_kwargs is not None:
                             val_1_flatten = val_1.view(-1, val_1.shape[-1])
                             val_2_flatten = val_2.view(-1, val_2.shape[-1])
@@ -325,7 +325,7 @@ class GhostInnerProductAttributor():
             # Calculate scores
             with torch.no_grad():
                 for layer_id, (layer, z_grad_test) in enumerate(zip(self.layer_name, Z_grad_test)):
-                    val_1, val_2 = layer.pe_grad_gradcomp(z_grad_test, per_sample=True)
+                    val_1, val_2 = layer.GIP_components(z_grad_test, per_sample=True)
                     if self.projector_kwargs is not None:
                         val_1_flatten = val_1.view(-1, val_1.shape[-1])
                         val_2_flatten = val_2.view(-1, val_2.shape[-1])
@@ -426,7 +426,7 @@ class GhostInnerProductAttributor():
         # Calculate scores
         with torch.no_grad():
             for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_full)):
-                val_1, val_2 = layer.pe_grad_gradcomp(z_grad_full, per_sample=True)
+                val_1, val_2 = layer.GIP_components(z_grad_full, per_sample=True)
                 if self.projector_kwargs is not None:
                     val_1_flatten = val_1.view(-1, val_1.shape[-1])
                     val_2_flatten = val_2.view(-1, val_2.shape[-1])
@@ -562,13 +562,16 @@ class GhostInnerProductAttributor():
                 attention_mask=attention_masks,
                 labels=labels
             )
-            loss = outputs.loss
+            logp = -outputs.loss
+            loss = -(logp - torch.log(1 - torch.exp(logp)))
+
+
             pre_acts = [layer.pre_activation for layer in self.layer_name]
             Z_grad = torch.autograd.grad(loss, pre_acts, retain_graph=True)
 
             with torch.no_grad():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad)):
-                    val_1, val_2 = layer.pe_grad_gradcomp(z_grad_full, per_sample=True)
+                    val_1, val_2 = layer.GIP_components(z_grad_full, per_sample=True)
 
                     # Calculate sparsity for each threshold
                     for threshold in thresholds:

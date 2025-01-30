@@ -17,7 +17,7 @@ import argparse
 from gpt_utils import construct_model, get_datasets, set_seed
 from transformers import Trainer, TrainingArguments, default_data_collator
 
-from logix.huggingface import LogIXArguments, patch_trainer
+from _logix.huggingface import LogIXArguments, patch_trainer
 
 
 def main():

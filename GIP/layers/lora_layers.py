@@ -167,7 +167,7 @@ class GIPLoRALinear(LoRALinear):
         self.layer_input = input[0]  # input is a tuple
         self.pre_activation = output
 
-    def pe_grad_gradcomp(self, deriv_pre_activ, per_sample=True):
+    def GIP_components(self, deriv_pre_activ, per_sample=True):
         is_2d = self.layer_input.dim() == 2
 
         a = self.layer_input

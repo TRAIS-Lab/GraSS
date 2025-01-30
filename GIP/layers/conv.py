@@ -62,7 +62,7 @@ class Conv2d(nn.Conv2d):
         else:
             return sq_norm_weight
 
-    def pe_grad_gradcomp(self, deriv_pre_activ, per_sample=True):
+    def GIP_components(self, deriv_pre_activ, per_sample=True):
 
         batch_size = deriv_pre_activ.shape[0]
 

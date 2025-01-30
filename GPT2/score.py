@@ -818,7 +818,7 @@ def main():
     print(score)
 
     # Build the filename components
-    filename_parts = [f"{tda_method}-{tda_mode}"]
+    filename_parts = [f"{tda_mode}"]
 
     if args.proj is not None:
         if tda_method == "GIP":
@@ -837,9 +837,9 @@ def main():
     training_setting = args.output_dir.split("/")[-1]
     # Join parts and save the file
     if args.debug:
-        filename = f"./results/{training_setting}/debug/{'_'.join(filename_parts)}.pt"
+        filename = f"./results/{training_setting}/debug/{tda_method}/{'_'.join(filename_parts)}.pt"
     else:
-        filename = f"./results/{training_setting}/{'_'.join(filename_parts)}.pt"
+        filename = f"./results/{training_setting}/{tda_method}/{'_'.join(filename_parts)}.pt"
     torch.save(score, filename)
 
 

@@ -43,7 +43,7 @@ class GIPLayerNorm(nn.LayerNorm):
         self.pre_activation = output
         return output
 
-    def pe_grad_gradcomp(self, output_gradient, per_sample=True):
+    def GIP_components(self, output_gradient, per_sample=True):
         is_3d = self.layer_input.dim() == 3
         if is_3d:
             batch_size, seq_length, hidden_size = self.layer_input.shape

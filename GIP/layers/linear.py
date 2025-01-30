@@ -19,8 +19,7 @@ class GIPLinear(nn.Linear):
 
         return self.pre_activation
 
-    def pe_grad_gradcomp(self, output_gradient, per_sample=True):
-    # def compute_gradient_terms(self, output_gradient, per_sample=True):
+    def GIP_components(self, output_gradient, per_sample=True):
         """
         Compute terms needed for Ghost Inner-Product calculation.
 
@@ -82,10 +81,10 @@ class GIPEmbedding(nn.Embedding):
 #         self.pre_activation = embedded
 #         return embedded
 
-#     def pe_grad_gradcomp(self, deriv_pre_activ, per_sample=True):
+#     def GIP_components(self, deriv_pre_activ, per_sample=True):
 #         """
 #         Prepare components for gradient computation in embedding layer.
-#         Similar to linear layer's pe_grad_gradcomp but handles sparse embedding lookups.
+#         Similar to linear layer's GIP_components but handles sparse embedding lookups.
 
 #         Parameters:
 #         -------------------
