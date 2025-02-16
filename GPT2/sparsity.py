@@ -60,7 +60,7 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from GIP.GIPGPT2LMHeadModel import GIPGPT2LMHeadModel
+from GIP.GPT2LMHeadModel import GIPGPT2LMHeadModel
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
@@ -592,7 +592,7 @@ def main():
     logger.info("***** Running sparsity calculation *****")
 
     if tda_method == "GIP":
-        from GIP.gip import GhostInnerProductAttributor
+        from GIP.GD import GIPGradDotAttributor
         from GIP.mem_gip import MemEffGhostInnerProductAttributor
         from GIP.helper import find_GIPlayers
         from GIP.layers.layer_norm import GIPLayerNorm
@@ -601,7 +601,7 @@ def main():
         trainable_layers = trainable_layers[1:] # Omit the first embedding layer due to weight tying with the last linear layer
         trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GIPLayerNorm)] # remove all LayerNorm layers
 
-        attributor = GhostInnerProductAttributor(
+        attributor = GIPGradDotAttributor(
             model=model,
             lr=1e-3,
             layer_name=trainable_layers,

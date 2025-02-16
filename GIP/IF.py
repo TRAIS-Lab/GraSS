@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Dict
 
 if TYPE_CHECKING:
-    from typing import List, Optional, Union
+    from typing import List, Optional, Union, Tuple
 
 import torch
 from torch import Tensor
@@ -13,13 +13,53 @@ from .helper import find_GIPlayers, grad_dotprod, setup_projectors
 
 from _dattri.func.projection import random_project
 
-class GhostInnerProductAttributor():
+import time
+
+def eigen_stable_inverse(matrix: torch.Tensor, damping: float = 1e-5, eigen_threshold: float = 1e-6) -> torch.Tensor:
+    """
+    Compute a numerically stable inverse of a matrix using eigendecomposition.
+
+    Args:
+        matrix: Input matrix to invert
+        damping: Damping factor for numerical stability
+        eigen_threshold: Threshold for small eigenvalues
+
+    Returns:
+        Stable inverse of the input matrix
+    """
+    # Add damping to the diagonal
+    matrix = matrix + damping * torch.eye(matrix.shape[0], device=matrix.device)
+
+    # Compute eigendecomposition
+    try:
+        eigenvalues, eigenvectors = torch.linalg.eigh(matrix)
+    except RuntimeError:
+        # If eigendecomposition fails, try with larger damping
+        matrix = matrix + 9 * damping * torch.eye(matrix.shape[0], device=matrix.device)
+        eigenvalues, eigenvectors = torch.linalg.eigh(matrix)
+
+    # Filter small eigenvalues
+    eigenvalues = torch.clamp(eigenvalues, min=eigen_threshold)
+
+    # Compute inverse using eigendecomposition
+    inverse = torch.matmul(
+        eigenvectors,
+        torch.matmul(
+            torch.diag(1.0 / eigenvalues),
+            eigenvectors.t()
+        )
+    )
+
+    return inverse
+
+class GIPIFAttributorKFAC():
     def __init__(
         self,
         model,
         lr: float = 1e-3,
         layer_name: Optional[Union[str, List[str]]] = None,
         projector_kwargs: Optional[Dict[str, Any]] = None,
+        damping = 1e-4,
         mode: str = "default",
         device: str = 'cpu'
     ) -> None:
@@ -51,9 +91,133 @@ class GhostInnerProductAttributor():
         self.lr = lr
         self.layer_name = find_GIPlayers(model) if layer_name is None else layer_name
         self.projector_kwargs, self.proj_dim, self.proj_seed = setup_projectors(projector_kwargs, self.layer_name, mode)
+        self.damping = damping
         self.mode = mode
         self.device = device
         self.full_train_dataloader = None
+
+    def KFAC_ihvp_factors(
+        self,
+        train_dataloader: torch.utils.data.DataLoader,
+    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+        """
+        Compute K-FAC inverse Hessian vector product for each layer.
+        Uses GGN approximation for the Hessian computation.
+
+        Args:
+            train_dataloader: DataLoader for training data
+            cached_grads: Whether gradients are cached
+
+        Returns:
+            Tuple of lists containing the K-FAC factors for each layer
+        """
+        num_layers = len(self.layer_name)
+
+        Hessian = [0] * num_layers
+
+        train_grad = [None] * len(self.layer_name)
+        ihvp_train = [None] * len(self.layer_name)
+
+        num_samples = len(train_dataloader.sampler)
+
+        # Compute K-FAC factors for each layer
+        for train_batch_idx, train_batch in enumerate(
+            tqdm(
+                train_dataloader,
+                desc="computing K-FAC factors...",
+                leave=False,
+            ),
+        ):
+            train_input_ids = train_batch["input_ids"].to(self.device)
+            train_attention_masks = train_batch["attention_mask"].to(self.device)
+            train_labels = train_batch["labels"].to(self.device)
+
+            # Forward pass
+            outputs = self.model(
+                input_ids=train_input_ids,
+                attention_mask=train_attention_masks,
+                labels=train_labels
+            )
+            logp = -outputs.loss
+            train_loss = -(logp - torch.log(1 - torch.exp(logp)))
+
+            # Get pre-activations
+            train_pre_acts = [layer.pre_activation for layer in self.layer_name]
+
+            # Calculate gradients
+            Z_grad_train = torch.autograd.grad(train_loss, train_pre_acts, retain_graph=True)
+
+            # Compute K-FAC factors for each layer
+            with torch.no_grad():
+                for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
+                    val_1, val_2 = layer.GIP_components(z_grad_full, per_sample=True)
+
+                    # Apply projection if needed
+                    if self.projector_kwargs is not None:
+                        val_1_flatten = val_1.view(-1, val_1.shape[-1])
+                        val_2_flatten = val_2.view(-1, val_2.shape[-1])
+
+                        base_seed = self.proj_seed + int(1e4) * layer_id
+                        proj_dim = self.proj_dim[layer_id]
+
+                        # input projector
+                        random_project_1 = random_project(
+                            val_1_flatten,
+                            val_1_flatten.shape[0],
+                            proj_seed=base_seed,
+                            proj_dim=proj_dim,
+                            **self.projector_kwargs,
+                        )
+                        # output_grad projector
+                        random_project_2 = random_project(
+                            val_2_flatten,
+                            val_2_flatten.shape[0],
+                            proj_seed=base_seed + 1,
+                            proj_dim=proj_dim,
+                            **self.projector_kwargs,
+                        )
+
+                        # when input is sequence
+                        if val_1.dim() == 3:
+                            val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], val_1.shape[1], -1)
+                            val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], val_2.shape[1], -1)
+                        else:
+                            val_1 = random_project_1(val_1_flatten)
+                            val_2 = random_project_2(val_2_flatten)
+
+                    batch_size = val_1.shape[0]
+
+                    grad = torch.einsum('BSA,BSC->BAC', val_1, val_2).reshape(batch_size, -1)
+
+                    if train_grad[layer_id] is None:
+                        train_grad[layer_id] = torch.zeros((num_samples, *grad.shape[1:]), device=self.device)
+
+                    col_st = train_batch_idx * train_dataloader.batch_size
+                    col_ed = min(
+                        (train_batch_idx + 1) * train_dataloader.batch_size,
+                        len(train_dataloader.sampler),
+                    )
+                    train_grad[layer_id][col_st:col_ed] = grad.detach()
+
+                    # Accumulate projected Hessian factors for K-FAC
+                    Hessian[layer_id] += torch.matmul(grad.t(), grad) / num_samples
+
+        # Add damping term and compute inverses
+        for layer_id in range(num_layers):
+            # Compute inverses using Cholesky decomposition for stability
+            try:
+                ihvp_train[layer_id] = torch.matmul(
+                    eigen_stable_inverse(Hessian[layer_id], damping=self.damping),
+                    train_grad[layer_id].t()
+                ).t()
+            except RuntimeError as e:
+                print(f"Warning: Layer {layer_id} required increased damping for stability")
+                ihvp_train[layer_id] = torch.matmul(
+                    eigen_stable_inverse(Hessian[layer_id], damping=self.damping * 100),
+                    train_grad[layer_id].t()
+                ).t()
+
+        return ihvp_train
 
     def cache(
         self,
@@ -142,14 +306,12 @@ class GhostInnerProductAttributor():
         self,
         test_dataloader: torch.utils.data.DataLoader,
         train_dataloader: Optional[torch.utils.data.DataLoader] = None,
-        reverse: bool = False,
     ) -> Tensor:
         """Attributing the test set with respect to the training set.
 
         Args:
             test_dataloader (torch.utils.data.DataLoader): _description_
             train_dataloader (Optional[torch.utils.data.DataLoader], optional): _description_. Defaults to None.
-            reverse (bool, optional): _description_. Defaults to False.
 
         Returns:
             Tensor: The gradient inner product of the training set and the test set.
@@ -169,169 +331,77 @@ class GhostInnerProductAttributor():
                        training loader or cache a training loader."
             raise ValueError(message)
 
-        if reverse and self.full_train_dataloader is not None:
-            message = "You can't reverse the attribution when you have cached the training loader."
-            raise ValueError(message)
-        elif reverse:
-            test_dataloader, train_dataloader = train_dataloader, test_dataloader
-
         if self.mode == "default":
             tda_output = self.attribute_default(test_dataloader, train_dataloader)
-        elif self.mode == "one_run":
-            if self.full_train_dataloader is not None:
-                message = "One run can't be cached."
-                raise ValueError(message)
-            tda_output = self.attribute_one_run(test_dataloader, train_dataloader)
-        elif self.mode == "iterate":
-            if self.full_train_dataloader is not None:
-                message = "Iterate can't be cached."
-                raise ValueError(message)
-            tda_output = self.attribute_iterate(test_dataloader, train_dataloader)
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
 
-        if reverse:
-            tda_output = tda_output.T
         return tda_output
 
     def attribute_default(
         self,
         test_dataloader: torch.utils.data.DataLoader,
         train_dataloader: Optional[torch.utils.data.DataLoader] = None,
-    ) -> Tensor:
-        """Might be cached or not cached. If cached, train_dataloader is None. If not cached, train_dataloader is not None.
+    ) -> torch.Tensor:
+        """
+        Compute influence scores using K-FAC approximation.
 
         Args:
-            test_dataloader (torch.utils.data.DataLoader)
-            train_dataloader (Optional[torch.utils.data.DataLoader], optional). Defaults to None.
+            test_dataloader: DataLoader for test data
+            train_dataloader: Optional DataLoader for training data if not cached
 
         Returns:
-            Tensor.
+            Tensor of influence scores
         """
         if train_dataloader is not None:
             num_train = len(train_dataloader.sampler)
         else:
             num_train = len(self.full_train_dataloader.sampler)
 
-        grad_dot = torch.zeros(num_train, len(test_dataloader.sampler), device=self.device)
+        IF_score = torch.zeros(num_train, len(test_dataloader.sampler), device=self.device)
 
-        if train_dataloader is not None: # not cached
-            train_val_1 = [None] * len(self.layer_name)
-            train_val_2 = [None] * len(self.layer_name)
-
-            for train_batch_idx, train_batch in enumerate(
-                tqdm(
-                    train_dataloader,
-                    desc="calculating gradient of training set...",
-                    leave=False,
-                ),
-            ):
-                train_input_ids = train_batch["input_ids"].to(self.device)
-                train_attention_masks = train_batch["attention_mask"].to(self.device)
-                train_labels = train_batch["labels"].to(self.device)
-
-                # Forward pass
-                outputs = self.model(
-                    input_ids=train_input_ids,
-                    attention_mask=train_attention_masks,
-                    labels=train_labels
-                )
-                logp = -outputs.loss
-                train_loss = -(logp - torch.log(1 - torch.exp(logp)))
-
-                # Get pre-activations from trainable layers
-                train_pre_acts = [layer.pre_activation for layer in self.layer_name]
-
-                # Calculate gradients
-                Z_grad_train = torch.autograd.grad(train_loss, train_pre_acts, retain_graph=True)
-
-                with torch.no_grad():
-                    for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
-                        val_1, val_2 = layer.GIP_components(z_grad_full, per_sample=True)
-                        if self.projector_kwargs is not None:
-                            val_1_flatten = val_1.view(-1, val_1.shape[-1])
-                            val_2_flatten = val_2.view(-1, val_2.shape[-1])
-
-                            base_seed = self.proj_seed + int(1e4) * layer_id
-                            proj_dim = self.proj_dim[layer_id]
-
-                            # input projector
-                            random_project_1 = random_project(
-                                val_1_flatten,
-                                val_1_flatten.shape[0],
-                                proj_seed=base_seed,
-                                proj_dim=proj_dim,
-                                **self.projector_kwargs,
-                            )
-                            # output_grad projector
-                            random_project_2 = random_project(
-                                val_2_flatten,
-                                val_2_flatten.shape[0],
-                                proj_seed=base_seed + 1,
-                                proj_dim=proj_dim,
-                                **self.projector_kwargs,
-                            )
-
-                            # when input is sequence
-                            if val_1.dim() == 3:
-                                val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], val_1.shape[1], -1)
-                                val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], val_2.shape[1], -1)
-                            else:
-                                val_1 = random_project_1(val_1_flatten)
-                                val_2 = random_project_2(val_2_flatten)
-
-                        if train_val_1[layer_id] is None:
-                            total_samples = len(train_dataloader.sampler)
-                            train_val_1[layer_id] = torch.zeros((total_samples, *val_1.shape[1:]), device=self.device)
-                            train_val_2[layer_id] = torch.zeros((total_samples, *val_2.shape[1:]), device=self.device)
-
-                        col_st = train_batch_idx * train_dataloader.batch_size
-                        col_ed = min(
-                            (train_batch_idx + 1) * train_dataloader.batch_size,
-                            len(train_dataloader.sampler),
-                        )
-                        train_val_1[layer_id][col_st:col_ed] = val_1.detach()
-                        train_val_2[layer_id][col_st:col_ed] = val_2.detach()
+        # Compute K-FAC factors if not cached
+        if train_dataloader is not None and self.full_train_dataloader is None:
+            # train_val_1, train_val_2, input_factors, output_grad_factors = self.KFAC_ihvp_factors(train_dataloader)
+            ihvp_train = self.KFAC_ihvp_factors(train_dataloader)
         else:
-            train_val_1, train_val_2 = self.cached_train_val_1, self.cached_train_val_2
+            # input_factors, output_grad_factors = self.cached_kfac_factors
+            # train_val_1, train_val_2 = self.cached_train_val_1, self.cached_train_val_2
+            pass
 
+        # Compute influence scores
         for test_batch_idx, test_batch in enumerate(
-            tqdm(
-                test_dataloader,
-                desc="calculating gradient of evaluation set...",
-                leave=False,
-            ),
+            tqdm(test_dataloader, desc="computing influence scores...", leave=False),
         ):
             test_input_ids = test_batch["input_ids"].to(self.device)
             test_attention_masks = test_batch["attention_mask"].to(self.device)
             test_labels = test_batch["labels"].to(self.device)
 
-            # Forward pass with all data
             outputs = self.model(
                 input_ids=test_input_ids,
                 attention_mask=test_attention_masks,
                 labels=test_labels
             )
-
             logp = -outputs.loss
             test_loss = -(logp - torch.log(1 - torch.exp(logp)))
 
-            # Get pre-activations from trainable layers
             test_pre_acts = [layer.pre_activation for layer in self.layer_name]
-
-            # Calculate gradients
             Z_grad_test = torch.autograd.grad(test_loss, test_pre_acts, retain_graph=True)
 
-            # Calculate scores
             with torch.no_grad():
                 for layer_id, (layer, z_grad_test) in enumerate(zip(self.layer_name, Z_grad_test)):
                     val_1, val_2 = layer.GIP_components(z_grad_test, per_sample=True)
+
                     if self.projector_kwargs is not None:
                         val_1_flatten = val_1.view(-1, val_1.shape[-1])
                         val_2_flatten = val_2.view(-1, val_2.shape[-1])
 
                         base_seed = self.proj_seed + int(1e4) * layer_id
                         proj_dim = self.proj_dim[layer_id]
+
+                        # time projection
+                        torch.cuda.synchronize()
+                        start = time.time()
 
                         # input projector
                         random_project_1 = random_project(
@@ -358,182 +428,21 @@ class GhostInnerProductAttributor():
                             val_1 = random_project_1(val_1_flatten)
                             val_2 = random_project_2(val_2_flatten)
 
-                    dLdZ_train, z_train = train_val_1[layer_id], train_val_2[layer_id]
-                    dLdZ_val, z_val = val_1, val_2
+                    batch_size = val_1.shape[0]
+                    test_grad = torch.einsum('BSA,BSC->BAC', val_1, val_2).reshape(batch_size, -1)
+
                     col_st = test_batch_idx * test_dataloader.batch_size
                     col_ed = min(
                         (test_batch_idx + 1) * test_dataloader.batch_size,
                         len(test_dataloader.sampler),
                     )
-                    result = grad_dotprod(dLdZ_train, z_train, dLdZ_val, z_val) * self.lr
-                    grad_dot[:, col_st:col_ed] += result
 
-        return grad_dot
+                    # Use grad_dotprod between pre-computed iHVP components and test gradients
+                    result = torch.matmul(ihvp_train[layer_id], test_grad.t())
 
-    def attribute_one_run(
-        self,
-        test_dataloader: torch.utils.data.DataLoader,
-        train_dataloader: torch.utils.data.DataLoader,
-    ) -> Tensor:
-        num_train = len(train_dataloader.sampler)
-        num_test = len(test_dataloader.sampler)
-        grad_dot = torch.zeros(num_train, num_test, device=self.device)
+                    IF_score[:, col_st:col_ed] += result
 
-        train_input_ids, train_attention_masks, train_labels = [], [], []
-        test_input_ids, test_attention_masks, test_labels = [], [], []
-
-        # Gather training data
-        for batch in train_dataloader:
-            train_input_ids.append(batch["input_ids"])
-            train_attention_masks.append(batch["attention_mask"])
-            train_labels.append(batch["labels"])
-
-        # Gather evaluation data
-        for batch in test_dataloader:
-            test_input_ids.append(batch["input_ids"])
-            test_attention_masks.append(batch["attention_mask"])
-            test_labels.append(batch["labels"])
-
-        # Concatenate all batches
-        train_input_ids = torch.cat(train_input_ids, dim=0).to(self.device)
-        train_attention_masks = torch.cat(train_attention_masks, dim=0).to(self.device)
-        train_labels = torch.cat(train_labels, dim=0).to(self.device)
-
-        test_input_ids = torch.cat(test_input_ids, dim=0).to(self.device)
-        test_attention_masks = torch.cat(test_attention_masks, dim=0).to(self.device)
-        test_labels = torch.cat(test_labels, dim=0).to(self.device)
-
-        # Combine all data
-        combined_input_ids = torch.cat((train_input_ids, test_input_ids), dim=0)
-        combined_attention_masks = torch.cat((train_attention_masks, test_attention_masks), dim=0)
-        combined_labels = torch.cat((train_labels, test_labels), dim=0)
-
-        # Forward pass with all data
-        outputs = self.model(
-            input_ids=combined_input_ids,
-            attention_mask=combined_attention_masks,
-            labels=combined_labels
-        )
-        logp = -outputs.loss
-        full_loss = -(logp - torch.log(1 - torch.exp(logp)))
-
-        # Get pre-activations from trainable layers
-        full_pre_acts = [layer.pre_activation for layer in self.layer_name]
-
-        # Calculate gradients
-        Z_grad_full = torch.autograd.grad(full_loss, full_pre_acts, retain_graph=True)
-
-        # Calculate scores
-        with torch.no_grad():
-            for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_full)):
-                val_1, val_2 = layer.GIP_components(z_grad_full, per_sample=True)
-                if self.projector_kwargs is not None:
-                    val_1_flatten = val_1.view(-1, val_1.shape[-1])
-                    val_2_flatten = val_2.view(-1, val_2.shape[-1])
-
-                    base_seed = self.proj_seed + int(1e4) * layer_id
-                    proj_dim = self.proj_dim[layer_id]
-
-                    # input projector
-                    random_project_1 = random_project(
-                        val_1_flatten,
-                        val_1_flatten.shape[0],
-                        proj_seed=base_seed,
-                        proj_dim=proj_dim,
-                        **self.projector_kwargs,
-                    )
-                    # output_grad projector
-                    random_project_2 = random_project(
-                        val_2_flatten,
-                        val_2_flatten.shape[0],
-                        proj_seed=base_seed + 1,
-                        proj_dim=proj_dim,
-                        **self.projector_kwargs,
-                    )
-
-                    # when input is sequence
-                    if val_1.dim() == 3:
-                        val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], val_1.shape[1], -1)
-                        val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], val_2.shape[1], -1)
-                    else:
-                        val_1 = random_project_1(val_1_flatten)
-                        val_2 = random_project_2(val_2_flatten)
-
-                dLdZ_train, z_train = val_1[:num_train], val_2[:num_train]
-                dLdZ_val, z_val = val_1[num_train:], val_2[num_train:]
-                grad_dot += grad_dotprod(dLdZ_train, z_train, dLdZ_val, z_val) * self.lr
-
-        return grad_dot
-
-    def attribute_iterate(
-        self,
-        test_dataloader: torch.utils.data.DataLoader,
-        train_dataloader: torch.utils.data.DataLoader,
-    ) -> Tensor:
-        num_train = len(train_dataloader.sampler)
-        num_test = len(test_dataloader.sampler)
-        grad_dot = torch.zeros(num_train, num_test, device=self.device)
-
-        # Helper class to wrap a single batch
-        class SingleBatchDataset(torch.utils.data.Dataset):
-            def __init__(self, batch):
-                self.batch = batch
-
-            def __len__(self):
-                return self.batch["input_ids"].size(0)
-
-            def __getitem__(self, idx):
-                return {k: v[idx] for k, v in self.batch.items()}
-
-        for train_batch_idx, train_batch in enumerate(
-            tqdm(
-                train_dataloader,
-                desc="calculating gradient of training set...",
-                leave=False,
-            ),
-        ):
-            train_batch_size = train_batch["input_ids"].size(0)
-            for test_batch_idx, test_batch in enumerate(
-                tqdm(
-                    test_dataloader,
-                    desc="calculating gradient of evaluation set...",
-                    leave=False,
-                ),
-            ):
-                test_batch_size = test_batch["input_ids"].size(0)
-
-                # Create proper datasets from single batches
-                train_batch_dataset = SingleBatchDataset(train_batch)
-                test_batch_dataset = SingleBatchDataset(test_batch)
-
-                # Create proper dataloaders
-                train_batch_loader = torch.utils.data.DataLoader(
-                    train_batch_dataset,
-                    batch_size=train_batch_size,
-                    shuffle=False
-                )
-                test_batch_loader = torch.utils.data.DataLoader(
-                    test_batch_dataset,
-                    batch_size=test_batch_size,
-                    shuffle=False
-                )
-
-                # results position based on batch info
-                row_st = train_batch_idx * train_dataloader.batch_size
-                row_ed = min(
-                    (train_batch_idx + 1) * train_dataloader.batch_size,
-                    len(train_dataloader.sampler),
-                )
-
-                col_st = test_batch_idx * test_dataloader.batch_size
-                col_ed = min(
-                    (test_batch_idx + 1) * test_dataloader.batch_size,
-                    len(test_dataloader.sampler),
-                )
-
-                grad_dot[row_st:row_ed, col_st:col_ed] += self.attribute_one_run(test_batch_loader, train_batch_loader)
-
-        return grad_dot
+        return IF_score
 
     def sparsity(
         self,

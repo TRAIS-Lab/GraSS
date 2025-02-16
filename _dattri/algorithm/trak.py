@@ -215,6 +215,10 @@ class TRAKAttributor(BaseAttributor):
         if train_dataloader is not None:
             _check_shuffle(train_dataloader)
 
+        time_backward = 0
+        time_inner_product = 0
+        time_projection = 0
+
         running_xinv_XTX_XT = 0
         running_Q = 0
         running_count = 0

@@ -60,7 +60,7 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from GIP.GIPGPT2LMHeadModel import GIPGPT2LMHeadModel
+from GIP.GPT2LMHeadModel import GIPGPT2LMHeadModel
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
@@ -257,7 +257,7 @@ def parse_args():
         "--mode",
         type=str,
         default="GD-default",
-        help="Specify which mode we want to run the data attribution method. Available options: GIP-{default,one_run,iterate} and GD-{default,iterate}.",
+        help="Specify which mode we want to run the data attribution method. Available options: IF-{default,one_run,iterate} and GD-{default,one_run,iterate}.",
     )
     parser.add_argument(
         "--proj",
@@ -269,7 +269,7 @@ def parse_args():
         "--proj_dim_dist",
         type=str,
         default="uniform",
-        help="The projection dimension distribution. Only valid when proj_method is GIP. Available options: uniform, non-uniform.",
+        help="The projection dimension distribution. Available options: uniform, non-uniform.",
     )
     parser.add_argument(
         "--device",
@@ -560,7 +560,7 @@ def main():
     test_dataset = lm_datasets["validation"]
 
     if args.debug: # toy dataset
-        train_dataset = train_dataset.select(range(4))
+        train_dataset = train_dataset.select(range(40))
         test_dataset = test_dataset.select(range(4))
 
     # Dataset length
@@ -578,14 +578,31 @@ def main():
 
     logger.info(f"TDA Method: {tda_method} with mode: {tda_mode}")
 
-    if tda_method == "GIP":
-        if tda_mode == "default": # default will first store all the information for train. Only used with projection.
-            if proj_dim is not None and proj_dim <= 1024 and args.proj_dim_dist == "non-uniform":
+    if tda_method == "GD":
+        if tda_mode == "default":
+            if proj_method == "SJLT":
                 train_batch_size = 4
                 test_batch_size = 4
             else:
-                train_batch_size = 2
-                test_batch_size = 1
+                train_batch_size = 5
+                test_batch_size = 5
+        elif tda_mode == "iterate":
+            if args.proj is not None:
+                train_batch_size = 4
+                test_batch_size = 4
+            else:
+                train_batch_size = 8
+                test_batch_size = 8
+        else:
+            raise ValueError("Invalid model type for vanilla Grad-Dot. Choose from 'default', 'iterate'.")
+    elif tda_method == "IF":
+        if tda_mode == "default": # default will first store all the information for train. Only used with projection.
+            if proj_dim is not None and proj_dim <= 1024 and args.proj_dim_dist == "non-uniform":
+                train_batch_size = 8
+                test_batch_size = 8
+            else:
+                train_batch_size = 8
+                test_batch_size = 8
         elif tda_mode == "iterate": # For iterate, #repeated computation over test set is n / train_bat_size.
             if args.proj is not None: # need extra memory for projection
                 train_batch_size = 12
@@ -598,33 +615,18 @@ def main():
             test_batch_size = 4
         else:
             raise ValueError("Invalid mode type for Grad-Dot with Ghost Inner-Product. Choose from 'default', 'iterate', 'one_run'.")
-    elif tda_method == "GD":
-        if tda_mode == "default":
-            if proj_method == "SJLT":
-                train_batch_size = 2
-                test_batch_size = 2
-            else:
-                train_batch_size = 2
-                test_batch_size = 2
-        elif tda_mode == "iterate":
-            if args.proj is not None:
-                train_batch_size = 4
-                test_batch_size = 4
-            else:
-                train_batch_size = 8
-                test_batch_size = 8
-        else:
-            raise ValueError("Invalid model type for vanilla Grad-Dot. Choose from 'default', 'iterate'.")
     elif tda_method =="TRAK":
         if tda_mode == "default":
             train_batch_size = 4
             test_batch_size = 4
         else:
             raise ValueError("Invalid method type. Choose from 'default'.")
-    elif tda_method == "LoGra":
-        pass
+    elif tda_method =="dattriGD":
+        if tda_mode == "default":
+            train_batch_size = 4
+            test_batch_size = 4
     else:
-        raise ValueError("Invalid method type. Choose from 'GIP' or 'GD'.")
+        raise ValueError("Invalid method type. Choose from 'IF', 'TRAK', or 'GD'.")
 
     logger.info(f"The training batch size: {train_batch_size}")
     logger.info(f"The eval batch size: {test_batch_size}")
@@ -640,35 +642,23 @@ def main():
     if proj_method is None:
         projector_kwargs = None
     else:
-        if tda_method == "GIP":
-            projector_kwargs = {
-                "proj_dim": proj_dim,
-                "proj_dim_dist": args.proj_dim_dist,
-                "proj_max_batch_size": 32,
-                "proj_seed": args.seed,
-                "device": device,
-                "method": proj_method,
-                "use_half_precision": False,
-                "threshold": args.threshold,
-            }
-        else:
-            projector_kwargs = {
-                "proj_dim": proj_dim,
-                "proj_max_batch_size": 32,
-                "proj_seed": args.seed,
-                "device": device,
-                "method": proj_method,
-                "use_half_precision": False,
-                "threshold": args.threshold,
-            }
+        projector_kwargs = {
+            "proj_dim": proj_dim,
+            "proj_dim_dist": args.proj_dim_dist,
+            "proj_max_batch_size": 32,
+            "proj_seed": args.seed,
+            "device": device,
+            "method": proj_method,
+            "use_half_precision": False,
+            "threshold": args.threshold,
+        }
 
         logger.info(f"Projector: {projector_kwargs}")
 
     logger.info("***** Running attribution *****")
 
-    if tda_method == "GIP":
-        from GIP.gip import GhostInnerProductAttributor
-        from GIP.mem_gip import MemEffGhostInnerProductAttributor
+    if tda_method == "GD":
+        from GIP.GD import GIPGradDotAttributor
         from GIP.helper import find_GIPlayers
         from GIP.layers.layer_norm import GIPLayerNorm
         from GIP.layers.linear import GIPEmbedding
@@ -678,7 +668,7 @@ def main():
         trainable_layers = find_GIPlayers(model)
         trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GIPLayerNorm) and not isinstance(layer, GIPEmbedding)] # remove all LayerNorm and Embedding layers
 
-        attributor = GhostInnerProductAttributor(
+        attributor = GIPGradDotAttributor(
             model=model,
             lr=1e-3,
             layer_name=trainable_layers,
@@ -713,36 +703,24 @@ def main():
         end = time.time()
 
         peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
-    elif tda_method == "GD":
-        from _dattri.task import AttributionTask
-        from _dattri.algorithm.tracin import TracInAttributor
+    elif tda_method == "IF":
+        from GIP.IF import GIPIFAttributorKFAC
+        from GIP.helper import find_GIPlayers
+        from GIP.layers.layer_norm import GIPLayerNorm
+        from GIP.layers.linear import GIPEmbedding
 
-        # need to ensure model is in eval before defining f
         model.eval()
-        def f(params, batch):
-            outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
-                                                kwargs={"attention_mask": batch["attention_mask"].cuda(device),
-                                                        "labels": batch["labels"].cuda(device)})
-            logp = -outputs.loss
-            return logp - torch.log(1 - torch.exp(logp))
 
-        def checkpoints_load_func(model, checkpoint):
-            model = GIPGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
-            model.eval()
-            return model
+        trainable_layers = find_GIPlayers(model)
+        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GIPLayerNorm) and not isinstance(layer, GIPEmbedding)] # remove all LayerNorm and Embedding layers
 
-        task = AttributionTask(loss_func=f, model=model,
-                            checkpoints=checkpoint,
-                            checkpoints_load_func=checkpoints_load_func)
-
-        attributor = TracInAttributor(
-            task=task,
-            weight_list=torch.ones(1) * 1e-3,
-            normalized_grad=False, # For Grad-Dot, True if Grad-Cos
+        attributor = GIPIFAttributorKFAC(
+            model=model,
+            lr=1e-3,
+            layer_name=trainable_layers,
             projector_kwargs=projector_kwargs,
-            device=device,
-            layer_name=[name for name, _ in model.named_parameters() if 'ln' not in name.lower()],  # Consider only Linear layers (exclude LayerNorm).
             mode=tda_mode,
+            device=device,
         )
 
         torch.cuda.reset_peak_memory_stats(device)
@@ -750,8 +728,7 @@ def main():
         torch.cuda.synchronize(device)
         start = time.time()
 
-        with torch.no_grad():
-            score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
+        score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
 
         torch.cuda.synchronize(device)
         end = time.time()
@@ -809,8 +786,51 @@ def main():
         end = time.time()
 
         peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
-    elif tda_method == "LoGra":
-        pass
+
+    elif tda_method == "dattriGD":
+        from _dattri.task import AttributionTask
+        from _dattri.algorithm.tracin import TracInAttributor
+
+        # need to ensure model is in eval before defining f
+        model.eval()
+        def f(params, batch):
+            outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
+                                                kwargs={"attention_mask": batch["attention_mask"].cuda(device),
+                                                        "labels": batch["labels"].cuda(device)})
+            logp = -outputs.loss
+            return logp - torch.log(1 - torch.exp(logp))
+
+        def checkpoints_load_func(model, checkpoint):
+            model = GIPGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
+            model.eval()
+            return model
+
+        task = AttributionTask(loss_func=f, model=model,
+                            checkpoints=checkpoint,
+                            checkpoints_load_func=checkpoints_load_func)
+
+        attributor = TracInAttributor(
+            task=task,
+            weight_list=torch.ones(1) * 1e-3,
+            normalized_grad=False, # For Grad-Dot, True if Grad-Cos
+            projector_kwargs=projector_kwargs,
+            device=device,
+            layer_name=[name for name, _ in model.named_parameters() if 'ln' not in name.lower()],  # Consider only Linear layers (exclude LayerNorm).
+            mode=tda_mode,
+        )
+
+        torch.cuda.reset_peak_memory_stats(device)
+
+        torch.cuda.synchronize(device)
+        start = time.time()
+
+        with torch.no_grad():
+            score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
+
+        torch.cuda.synchronize(device)
+        end = time.time()
+
+        peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
 
     logger.info(f"Time taken: {end - start} seconds")
     logger.info(f"Peak memory usage: {peak_memory} MB")
