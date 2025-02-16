@@ -225,82 +225,7 @@ class GIPIFAttributorKFAC():
     ) -> None:
         # This means we can afford full calculation.
         self.full_train_dataloader = full_train_dataloader
-        self.cached_train_val_1 = [None] * len(self.layer_name)
-        self.cached_train_val_2 = [None] * len(self.layer_name)
-
-        for train_batch_idx, train_batch in enumerate(
-            tqdm(
-                self.full_train_dataloader,
-                desc="calculating gradient of training set...",
-                leave=False,
-            ),
-        ):
-            train_input_ids = train_batch["input_ids"].to(self.device)
-            train_attention_masks = train_batch["attention_mask"].to(self.device)
-            train_labels = train_batch["labels"].to(self.device)
-
-            # Forward pass
-            outputs = self.model(
-                input_ids=train_input_ids,
-                attention_mask=train_attention_masks,
-                labels=train_labels
-            )
-            logp = -outputs.loss
-            train_loss = logp - torch.log(1 - torch.exp(logp))
-
-            # Get pre-activations from trainable layers
-            train_pre_acts = [layer.pre_activation for layer in self.layer_name]
-
-            # Calculate gradients
-            Z_grad_train = torch.autograd.grad(train_loss, train_pre_acts, retain_graph=True)
-
-            with torch.no_grad():
-                for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
-                    val_1, val_2 = layer.GIP_components(z_grad_full, per_sample=True)
-                    if self.projector_kwargs is not None:
-                        val_1_flatten = val_1.view(-1, val_1.shape[-1])
-                        val_2_flatten = val_2.view(-1, val_2.shape[-1])
-
-                        base_seed = self.proj_seed + int(1e4) * layer_id
-                        proj_dim = self.proj_dim[layer_id]
-
-                        # input projector
-                        random_project_1 = random_project(
-                            val_1_flatten,
-                            val_1_flatten.shape[0],
-                            proj_seed=base_seed,
-                            proj_dim=proj_dim,
-                            **self.projector_kwargs,
-                        )
-                        # output_grad projector
-                        random_project_2 = random_project(
-                            val_2_flatten,
-                            val_2_flatten.shape[0],
-                            proj_seed=base_seed + 1,
-                            proj_dim=proj_dim,
-                            **self.projector_kwargs,
-                        )
-
-                        # when input is sequence
-                        if val_1.dim() == 3:
-                            val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], val_1.shape[1], -1)
-                            val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], val_2.shape[1], -1)
-                        else:
-                            val_1 = random_project_1(val_1_flatten)
-                            val_2 = random_project_2(val_2_flatten)
-
-                    if self.cached_train_val_1[layer_id] is None:
-                        total_samples = len(self.full_train_dataloader.sampler)
-                        self.cached_train_val_1[layer_id] = torch.zeros((total_samples, *val_1.shape[1:]), device=self.device)
-                        self.cached_train_val_2[layer_id] = torch.zeros((total_samples, *val_2.shape[1:]), device=self.device)
-
-                    col_st = train_batch_idx * self.full_train_dataloader.batch_size
-                    col_ed = min(
-                        (train_batch_idx + 1) * self.full_train_dataloader.batch_size,
-                        len(self.full_train_dataloader.sampler),
-                    )
-                    self.cached_train_val_1[layer_id][col_st:col_ed] = val_1.detach()
-                    self.cached_train_val_2[layer_id][col_st:col_ed] = val_2.detach()
+        self.cached_ihvp_train = self.KFAC_ihvp_factors(full_train_dataloader)
 
     def attribute(
         self,
@@ -362,12 +287,9 @@ class GIPIFAttributorKFAC():
 
         # Compute K-FAC factors if not cached
         if train_dataloader is not None and self.full_train_dataloader is None:
-            # train_val_1, train_val_2, input_factors, output_grad_factors = self.KFAC_ihvp_factors(train_dataloader)
             ihvp_train = self.KFAC_ihvp_factors(train_dataloader)
         else:
-            # input_factors, output_grad_factors = self.cached_kfac_factors
-            # train_val_1, train_val_2 = self.cached_train_val_1, self.cached_train_val_2
-            pass
+            ihvp_train = self.cached_ihvp_train
 
         # Compute influence scores
         for test_batch_idx, test_batch in enumerate(
