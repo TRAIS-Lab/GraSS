@@ -284,6 +284,11 @@ def parse_args():
         help="Threshold to be used for projection when attributing.",
     )
     parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Record profiling results.",
+    )
+    parser.add_argument(
         "--reverse",
         action="store_true",
         help="Reverse the order of iterating through the training and test set to save memory.",
@@ -716,9 +721,9 @@ def main():
 
         attributor = GIPIFAttributorKFAC(
             model=model,
-            lr=1e-3,
             layer_name=trainable_layers,
             projector_kwargs=projector_kwargs,
+            profile = args.profile,
             mode=tda_mode,
             device=device,
         )
@@ -728,7 +733,10 @@ def main():
         torch.cuda.synchronize(device)
         start = time.time()
 
-        score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
+        if args.profile:
+            score, profile = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
+        else:
+            score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
 
         torch.cuda.synchronize(device)
         end = time.time()
@@ -861,6 +869,10 @@ def main():
     else:
         filename = f"./results/{training_setting}/{tda_method}/{'_'.join(filename_parts)}.pt"
     torch.save(score, filename)
+
+    if args.profile:
+        filename = f"./results/{training_setting}/{tda_method}/{'_'.join(filename_parts)}_profile.pt"
+        torch.save(profile, filename)
 
 
 if __name__ == "__main__":

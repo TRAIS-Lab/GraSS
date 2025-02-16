@@ -8,12 +8,58 @@ if TYPE_CHECKING:
 import torch
 from torch import Tensor
 from tqdm import tqdm
-from .layers.linear import GIPEmbedding
-from .helper import find_GIPlayers, grad_dotprod, setup_projectors
+from .layers.linear import GIPLinear, GIPEmbedding
+from .layers.layer_norm import GIPLayerNorm
+from .helper import find_GIPlayers
 
 from _dattri.func.projection import random_project
 
 import time
+
+def setup_projectors(
+        projector_kwargs: Dict[str, Any],
+        layer_name: List[Union[GIPLinear, GIPEmbedding, GIPLayerNorm]],
+        mode: Optional[str] = "default",
+    ) -> Tuple[Dict[str, Any], List[int], int]:
+    """Setup projection dimensions and seeds for each layer.
+
+    Args:
+        projector_kwargs (Dict[str, Any]): projector's arguments.
+        layer_name (List[Union[GIPLinear, GIPEmbedding, GIPLayerNorm]]): the list of layers to be projected.
+        mode (Optional[str], optional): the data attribution's running mode. Defaults to "default".
+
+    Returns:
+        Tuple[Dict[str, Any], List[int], int]: processed projector's arguments, projection dimensions, and projection seed.
+    """
+    if projector_kwargs is None:
+        return None, None, None
+    proj_seed = projector_kwargs.get("proj_seed", 0)
+    proj_dim = projector_kwargs.get("proj_dim", 512)
+    proj_dim_dist = projector_kwargs.get("proj_dim_dist", "uniform")
+
+    projector_kwargs.pop("proj_seed")
+    projector_kwargs.pop("proj_dim")
+    projector_kwargs.pop("proj_dim_dist")
+
+    layer_dim = []
+    for layer in layer_name:
+        if isinstance(layer, GIPLinear):
+            layer_dim.append(layer.weight.shape[0] * layer.weight.shape[1])
+        elif isinstance(layer, GIPEmbedding):
+            layer_dim.append(layer.embedding_dim * layer.num_embeddings)
+        elif isinstance(layer, GIPLayerNorm):
+            layer_dim.append(layer.normalized_shape[0])
+        else:
+            raise ValueError(f"Layer {layer} is not supported")
+
+    if mode == "default" and proj_dim_dist == "non-uniform":
+        total_dim = sum(layer_dim)
+        proj_dim = [int(proj_dim * dim / total_dim) for dim in layer_dim]
+    elif mode in ["one_run", "iterate"] or (mode == "default" and proj_dim_dist == "uniform"):
+        proj_dim = [proj_dim] * len(layer_dim)
+
+    print(f"proj_dim: {proj_dim}")
+    return projector_kwargs, proj_dim, proj_seed
 
 def eigen_stable_inverse(matrix: torch.Tensor, damping: float = 1e-5, eigen_threshold: float = 1e-6) -> torch.Tensor:
     """
@@ -56,10 +102,10 @@ class GIPIFAttributorKFAC():
     def __init__(
         self,
         model,
-        lr: float = 1e-3,
         layer_name: Optional[Union[str, List[str]]] = None,
         projector_kwargs: Optional[Dict[str, Any]] = None,
         damping = 1e-4,
+        profile: bool = False,
         mode: str = "default",
         device: str = 'cpu'
     ) -> None:
@@ -67,36 +113,32 @@ class GIPIFAttributorKFAC():
 
         Args:
             model (_type_): _description_
-            lr (float, optional): _description_. Defaults to 1e-3.
             layer_name (Optional[Union[str, List[str]]], optional): _description_. Defaults to None.
             projector_kwargs (Optional[Dict[str, Any]], optional): _description_. Defaults to None.
-            mode (str, optional): There are several mode of ghost inner product:
-
-                1. "default": first compute (if not cached) and store all the pre-activation gradient and input of the training set, then for the test set. Do the inner product at the end. This is much like the vanilla Grad-Dot, only differ in that we derive the gradient inner product from a different formula, so we require different terms.
-
-                The memory requirement is the same as vanilla Grad-Dot.
-
-                2. "one_run": Original Ghost Inner Product. Compute the gradient inner product of the training set and the test set in one run.
-
-                This requires a lot of memory to store be able to compute the gradient of the pre-activation and the input of the training+test set.
-
-                3. "iterate": Iterate through training batches and test batches and use "one_run" for each pair of batches.
-
-                This is the most memory efficient way to compute the inner product, but it is also the slowest due to the repetition of the computation.
-
-             Defaults to "default".
+            damping (float): Damping used when calculating the Hessian inverse. Defaults to 1e-4.
+            profile (bool, optional): Record time used in various parts of the algorithm run. Defaults to False.
+            mode (str, optional): Currently only "default" mode is supported. Defaults to "default".
             device (str, optional): _description_. Defaults to 'cpu'.
         """
         self.model = model
-        self.lr = lr
         self.layer_name = find_GIPlayers(model) if layer_name is None else layer_name
         self.projector_kwargs, self.proj_dim, self.proj_seed = setup_projectors(projector_kwargs, self.layer_name, mode)
         self.damping = damping
+        self.profile = profile
         self.mode = mode
         self.device = device
         self.full_train_dataloader = None
 
-    def KFAC_ihvp_factors(
+        # Initialize profiling stats
+        if self.profile:
+            self.profiling_stats = {
+                'projection': 0.0,
+                'gradient': 0.0,
+                'hessian': 0.0,
+                'inverse_hessian': 0.0
+            }
+
+    def KFAC_iHVP(
         self,
         train_dataloader: torch.utils.data.DataLoader,
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
@@ -124,13 +166,18 @@ class GIPIFAttributorKFAC():
         for train_batch_idx, train_batch in enumerate(
             tqdm(
                 train_dataloader,
-                desc="computing K-FAC factors...",
+                desc="computing K-FAC factors for training set...",
                 leave=False,
             ),
         ):
             train_input_ids = train_batch["input_ids"].to(self.device)
             train_attention_masks = train_batch["attention_mask"].to(self.device)
             train_labels = train_batch["labels"].to(self.device)
+
+            # Time backward pass
+            if self.profile:
+                torch.cuda.synchronize()
+                start_time = time.time()
 
             # Forward pass
             outputs = self.model(
@@ -141,11 +188,12 @@ class GIPIFAttributorKFAC():
             logp = -outputs.loss
             train_loss = -(logp - torch.log(1 - torch.exp(logp)))
 
-            # Get pre-activations
             train_pre_acts = [layer.pre_activation for layer in self.layer_name]
-
-            # Calculate gradients
             Z_grad_train = torch.autograd.grad(train_loss, train_pre_acts, retain_graph=True)
+
+            if self.profile:
+                torch.cuda.synchronize()
+                self.profiling_stats['gradient'] += time.time() - start_time
 
             # Compute K-FAC factors for each layer
             with torch.no_grad():
@@ -154,6 +202,11 @@ class GIPIFAttributorKFAC():
 
                     # Apply projection if needed
                     if self.projector_kwargs is not None:
+                        # Time projection
+                        if self.profile:
+                            torch.cuda.synchronize()
+                            start_time = time.time()
+
                         val_1_flatten = val_1.view(-1, val_1.shape[-1])
                         val_2_flatten = val_2.view(-1, val_2.shape[-1])
 
@@ -185,8 +238,11 @@ class GIPIFAttributorKFAC():
                             val_1 = random_project_1(val_1_flatten)
                             val_2 = random_project_2(val_2_flatten)
 
-                    batch_size = val_1.shape[0]
+                        if self.profile:
+                            torch.cuda.synchronize()
+                            self.profiling_stats['projection'] += time.time() - start_time
 
+                    batch_size = val_1.shape[0]
                     grad = torch.einsum('BSA,BSC->BAC', val_1, val_2).reshape(batch_size, -1)
 
                     if train_grad[layer_id] is None:
@@ -199,8 +255,22 @@ class GIPIFAttributorKFAC():
                     )
                     train_grad[layer_id][col_st:col_ed] = grad.detach()
 
-                    # Accumulate projected Hessian factors for K-FAC
+                    # Time Hessian calculation
+                    if self.profile:
+                        torch.cuda.synchronize()
+                        start_time = time.time()
+
                     Hessian[layer_id] += torch.matmul(grad.t(), grad) / num_samples
+
+                    if self.profile:
+                        torch.cuda.synchronize()
+                        self.profiling_stats['hessian'] += time.time() - start_time
+
+
+        # Time inverse Hessian calculation
+        if self.profile:
+            torch.cuda.synchronize()
+            start_time = time.time()
 
         # Add damping term and compute inverses
         for layer_id in range(num_layers):
@@ -217,6 +287,10 @@ class GIPIFAttributorKFAC():
                     train_grad[layer_id].t()
                 ).t()
 
+        if self.profile:
+            torch.cuda.synchronize()
+            self.profiling_stats['inverse_hessian'] += time.time() - start_time
+
         return ihvp_train
 
     def cache(
@@ -225,13 +299,13 @@ class GIPIFAttributorKFAC():
     ) -> None:
         # This means we can afford full calculation.
         self.full_train_dataloader = full_train_dataloader
-        self.cached_ihvp_train = self.KFAC_ihvp_factors(full_train_dataloader)
+        self.cached_ihvp_train = self.KFAC_iHVP(full_train_dataloader)
 
     def attribute(
         self,
         test_dataloader: torch.utils.data.DataLoader,
         train_dataloader: Optional[torch.utils.data.DataLoader] = None,
-    ) -> Tensor:
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict]]:
         """Attributing the test set with respect to the training set.
 
         Args:
@@ -239,7 +313,10 @@ class GIPIFAttributorKFAC():
             train_dataloader (Optional[torch.utils.data.DataLoader], optional): _description_. Defaults to None.
 
         Returns:
-            Tensor: The gradient inner product of the training set and the test set.
+            If profile=False:
+                torch.Tensor: The influence scores
+            If profile=True:
+                Tuple[torch.Tensor, Dict]: The influence scores and profiling statistics
         """
         if self.full_train_dataloader is not None and train_dataloader is not None: # if cached
             message = "You have cached a training loader by .cache()\
@@ -257,11 +334,9 @@ class GIPIFAttributorKFAC():
             raise ValueError(message)
 
         if self.mode == "default":
-            tda_output = self.attribute_default(test_dataloader, train_dataloader)
+            return self.attribute_default(test_dataloader, train_dataloader)
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
-
-        return tda_output
 
     def attribute_default(
         self,
@@ -287,7 +362,7 @@ class GIPIFAttributorKFAC():
 
         # Compute K-FAC factors if not cached
         if train_dataloader is not None and self.full_train_dataloader is None:
-            ihvp_train = self.KFAC_ihvp_factors(train_dataloader)
+            ihvp_train = self.KFAC_iHVP(train_dataloader)
         else:
             ihvp_train = self.cached_ihvp_train
 
@@ -298,6 +373,11 @@ class GIPIFAttributorKFAC():
             test_input_ids = test_batch["input_ids"].to(self.device)
             test_attention_masks = test_batch["attention_mask"].to(self.device)
             test_labels = test_batch["labels"].to(self.device)
+
+             # Time backward pass
+            if self.profile:
+                torch.cuda.synchronize()
+                start_time = time.time()
 
             outputs = self.model(
                 input_ids=test_input_ids,
@@ -310,11 +390,19 @@ class GIPIFAttributorKFAC():
             test_pre_acts = [layer.pre_activation for layer in self.layer_name]
             Z_grad_test = torch.autograd.grad(test_loss, test_pre_acts, retain_graph=True)
 
+            if self.profile:
+                torch.cuda.synchronize()
+                self.profiling_stats['gradient'] += time.time() - start_time
+
             with torch.no_grad():
                 for layer_id, (layer, z_grad_test) in enumerate(zip(self.layer_name, Z_grad_test)):
                     val_1, val_2 = layer.GIP_components(z_grad_test, per_sample=True)
 
                     if self.projector_kwargs is not None:
+                        if self.profile:
+                            torch.cuda.synchronize()
+                            start_time = time.time()
+
                         val_1_flatten = val_1.view(-1, val_1.shape[-1])
                         val_2_flatten = val_2.view(-1, val_2.shape[-1])
 
@@ -350,6 +438,10 @@ class GIPIFAttributorKFAC():
                             val_1 = random_project_1(val_1_flatten)
                             val_2 = random_project_2(val_2_flatten)
 
+                        if self.profile:
+                            torch.cuda.synchronize()
+                            self.profiling_stats['projection'] += time.time() - start_time
+
                     batch_size = val_1.shape[0]
                     test_grad = torch.einsum('BSA,BSC->BAC', val_1, val_2).reshape(batch_size, -1)
 
@@ -364,7 +456,7 @@ class GIPIFAttributorKFAC():
 
                     IF_score[:, col_st:col_ed] += result
 
-        return IF_score
+        return (IF_score, self.profiling_stats) if self.profile else IF_score
 
     def sparsity(
         self,
