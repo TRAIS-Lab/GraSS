@@ -34,32 +34,46 @@ def setup_projectors(
     if projector_kwargs is None:
         return None, None, None
     proj_seed = projector_kwargs.get("proj_seed", 0)
-    proj_dim = projector_kwargs.get("proj_dim", 512)
+    proj_dim = projector_kwargs.get("proj_dim", 32)
     proj_dim_dist = projector_kwargs.get("proj_dim_dist", "uniform")
 
     projector_kwargs.pop("proj_seed")
     projector_kwargs.pop("proj_dim")
     projector_kwargs.pop("proj_dim_dist")
 
-    layer_dim = []
+    # Control the thresholding for different vals
+    projector_kwargs_1 = projector_kwargs.copy()
+    projector_kwargs_2 = projector_kwargs.copy()
+
+    projector_kwargs_2["threshold"] = 0.0 #TODO threshold for gradient of pre-activation, which shouldn't be sparse so better set to 0
+
+    layer_dim_1 = []
+    layer_dim_2 = []
     for layer in layer_name:
         if isinstance(layer, GIPLinear):
-            layer_dim.append(layer.weight.shape[0] * layer.weight.shape[1])
+            layer_dim_1.append(layer.weight.shape[0])
+            layer_dim_2.append(layer.weight.shape[0] * layer.weight.shape[1])
         elif isinstance(layer, GIPEmbedding):
-            layer_dim.append(layer.embedding_dim * layer.num_embeddings)
+            layer_dim_1.append(layer.embedding_dim)
+            layer_dim_2.append(layer.embedding_dim * layer.num_embeddings)
         elif isinstance(layer, GIPLayerNorm):
-            layer_dim.append(layer.normalized_shape[0])
+            layer_dim_1.append(layer.normalized_shape[0])
+            layer_dim_2.append(layer.normalized_shape[0])
         else:
             raise ValueError(f"Layer {layer} is not supported")
 
     if mode == "default" and proj_dim_dist == "non-uniform":
-        total_dim = sum(layer_dim)
-        proj_dim = [int(proj_dim * dim / total_dim) for dim in layer_dim]
+        total_dim_1 = sum(layer_dim_1)
+        total_dim_2 = sum(layer_dim_2)
+        proj_dim_1 = [int(proj_dim * dim / total_dim_1) for dim in layer_dim_1]
+        proj_dim_2 = [int(proj_dim * dim / total_dim_2) for dim in layer_dim_2]
     elif mode in ["one_run", "iterate"] or (mode == "default" and proj_dim_dist == "uniform"):
-        proj_dim = [proj_dim] * len(layer_dim)
+        proj_dim_1 = [proj_dim] * len(layer_dim_1)
+        proj_dim_2 = [proj_dim] * len(layer_dim_2)
 
-    print(f"proj_dim: {proj_dim}")
-    return projector_kwargs, proj_dim, proj_seed
+    print(f"proj_dim for input: {proj_dim_1}")
+    print(f"proj_dim for gradient of pre-activation: {proj_dim_2}")
+    return (projector_kwargs_1, projector_kwargs_2), (proj_dim_1, proj_dim_2), proj_seed
 
 def eigen_stable_inverse(matrix: torch.Tensor, damping: float = 1e-5, eigen_threshold: float = 1e-6) -> torch.Tensor:
     """
@@ -83,6 +97,9 @@ def eigen_stable_inverse(matrix: torch.Tensor, damping: float = 1e-5, eigen_thre
         # If eigendecomposition fails, try with larger damping
         matrix = matrix + 9 * damping * torch.eye(matrix.shape[0], device=matrix.device)
         eigenvalues, eigenvectors = torch.linalg.eigh(matrix)
+
+    # Print the condition number of the matrix
+    print(f"Condition number: {eigenvalues[-1] / eigenvalues[0]}")
 
     # Filter small eigenvalues
     eigenvalues = torch.clamp(eigenvalues, min=eigen_threshold)
@@ -122,7 +139,7 @@ class GIPIFAttributorKFAC():
         """
         self.model = model
         self.layer_name = find_GIPlayers(model) if layer_name is None else layer_name
-        self.projector_kwargs, self.proj_dim, self.proj_seed = setup_projectors(projector_kwargs, self.layer_name, mode)
+        (self.projector_kwargs_1, self.projector_kwargs_2), (self.proj_dim_1, self.proj_dim_2), self.proj_seed = setup_projectors(projector_kwargs, self.layer_name, mode)
         self.damping = damping
         self.profile = profile
         self.mode = mode
@@ -201,7 +218,7 @@ class GIPIFAttributorKFAC():
                     val_1, val_2 = layer.GIP_components(z_grad_full, per_sample=True)
 
                     # Apply projection if needed
-                    if self.projector_kwargs is not None:
+                    if self.projector_kwargs_1 is not None and self.projector_kwargs_2 is not None:
                         # Time projection
                         if self.profile:
                             torch.cuda.synchronize()
@@ -211,23 +228,22 @@ class GIPIFAttributorKFAC():
                         val_2_flatten = val_2.view(-1, val_2.shape[-1])
 
                         base_seed = self.proj_seed + int(1e4) * layer_id
-                        proj_dim = self.proj_dim[layer_id]
 
                         # input projector
                         random_project_1 = random_project(
                             val_1_flatten,
                             val_1_flatten.shape[0],
                             proj_seed=base_seed,
-                            proj_dim=proj_dim,
-                            **self.projector_kwargs,
+                            proj_dim=self.proj_dim_1[layer_id],
+                            **self.projector_kwargs_1,
                         )
                         # output_grad projector
                         random_project_2 = random_project(
                             val_2_flatten,
                             val_2_flatten.shape[0],
                             proj_seed=base_seed + 1,
-                            proj_dim=proj_dim,
-                            **self.projector_kwargs,
+                            proj_dim=self.proj_dim_2[layer_id],
+                            **self.projector_kwargs_2,
                         )
 
                         # when input is sequence
@@ -274,6 +290,7 @@ class GIPIFAttributorKFAC():
 
         # Add damping term and compute inverses
         for layer_id in range(num_layers):
+            print(f"Calculating iHVP of Layer {layer_id}:")
             # Compute inverses using Cholesky decomposition for stability
             try:
                 ihvp_train[layer_id] = torch.matmul(
@@ -398,7 +415,7 @@ class GIPIFAttributorKFAC():
                 for layer_id, (layer, z_grad_test) in enumerate(zip(self.layer_name, Z_grad_test)):
                     val_1, val_2 = layer.GIP_components(z_grad_test, per_sample=True)
 
-                    if self.projector_kwargs is not None:
+                    if self.projector_kwargs_1 is not None and self.projector_kwargs_2 is not None:
                         if self.profile:
                             torch.cuda.synchronize()
                             start_time = time.time()
@@ -407,7 +424,6 @@ class GIPIFAttributorKFAC():
                         val_2_flatten = val_2.view(-1, val_2.shape[-1])
 
                         base_seed = self.proj_seed + int(1e4) * layer_id
-                        proj_dim = self.proj_dim[layer_id]
 
                         # time projection
                         torch.cuda.synchronize()
@@ -418,16 +434,16 @@ class GIPIFAttributorKFAC():
                             val_1_flatten,
                             val_1_flatten.shape[0],
                             proj_seed=base_seed,
-                            proj_dim=proj_dim,
-                            **self.projector_kwargs,
+                            proj_dim=self.proj_dim_1[layer_id],
+                            **self.projector_kwargs_1,
                         )
                         # output_grad projector
                         random_project_2 = random_project(
                             val_2_flatten,
                             val_2_flatten.shape[0],
                             proj_seed=base_seed + 1,
-                            proj_dim=proj_dim,
-                            **self.projector_kwargs,
+                            proj_dim=self.proj_dim_2[layer_id],
+                            **self.projector_kwargs_2,
                         )
 
                         # when input is sequence

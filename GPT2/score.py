@@ -298,6 +298,11 @@ def parse_args():
         action="store_true",
         help="Debug mode.",
     )
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="Testing mode.",
+    )
 
     args = parser.parse_args()
 
@@ -866,6 +871,8 @@ def main():
     # Join parts and save the file
     if args.debug:
         filename = f"./results/{training_setting}/debug/{tda_method}/{'_'.join(filename_parts)}.pt"
+    elif args.test:
+        filename = f"./results/{training_setting}/test/{tda_method}/{'_'.join(filename_parts)}.pt"
     else:
         filename = f"./results/{training_setting}/{tda_method}/{'_'.join(filename_parts)}.pt"
     torch.save(score, filename)

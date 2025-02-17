@@ -593,7 +593,7 @@ def main():
 
     if tda_method == "GIP":
         from GIP.GD import GIPGradDotAttributor
-        from GIP.mem_gip import MemEffGhostInnerProductAttributor
+        from GIP.GD_mem_efficient import MemEffGhostInnerProductAttributor
         from GIP.helper import find_GIPlayers
         from GIP.layers.layer_norm import GIPLayerNorm
 
