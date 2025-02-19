@@ -8,8 +8,8 @@ from torch.nn.init import constant_
 from torch.nn.init import xavier_normal_
 from torch.nn.parameter import Parameter
 import torch.nn.functional as F
-from fastGIP.layers.layer_norm import LayerNorm
-from fastGIP.layers.linear import Linear
+from fastGG.layers.layer_norm import LayerNorm
+from fastGG.layers.linear import Linear
 
 
 def _get_activation_fn(activation):
@@ -215,9 +215,9 @@ class MultiheadAttention(nn.Module):
     def collect_layers(self):
         return (self.in_proj, self.out_proj)
 
-    def GIP_components(self, deriv_pre_activ, per_sample=True):
+    def per_example_gradient(self, deriv_pre_activ, per_sample=True):
         deriv_pre_activ_in, deriv_pre_activ_out = deriv_pre_activ
-        return [self.in_proj.GIP_components(deriv_pre_activ_in), self.out_proj.GIP_components(deriv_pre_activ_out)]
+        return [self.in_proj.per_example_gradient(deriv_pre_activ_in), self.out_proj.per_example_gradient(deriv_pre_activ_out)]
 
 
 
@@ -299,10 +299,10 @@ class TransformerEncoderLayer(nn.Module):
         layer_lst.append( self.linear2 )
         return layer_lst
 
-    def GIP_components(self, deriv_pre_activ, per_sample=True):
-        result_attn = self.self_attn.GIP_components(deriv_pre_activ[:2])
-        result_linear1 = self.linear1.GIP_components(deriv_pre_activ[2])
-        result_linear2 = self.linear1.GIP_components(deriv_pre_activ[3])
+    def per_example_gradient(self, deriv_pre_activ, per_sample=True):
+        result_attn = self.self_attn.per_example_gradient(deriv_pre_activ[:2])
+        result_linear1 = self.linear1.per_example_gradient(deriv_pre_activ[2])
+        result_linear2 = self.linear1.per_example_gradient(deriv_pre_activ[3])
         return result_attn + [result_linear1] + [result_linear2]
 
 

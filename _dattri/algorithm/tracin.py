@@ -223,9 +223,9 @@ class TracInAttributor(BaseAttributor):
             size=(num_train, len(test_dataloader.sampler)),
         )
 
-        time_backward = 0
-        time_inner_product = 0
-        time_projection = 0
+        # time_backward = 0
+        # time_inner_product = 0
+        # time_projection = 0
 
         for ckpt_idx, ckpt_weight in enumerate(self.weight_list):
             parameters, _ = self.task.get_param(
@@ -263,23 +263,23 @@ class TracInAttributor(BaseAttributor):
                     else:
                         train_batch_data = train_batch_data_
 
-                    # Compute gradients
-                    torch.cuda.synchronize()
-                    start = time.time()
+                    # # Compute gradients
+                    # torch.cuda.synchronize()
+                    # start = time.time()
 
                     grad_t = self.grad_loss_func(parameters, train_batch_data)
                     print(grad_t.shape)
 
-                    torch.cuda.synchronize()
-                    end = time.time()
-                    time_backward += end - start
+                    # torch.cuda.synchronize()
+                    # end = time.time()
+                    # time_backward += end - start
 
                     grad_t = torch.nan_to_num(grad_t)
 
                     # Apply projection if specified
                     if self.projector_kwargs is not None:
-                        torch.cuda.synchronize()
-                        start = time.time()
+                        # torch.cuda.synchronize()
+                        # start = time.time()
 
                         train_random_project = random_project(
                             grad_t,
@@ -291,9 +291,9 @@ class TracInAttributor(BaseAttributor):
                             ensemble_id=ckpt_idx,
                         )
 
-                        torch.cuda.synchronize()
-                        end = time.time()
-                        time_projection += end - start
+                        # torch.cuda.synchronize()
+                        # end = time.time()
+                        # time_projection += end - start
 
                     # Apply normalization if specified
                     if self.normalized_grad:
@@ -329,15 +329,15 @@ class TracInAttributor(BaseAttributor):
                 else:
                     test_batch_data = test_batch_data_
 
-                torch.cuda.synchronize()
-                start = time.time()
+                # torch.cuda.synchronize()
+                # start = time.time()
 
                 # Compute test gradients
                 grad_t = self.grad_target_func(parameters, test_batch_data)
 
-                torch.cuda.synchronize()
-                end = time.time()
-                time_backward += end - start
+                # torch.cuda.synchronize()
+                # end = time.time()
+                # time_backward += end - start
 
                 torch.nan_to_num(grad_t)
 
@@ -356,9 +356,9 @@ class TracInAttributor(BaseAttributor):
                         ensemble_id=ckpt_idx,
                     )
 
-                    torch.cuda.synchronize()
-                    end = time.time()
-                    time_projection += end - start
+                    # torch.cuda.synchronize()
+                    # end = time.time()
+                    # time_projection += end - start
                 else:
                     test_batch_grad = grad_t
 
@@ -373,8 +373,8 @@ class TracInAttributor(BaseAttributor):
                     len(test_dataloader.sampler),
                 )
 
-                torch.cuda.synchronize()
-                start = time.time()
+                # torch.cuda.synchronize()
+                # start = time.time()
 
                 tda_output[:, col_st:col_ed] += (
                     (train_grads @ test_batch_grad.T * ckpt_weight)
@@ -382,13 +382,13 @@ class TracInAttributor(BaseAttributor):
                     .cpu()
                 )
 
-                torch.cuda.synchronize()
-                end = time.time()
-                time_inner_product += end - start
+                # torch.cuda.synchronize()
+                # end = time.time()
+                # time_inner_product += end - start
 
-        print(f"Time for backward: {time_backward}")
-        print(f"Time for projection: {time_projection}")
-        print(f"Time for inner product: {time_inner_product}")
+        # print(f"Time for backward: {time_backward}")
+        # print(f"Time for projection: {time_projection}")
+        # print(f"Time for inner product: {time_inner_product}")
         return tda_output
 
     def attribute_iterate(

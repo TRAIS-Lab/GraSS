@@ -60,7 +60,7 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from GIP.GPT2LMHeadModel import GIPGPT2LMHeadModel
+from GG.GPT2LMHeadModel import GGGPT2LMHeadModel
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
@@ -473,7 +473,7 @@ def main():
         )
 
     if args.model_name_or_path:
-        model = GIPGPT2LMHeadModel.from_pretrained(
+        model = GGGPT2LMHeadModel.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
             config=config,
@@ -482,7 +482,7 @@ def main():
         )
     else:
         logger.info("Training new model from scratch")
-        model = GIPGPT2LMHeadModel.from_config(config, trust_remote_code=args.trust_remote_code)
+        model = GGGPT2LMHeadModel.from_config(config, trust_remote_code=args.trust_remote_code)
 
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
@@ -564,7 +564,7 @@ def main():
 
     model_id = 0
     checkpoint = f"{args.output_dir}/{model_id}"
-    model = GIPGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device) # reload the model with custom GIP checkpoints
+    model = GGGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device) # reload the model with custom GG checkpoints
 
     train_dataset = lm_datasets["train"]
     test_dataset = lm_datasets["validation"]
@@ -668,17 +668,17 @@ def main():
     logger.info("***** Running attribution *****")
 
     if tda_method == "GD":
-        from GIP.GD import GIPGradDotAttributor
-        from GIP.helper import find_GIPlayers
-        from GIP.layers.layer_norm import GIPLayerNorm
-        from GIP.layers.linear import GIPEmbedding
+        from GG.GD import GGGradDotAttributor
+        from GG.helper import find_GGlayers
+        from GG.layers.layer_norm import GGLayerNorm
+        from GG.layers.linear import GGEmbedding
 
         model.eval()
 
-        trainable_layers = find_GIPlayers(model)
-        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GIPLayerNorm) and not isinstance(layer, GIPEmbedding)] # remove all LayerNorm and Embedding layers
+        trainable_layers = find_GGlayers(model)
+        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GGLayerNorm) and not isinstance(layer, GGEmbedding)] # remove all LayerNorm and Embedding layers
 
-        attributor = GIPGradDotAttributor(
+        attributor = GGGradDotAttributor(
             model=model,
             lr=1e-3,
             layer_name=trainable_layers,
@@ -714,17 +714,17 @@ def main():
 
         peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
     elif tda_method == "IF":
-        from GIP.IF import GIPIFAttributorKFAC
-        from GIP.helper import find_GIPlayers
-        from GIP.layers.layer_norm import GIPLayerNorm
-        from GIP.layers.linear import GIPEmbedding
+        from GG.IF import GGIFAttributorKFAC
+        from GG.helper import find_GGlayers
+        from GG.layers.layer_norm import GGLayerNorm
+        from GG.layers.linear import GGEmbedding
 
         model.eval()
 
-        trainable_layers = find_GIPlayers(model)
-        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GIPLayerNorm) and not isinstance(layer, GIPEmbedding)] # remove all LayerNorm and Embedding layers
+        trainable_layers = find_GGlayers(model)
+        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GGLayerNorm) and not isinstance(layer, GGEmbedding)] # remove all LayerNorm and Embedding layers
 
-        attributor = GIPIFAttributorKFAC(
+        attributor = GGIFAttributorKFAC(
             model=model,
             layer_name=trainable_layers,
             projector_kwargs=projector_kwargs,
@@ -771,7 +771,7 @@ def main():
                     for i in range(5)]
 
         def checkpoints_load_func(model, checkpoint):
-            model = GIPGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
+            model = GGGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
             model.eval()
             return model
 
@@ -814,7 +814,7 @@ def main():
             return logp - torch.log(1 - torch.exp(logp))
 
         def checkpoints_load_func(model, checkpoint):
-            model = GIPGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
+            model = GGGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
             model.eval()
             return model
 
@@ -854,7 +854,7 @@ def main():
     filename_parts = [f"{tda_mode}"]
 
     if args.proj is not None:
-        if tda_method == "GIP":
+        if tda_method == "GG":
             if args.proj_dim_dist == "non-uniform":
                 filename_parts.append(f"{proj_method}-{proj_dim}(NU)")
             elif args.proj_dim_dist == "uniform":
@@ -878,7 +878,10 @@ def main():
     torch.save(score, filename)
 
     if args.profile:
-        filename = f"./results/{training_setting}/{tda_method}/{'_'.join(filename_parts)}_profile.pt"
+        if args.test:
+            filename = f"./results/{training_setting}/test/{tda_method}/{'_'.join(filename_parts)}_profile.pt"
+        else:
+            filename = f"./results/{training_setting}/{tda_method}/{'_'.join(filename_parts)}_profile.pt"
         torch.save(profile, filename)
 
 

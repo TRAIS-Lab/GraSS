@@ -3,8 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
 from .base_layer import BasePGradLayer
-from fastGIP.common.im2col import im2col_indices
-from fastGIP.util import conv_outsize
+from fastGG.common.im2col import im2col_indices
+from fastGG.util import conv_outsize
 
 import sys
 
@@ -62,7 +62,7 @@ class Conv2d(nn.Conv2d):
         else:
             return sq_norm_weight
 
-    def GIP_components(self, deriv_pre_activ, per_sample=True):
+    def per_example_gradient(self, deriv_pre_activ, per_sample=True):
 
         batch_size = deriv_pre_activ.shape[0]
 

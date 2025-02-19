@@ -1,11 +1,11 @@
 import torch
 import torch.nn as nn
 
-class GIPLayerNorm(nn.LayerNorm):
+class GGLayerNorm(nn.LayerNorm):
     """LayerNorm implementation with Ghost Inner-Product computation support.
     """
     def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True):
-        super(GIPLayerNorm, self).__init__(normalized_shape, eps=eps, elementwise_affine=elementwise_affine)
+        super(GGLayerNorm, self).__init__(normalized_shape, eps=eps, elementwise_affine=elementwise_affine)
         self.normalized_shape = normalized_shape
         self.eps = eps
         self.elementwise_affine = elementwise_affine
@@ -43,7 +43,7 @@ class GIPLayerNorm(nn.LayerNorm):
         self.pre_activation = output
         return output
 
-    def GIP_components(self, output_gradient, per_sample=True):
+    def per_example_gradient(self, output_gradient, per_sample=True):
         is_3d = self.layer_input.dim() == 3
         if is_3d:
             batch_size, seq_length, hidden_size = self.layer_input.shape

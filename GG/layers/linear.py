@@ -2,11 +2,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class GIPLinear(nn.Linear):
+class GGLinear(nn.Linear):
     """LayerNorm implementation with Ghost Inner-Product computation support.
     """
     def __init__(self, in_features, out_features, bias=True):
-        super(GIPLinear, self).__init__(in_features, out_features, bias)
+        super(GGLinear, self).__init__(in_features, out_features, bias)
         self.pre_activation = None
         self.layer_input = None
         self.name = 'linear'
@@ -19,7 +19,7 @@ class GIPLinear(nn.Linear):
 
         return self.pre_activation
 
-    def GIP_components(self, output_gradient, per_sample=True):
+    def per_example_gradient(self, output_gradient, per_sample=True):
         """
         Compute terms needed for Ghost Inner-Product calculation.
 
@@ -61,14 +61,14 @@ class GIPLinear(nn.Linear):
 
         return output_gradient, input_features
 
-class GIPEmbedding(nn.Embedding):
+class GGEmbedding(nn.Embedding):
     def __init__(self, *args, **kwargs):
         # Simply call the parent class's constructor
         super().__init__(*args, **kwargs)
 
-# class GIPEmbedding(nn.Embedding):
+# class GGEmbedding(nn.Embedding):
 #     def __init__(self, num_embeddings, embedding_dim):
-#         super(GIPEmbedding, self).__init__(num_embeddings, embedding_dim)
+#         super(GGEmbedding, self).__init__(num_embeddings, embedding_dim)
 #         self.pre_activation = None
 #         self.indices = None
 #         self.name = 'embedding'
@@ -81,10 +81,10 @@ class GIPEmbedding(nn.Embedding):
 #         self.pre_activation = embedded
 #         return embedded
 
-#     def GIP_components(self, deriv_pre_activ, per_sample=True):
+#     def per_example_gradient(self, deriv_pre_activ, per_sample=True):
 #         """
 #         Prepare components for gradient computation in embedding layer.
-#         Similar to linear layer's GIP_components but handles sparse embedding lookups.
+#         Similar to linear layer's per_example_gradient but handles sparse embedding lookups.
 
 #         Parameters:
 #         -------------------

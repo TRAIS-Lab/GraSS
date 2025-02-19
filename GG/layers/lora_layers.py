@@ -153,21 +153,21 @@ class LoRALinear(nn.Linear, LoRALayer):
             return F.linear(x, T(self.weight), bias=self.bias)
 
 
-class GIPLoRALinear(LoRALinear):
+class GGLoRALinear(LoRALinear):
     def __init__(self, in_features, out_features, r=0, lora_alpha=1, lora_dropout=0.,
                  fan_in_fan_out=False, merge_weights=True, **kwargs):
-        super(GIPLoRALinear, self).__init__(in_features, out_features, r=r, lora_alpha=lora_alpha,
+        super(GGLoRALinear, self).__init__(in_features, out_features, r=r, lora_alpha=lora_alpha,
                                            lora_dropout=lora_dropout, fan_in_fan_out=fan_in_fan_out,
                                            merge_weights=merge_weights, **kwargs)
 
-        self.layer_type = 'GIP_Linear_LoRA'
+        self.layer_type = 'GG_Linear_LoRA'
         self.register_forward_hook(self.capture_hook)
 
     def capture_hook(self, module, input, output):
         self.layer_input = input[0]  # input is a tuple
         self.pre_activation = output
 
-    def GIP_components(self, deriv_pre_activ, per_sample=True):
+    def per_example_gradient(self, deriv_pre_activ, per_sample=True):
         is_2d = self.layer_input.dim() == 2
 
         a = self.layer_input

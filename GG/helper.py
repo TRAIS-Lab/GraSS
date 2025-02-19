@@ -3,8 +3,8 @@ from torch import Tensor
 
 from typing import Optional, List, Dict, Any, Tuple, Union
 
-from .layers.linear import GIPLinear, GIPEmbedding
-from .layers.layer_norm import GIPLayerNorm
+from .layers.linear import GGLinear, GGEmbedding
+from .layers.layer_norm import GGLayerNorm
 
 Conv1DSwitch = [
     '.attn.c_attn.weight',
@@ -22,17 +22,17 @@ def transpose_Conv1D(state_dict):
             new_state_dict[key] = value
     return new_state_dict
 
-def find_GIPlayers(model):
-    GIP_layers = []
+def find_GGlayers(model):
+    GG_layers = []
 
     for module in model.modules():
-        if isinstance(module, GIPLinear) or isinstance(module, GIPLayerNorm) or isinstance(module, GIPEmbedding):
-            GIP_layers.append(module)
+        if isinstance(module, GGLinear) or isinstance(module, GGLayerNorm) or isinstance(module, GGEmbedding):
+            GG_layers.append(module)
 
-    return GIP_layers
+    return GG_layers
 
 def grad_dotprod(A1: Tensor, B1: Tensor, A2: Tensor, B2: Tensor) -> Tensor:
-    """Compute gradient sample norm for the weight matrix in a GIPlinear layer.
+    """Compute gradient sample norm for the weight matrix in a GGlinear layer.
 
     Args:
         A1 (Tensor): train pre_activation gradient of the layer.
