@@ -676,8 +676,7 @@ def main():
         model.eval()
 
         trainable_layers = find_GClayers(model)
-        # trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GCLayerNorm) and not isinstance(layer, GCEmbedding)] # remove all LayerNorm and Embedding layers
-        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GCEmbedding)]
+        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GCEmbedding)] # Currently Embedding layer is not supported
 
         attributor = GCGradDotAttributor(
             model=model,
@@ -723,8 +722,7 @@ def main():
         model.eval()
 
         trainable_layers = find_GClayers(model)
-        # trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GCLayerNorm) and not isinstance(layer, GCEmbedding)] # remove all LayerNorm and Embedding layers
-        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GCEmbedding)]
+        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GCEmbedding)] # Currently Embedding layer is not supported
 
         attributor = GCIFAttributorKFAC(
             model=model,

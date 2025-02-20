@@ -55,7 +55,7 @@ class GCLinear(nn.Linear):
 
         return self.pre_activation
 
-    def per_sample_grad(self, grad_pre_activation, per_sample=True):
+    def per_sample_grad_component(self, grad_pre_activation, per_sample=True):
         """
         Return gradient of the pre_activation and the input. Handles both 2D and 3D inputs.
 
@@ -94,6 +94,21 @@ class GCLinear(nn.Linear):
             grad_pre_activation = grad_pre_activation.reshape(batch_size, seq_length, -1)
 
         return grad_pre_activation, input_features
+
+    def per_sample_grad(self, grad_pre_activation, input_features):
+        """
+        Construct gradient from the per-sample gradients component (gradient of the pre-activation and the input features).
+
+        Args:
+            grad_pre_activation: Gradient of loss w.r.t. the pre-activation
+            input_features: Input features to the layer
+
+        Returns:
+            Tensor: Gradient of loss w.r.t. all parameters of the layer
+        """
+        batch_size = grad_pre_activation.shape[0]
+        grad = torch.einsum('BSA,BSC->BAC', grad_pre_activation, input_features).reshape(batch_size, -1)
+        return grad
 
     def grad_dot_prod(self, A1: Tensor, B1: Tensor, A2: Tensor, B2: Tensor) -> Tensor:
         """Compute gradient sample norm for the weight matrix in a GClinear layer.
@@ -162,10 +177,10 @@ class GCEmbedding(nn.Embedding):
 #         self.pre_activation = embedded
 #         return embedded
 
-#     def per_sample_grad(self, deriv_pre_activ, per_sample=True):
+#     def per_sample_grad_component(self, deriv_pre_activ, per_sample=True):
 #         """
 #         Prepare components for gradient computation in embedding layer.
-#         Similar to linear layer's per_sample_grad but handles sparse embedding lookups.
+#         Similar to linear layer's per_sample_grad_component but handles sparse embedding lookups.
 
 #         Parameters:
 #         -------------------

@@ -44,7 +44,7 @@ def setup_projectors(
     projector_kwargs_1 = projector_kwargs.copy()
     projector_kwargs_2 = projector_kwargs.copy()
 
-    projector_kwargs_2["threshold"] = 0.0 #TODO threshold for gradient of pre-activation, which shouldn't be sparse so better set to 0
+    # projector_kwargs_2["threshold"] = 0.0 #TODO threshold for gradient of pre-activation, which shouldn't be sparse so better set to 0
 
     layer_dim_1 = []
     layer_dim_2 = []
@@ -202,7 +202,7 @@ class GCIFAttributorKFAC():
                 labels=train_labels
             )
             logp = -outputs.loss
-            train_loss = -(logp - torch.log(1 - torch.exp(logp)))
+            train_loss = logp - torch.log(1 - torch.exp(logp))
 
             train_pre_acts = [layer.pre_activation for layer in self.layer_name]
             Z_grad_train = torch.autograd.grad(train_loss, train_pre_acts, retain_graph=True)
@@ -214,7 +214,7 @@ class GCIFAttributorKFAC():
             # Compute K-FAC factors for each layer
             with torch.no_grad():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
-                    val_1, val_2 = layer.per_sample_grad(z_grad_full, per_sample=True)
+                    grad_comp_1, grad_comp_2 = layer.per_sample_grad_component(z_grad_full, per_sample=True)
 
                     # Apply projection if needed
                     if self.projector_kwargs_1 is not None and self.projector_kwargs_2 is not None:
@@ -223,42 +223,41 @@ class GCIFAttributorKFAC():
                             torch.cuda.synchronize()
                             start_time = time.time()
 
-                        val_1_flatten = val_1.view(-1, val_1.shape[-1])
-                        val_2_flatten = val_2.view(-1, val_2.shape[-1])
+                        grad_comp_1_flatten = grad_comp_1.view(-1, grad_comp_1.shape[-1])
+                        grad_comp_2_flatten = grad_comp_2.view(-1, grad_comp_2.shape[-1])
 
                         base_seed = self.proj_seed + int(1e4) * layer_id
 
                         # input projector
                         random_project_1 = random_project(
-                            val_1_flatten,
-                            val_1_flatten.shape[0],
+                            grad_comp_1_flatten,
+                            grad_comp_1_flatten.shape[0],
                             proj_seed=base_seed,
                             proj_dim=self.proj_dim_1[layer_id],
                             **self.projector_kwargs_1,
                         )
                         # output_grad projector
                         random_project_2 = random_project(
-                            val_2_flatten,
-                            val_2_flatten.shape[0],
+                            grad_comp_2_flatten,
+                            grad_comp_2_flatten.shape[0],
                             proj_seed=base_seed + 1,
                             proj_dim=self.proj_dim_2[layer_id],
                             **self.projector_kwargs_2,
                         )
 
                         # when input is sequence
-                        if val_1.dim() == 3:
-                            val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], val_1.shape[1], -1)
-                            val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], val_2.shape[1], -1)
+                        if grad_comp_1.dim() == 3:
+                            grad_comp_1 = random_project_1(grad_comp_1_flatten).view(grad_comp_1.shape[0], grad_comp_1.shape[1], -1)
+                            grad_comp_2 = random_project_2(grad_comp_2_flatten).view(grad_comp_2.shape[0], grad_comp_2.shape[1], -1)
                         else:
-                            val_1 = random_project_1(val_1_flatten)
-                            val_2 = random_project_2(val_2_flatten)
+                            grad_comp_1 = random_project_1(grad_comp_1_flatten)
+                            grad_comp_2 = random_project_2(grad_comp_2_flatten)
 
                         if self.profile:
                             torch.cuda.synchronize()
                             self.profiling_stats['projection'] += time.time() - start_time
 
-                    batch_size = val_1.shape[0]
-                    grad = torch.einsum('BSA,BSC->BAC', val_1, val_2).reshape(batch_size, -1)
+                    grad = layer.per_sample_grad(grad_comp_1, grad_comp_2)
 
                     if train_grad[layer_id] is None:
                         train_grad[layer_id] = torch.zeros((num_samples, *grad.shape[1:]), device=self.device)
@@ -401,7 +400,7 @@ class GCIFAttributorKFAC():
                 labels=test_labels
             )
             logp = -outputs.loss
-            test_loss = -(logp - torch.log(1 - torch.exp(logp)))
+            test_loss = logp - torch.log(1 - torch.exp(logp))
 
             test_pre_acts = [layer.pre_activation for layer in self.layer_name]
             Z_grad_test = torch.autograd.grad(test_loss, test_pre_acts, retain_graph=True)
@@ -412,15 +411,15 @@ class GCIFAttributorKFAC():
 
             with torch.no_grad():
                 for layer_id, (layer, z_grad_test) in enumerate(zip(self.layer_name, Z_grad_test)):
-                    val_1, val_2 = layer.per_sample_grad(z_grad_test, per_sample=True)
+                    grad_comp_1, grad_comp_2 = layer.per_sample_grad_component(z_grad_test, per_sample=True)
 
                     if self.projector_kwargs_1 is not None and self.projector_kwargs_2 is not None:
                         if self.profile:
                             torch.cuda.synchronize()
                             start_time = time.time()
 
-                        val_1_flatten = val_1.view(-1, val_1.shape[-1])
-                        val_2_flatten = val_2.view(-1, val_2.shape[-1])
+                        grad_comp_1_flatten = grad_comp_1.view(-1, grad_comp_1.shape[-1])
+                        grad_comp_2_flatten = grad_comp_2.view(-1, grad_comp_2.shape[-1])
 
                         base_seed = self.proj_seed + int(1e4) * layer_id
 
@@ -430,35 +429,34 @@ class GCIFAttributorKFAC():
 
                         # input projector
                         random_project_1 = random_project(
-                            val_1_flatten,
-                            val_1_flatten.shape[0],
+                            grad_comp_1_flatten,
+                            grad_comp_1_flatten.shape[0],
                             proj_seed=base_seed,
                             proj_dim=self.proj_dim_1[layer_id],
                             **self.projector_kwargs_1,
                         )
                         # output_grad projector
                         random_project_2 = random_project(
-                            val_2_flatten,
-                            val_2_flatten.shape[0],
+                            grad_comp_2_flatten,
+                            grad_comp_2_flatten.shape[0],
                             proj_seed=base_seed + 1,
                             proj_dim=self.proj_dim_2[layer_id],
                             **self.projector_kwargs_2,
                         )
 
                         # when input is sequence
-                        if val_1.dim() == 3:
-                            val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], val_1.shape[1], -1)
-                            val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], val_2.shape[1], -1)
+                        if grad_comp_1.dim() == 3:
+                            grad_comp_1 = random_project_1(grad_comp_1_flatten).view(grad_comp_1.shape[0], grad_comp_1.shape[1], -1)
+                            grad_comp_2 = random_project_2(grad_comp_2_flatten).view(grad_comp_2.shape[0], grad_comp_2.shape[1], -1)
                         else:
-                            val_1 = random_project_1(val_1_flatten)
-                            val_2 = random_project_2(val_2_flatten)
+                            grad_comp_1 = random_project_1(grad_comp_1_flatten)
+                            grad_comp_2 = random_project_2(grad_comp_2_flatten)
 
                         if self.profile:
                             torch.cuda.synchronize()
                             self.profiling_stats['projection'] += time.time() - start_time
 
-                    batch_size = val_1.shape[0]
-                    test_grad = torch.einsum('BSA,BSC->BAC', val_1, val_2).reshape(batch_size, -1)
+                    test_grad = layer.per_sample_grad(grad_comp_1, grad_comp_2)
 
                     col_st = test_batch_idx * test_dataloader.batch_size
                     col_ed = min(
@@ -482,7 +480,7 @@ class GCIFAttributorKFAC():
             raise ValueError("Please provide a dataloader to calculate sparsity.")
 
         # Initialize dictionary to store sparsity values for each layer and threshold
-        sparsity = {threshold: {f"layer_{i}": {"val_1": [], "val_2": []}
+        sparsity = {threshold: {f"layer_{i}": {"grad_comp_1": [], "grad_comp_2": []}
                     for i in range(len(self.layer_name))}
                     for threshold in thresholds}
 
@@ -509,22 +507,22 @@ class GCIFAttributorKFAC():
 
             with torch.no_grad():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad)):
-                    val_1, val_2 = layer.per_sample_grad(z_grad_full, per_sample=True)
+                    grad_comp_1, grad_comp_2 = layer.per_sample_grad_component(z_grad_full, per_sample=True)
 
                     # Calculate sparsity for each threshold
                     for threshold in thresholds:
                         # Calculate ratio of elements below threshold
-                        val_1_sparsity = (torch.abs(val_1) < threshold).float().mean().item()
-                        val_2_sparsity = (torch.abs(val_2) < threshold).float().mean().item()
+                        grad_comp_1_sparsity = (torch.abs(grad_comp_1) < threshold).float().mean().item()
+                        grad_comp_2_sparsity = (torch.abs(grad_comp_2) < threshold).float().mean().item()
 
                         # Store results
-                        sparsity[threshold][f"layer_{layer_id}"]["val_1"].append(val_1_sparsity)
-                        sparsity[threshold][f"layer_{layer_id}"]["val_2"].append(val_2_sparsity)
+                        sparsity[threshold][f"layer_{layer_id}"]["grad_comp_1"].append(grad_comp_1_sparsity)
+                        sparsity[threshold][f"layer_{layer_id}"]["grad_comp_2"].append(grad_comp_2_sparsity)
 
         # Average sparsity across batches
         for threshold in thresholds:
             for layer_id in range(len(self.layer_name)):
-                for val_type in ["val_1", "val_2"]:
+                for val_type in ["grad_comp_1", "grad_comp_2"]:
                     sparsity[threshold][f"layer_{layer_id}"][val_type] = \
                         sum(sparsity[threshold][f"layer_{layer_id}"][val_type]) / len(sparsity[threshold][f"layer_{layer_id}"][val_type])
 

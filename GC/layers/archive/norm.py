@@ -36,7 +36,7 @@ class InstanceNorm(nn.Module):
 
         return self.pre_activation
 
-    def per_sample_grad(self, deriv_pre_activ):
+    def per_sample_grad_component(self, deriv_pre_activ):
         N, C = deriv_pre_activ.size(0), deriv_pre_activ.size(1)
 
         dLdZ = deriv_pre_activ
@@ -49,7 +49,7 @@ class InstanceNorm(nn.Module):
         return pe_grad_weight, pe_grad_bias
 
     def pe_grad_sqnorm(self, deriv_pre_activ):
-        pe_grad_weight, pe_grad_bias = self.per_sample_grad(deriv_pre_activ)
+        pe_grad_weight, pe_grad_bias = self.per_sample_grad_component(deriv_pre_activ)
 
         return pe_grad_weight.pow(2).sum(dim=1) + pe_grad_bias.pow(2).sum(dim=1)
 
@@ -91,7 +91,7 @@ class GroupNorm(nn.Module):
 
         return self.pre_activation
 
-    def per_sample_grad(self, deriv_pre_activ):
+    def per_sample_grad_component(self, deriv_pre_activ):
         N = deriv_pre_activ.size(0)
         G = self.num_groups
 
@@ -105,7 +105,7 @@ class GroupNorm(nn.Module):
         return pe_grad_weight, pe_grad_bias
 
     def pe_grad_sqnorm(self, deriv_pre_activ):
-        pe_grad_weight, pe_grad_bias = self.per_sample_grad(deriv_pre_activ)
+        pe_grad_weight, pe_grad_bias = self.per_sample_grad_component(deriv_pre_activ)
 
         return pe_grad_weight.pow(2).sum(dim=1) + pe_grad_bias.pow(2).sum(dim=1)
 

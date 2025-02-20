@@ -22,7 +22,7 @@ class RNNModule(nn.RNN):
 
         return out, hn
 
-    def per_sample_grad(self, deriv_pre_activ):
+    def per_sample_grad_component(self, deriv_pre_activ):
         batch_size = deriv_pre_activ[0].size(0)
 
         pe_grad_ih = []
@@ -46,7 +46,7 @@ class RNNModule(nn.RNN):
 
     def pe_grad_sqnorm(self, deriv_pre_activ):
         batch_size = deriv_pre_activ[0].size(0)
-        g_weight_ih, g_weight_hh, g_bias = self.per_sample_grad(deriv_pre_activ)
+        g_weight_ih, g_weight_hh, g_bias = self.per_sample_grad_component(deriv_pre_activ)
 
         sqnorm = g_weight_ih.pow(2).view(batch_size, -1).sum(1)
         sqnorm += g_weight_hh.pow(2).view(batch_size, -1).sum(1)
@@ -77,7 +77,7 @@ class RNNCell(nn.RNNCell):
 
         return out
 
-    def per_sample_grad(self, deriv_pre_activ):
+    def per_sample_grad_component(self, deriv_pre_activ):
         batch_size = deriv_pre_activ[0].size(0)
 
         pe_grad_ih = []
@@ -101,7 +101,7 @@ class RNNCell(nn.RNNCell):
 
     def pe_grad_sqnorm(self, deriv_pre_activ):
         batch_size = deriv_pre_activ[0].size(0)
-        g_weight_ih, g_weight_hh, g_bias = self.per_sample_grad(deriv_pre_activ)
+        g_weight_ih, g_weight_hh, g_bias = self.per_sample_grad_component(deriv_pre_activ)
 
         sqnorm = g_weight_ih.pow(2).view(batch_size, -1).sum(1)
         sqnorm += g_weight_hh.pow(2).view(batch_size, -1).sum(1)
@@ -155,7 +155,7 @@ class LSTMCell(nn.Module):
 
         return hy, cy
 
-    def per_sample_grad(self, deriv_pre_activ):
+    def per_sample_grad_component(self, deriv_pre_activ):
         batch_size = deriv_pre_activ[0].size(0)
 
         pe_grad_ih = []
@@ -178,7 +178,7 @@ class LSTMCell(nn.Module):
 
     def pe_grad_sqnorm(self, deriv_pre_activ):
         batch_size = deriv_pre_activ[0].size(0)
-        g_weight_ih, g_weight_hh, g_bias = self.per_sample_grad(deriv_pre_activ)
+        g_weight_ih, g_weight_hh, g_bias = self.per_sample_grad_component(deriv_pre_activ)
 
         sq_norm = g_weight_ih.pow(2).view(batch_size, -1).sum(1)
         sq_norm += g_weight_hh.pow(2).view(batch_size, -1).sum(1)

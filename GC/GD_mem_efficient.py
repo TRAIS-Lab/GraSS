@@ -90,15 +90,15 @@ class MemEffGhostInnerProductAttributor():
         end_batch: int
     ) -> Tuple[List[List[Tensor]], List[List[Tensor]], int]:
         """Process a range of batches."""
-        current_val_1 = [None] * len(self.layer_name)
-        current_val_2 = [None] * len(self.layer_name)
+        current_grad_comp_1 = [None] * len(self.layer_name)
+        current_grad_comp_2 = [None] * len(self.layer_name)
 
         num_batches = len(dataloader)
         start_batch = max(0, start_batch)
         end_batch = min(num_batches, end_batch)
 
         if start_batch >= end_batch:
-            return current_val_1, current_val_2, 0
+            return current_grad_comp_1, current_grad_comp_2, 0
 
         full_batches = end_batch - start_batch - 1  # number of complete batches
         total_samples = full_batches * dataloader.batch_size
@@ -139,62 +139,62 @@ class MemEffGhostInnerProductAttributor():
 
             with torch.no_grad():
                 for layer_id, (layer, z_grad) in enumerate(zip(self.layer_name, Z_grad)):
-                    val_1, val_2 = layer.per_sample_grad(z_grad, per_sample=True)
+                    grad_comp_1, grad_comp_2 = layer.per_sample_grad_component(z_grad, per_sample=True)
                     if self.projector_kwargs is not None:
-                        val_1_flatten = val_1.view(-1, val_1.shape[-1])
-                        val_2_flatten = val_2.view(-1, val_2.shape[-1])
+                        grad_comp_1_flatten = grad_comp_1.view(-1, grad_comp_1.shape[-1])
+                        grad_comp_2_flatten = grad_comp_2.view(-1, grad_comp_2.shape[-1])
 
                         base_seed = self.proj_seed + int(1e4) * layer_id
                         proj_dim = self.proj_dim[layer_id]
 
                         # input projector
                         random_project_1 = random_project(
-                            val_1_flatten,
-                            val_1_flatten.shape[0],
+                            grad_comp_1_flatten,
+                            grad_comp_1_flatten.shape[0],
                             proj_seed=base_seed,
                             proj_dim=proj_dim,
                             **self.projector_kwargs,
                         )
                         # output_grad projector
                         random_project_2 = random_project(
-                            val_2_flatten,
-                            val_2_flatten.shape[0],
+                            grad_comp_2_flatten,
+                            grad_comp_2_flatten.shape[0],
                             proj_seed=base_seed + 1,
                             proj_dim=proj_dim,
                             **self.projector_kwargs,
                         )
 
                         # when input is sequence
-                        if val_1.dim() == 3:
-                            val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], val_1.shape[1], -1)
-                            val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], val_2.shape[1], -1)
+                        if grad_comp_1.dim() == 3:
+                            grad_comp_1 = random_project_1(grad_comp_1_flatten).view(grad_comp_1.shape[0], grad_comp_1.shape[1], -1)
+                            grad_comp_2 = random_project_2(grad_comp_2_flatten).view(grad_comp_2.shape[0], grad_comp_2.shape[1], -1)
                         else:
-                            val_1 = random_project_1(val_1_flatten)
-                            val_2 = random_project_2(val_2_flatten)
+                            grad_comp_1 = random_project_1(grad_comp_1_flatten)
+                            grad_comp_2 = random_project_2(grad_comp_2_flatten)
 
-                    if current_val_1[layer_id] is None:
-                        current_val_1[layer_id] = torch.zeros((total_samples, *val_1.shape[1:]), device=self.device)
-                        current_val_2[layer_id] = torch.zeros((total_samples, *val_2.shape[1:]), device=self.device)
+                    if current_grad_comp_1[layer_id] is None:
+                        current_grad_comp_1[layer_id] = torch.zeros((total_samples, *grad_comp_1.shape[1:]), device=self.device)
+                        current_grad_comp_2[layer_id] = torch.zeros((total_samples, *grad_comp_2.shape[1:]), device=self.device)
 
                     col_st = (batch_idx - start_batch) * dataloader.batch_size
                     col_ed = min((batch_idx - start_batch + 1) * dataloader.batch_size, len(dataloader.sampler))
-                    current_val_1[layer_id][col_st:col_ed] = val_1
-                    current_val_2[layer_id][col_st:col_ed] = val_2
+                    current_grad_comp_1[layer_id][col_st:col_ed] = grad_comp_1
+                    current_grad_comp_2[layer_id][col_st:col_ed] = grad_comp_2
 
-        return current_val_1, current_val_2, total_samples
+        return current_grad_comp_1, current_grad_comp_2, total_samples
 
     def _try_save_chunk(
         self,
         chunk_idx: int,
-        val_1_list: List[Tensor],
-        val_2_list: List[Tensor],
+        grad_comp_1_list: List[Tensor],
+        grad_comp_2_list: List[Tensor],
         start_idx: int
     ) -> bool:
         """Try to save test chunk, return True if successful, False if disk error."""
         try:
             chunk_path = self.cache_dir / f"chunk_{chunk_idx}.h5"
-            layer_shapes = [(val1.shape[1:], val2.shape[1:]) for val1, val2 in zip(val_1_list, val_2_list)]
-            chunk_info = ChunkInfo(start_idx, val_1_list[0].shape[0], layer_shapes)
+            layer_shapes = [(val1.shape[1:], val2.shape[1:]) for val1, val2 in zip(grad_comp_1_list, grad_comp_2_list)]
+            chunk_info = ChunkInfo(start_idx, grad_comp_1_list[0].shape[0], layer_shapes)
 
             with h5py.File(chunk_path, 'w') as f:
                 # Save chunk info
@@ -203,7 +203,7 @@ class MemEffGhostInnerProductAttributor():
                 info_group.attrs['size'] = chunk_info.size
 
                 # Save tensors
-                for layer_idx, (val1, val2) in enumerate(zip(val_1_list, val_2_list)):
+                for layer_idx, (val1, val2) in enumerate(zip(grad_comp_1_list, grad_comp_2_list)):
                     layer_group = f.create_group(f'layer_{layer_idx}')
                     layer_group.create_dataset('val1', data=val1.detach().cpu().numpy())
                     layer_group.create_dataset('val2', data=val2.detach().cpu().numpy())
@@ -326,7 +326,7 @@ class MemEffGhostInnerProductAttributor():
                 for chunk_idx, chunk_info in enumerate(tqdm(self.chunks, desc="Processing test chunks", leave=False)):
 
                     # Load test chunk once
-                    test_val_1, test_val_2, _ = self._load_chunk(chunk_idx)
+                    test_grad_comp_1, test_grad_comp_2, _ = self._load_chunk(chunk_idx)
 
                     # Process all training batches for this test chunk
                     for train_batch_idx, train_batch in enumerate(
@@ -353,41 +353,41 @@ class MemEffGhostInnerProductAttributor():
 
                         with torch.no_grad():
                             for layer_id, (layer, z_grad_train) in enumerate(zip(self.layer_name, Z_grad_train)):
-                                val_1, val_2 = layer.per_sample_grad(z_grad_train, per_sample=True)
+                                grad_comp_1, grad_comp_2 = layer.per_sample_grad_component(z_grad_train, per_sample=True)
                                 if self.projector_kwargs is not None:
-                                    val_1_flatten = val_1.view(-1, val_1.shape[-1])
-                                    val_2_flatten = val_2.view(-1, val_2.shape[-1])
+                                    grad_comp_1_flatten = grad_comp_1.view(-1, grad_comp_1.shape[-1])
+                                    grad_comp_2_flatten = grad_comp_2.view(-1, grad_comp_2.shape[-1])
 
                                     base_seed = self.proj_seed + int(1e4) * layer_id
                                     proj_dim = self.proj_dim[layer_id]
 
                                     # input projector
                                     random_project_1 = random_project(
-                                        val_1_flatten,
-                                        val_1_flatten.shape[0],
+                                        grad_comp_1_flatten,
+                                        grad_comp_1_flatten.shape[0],
                                         proj_seed=base_seed,
                                         proj_dim=proj_dim,
                                         **self.projector_kwargs,
                                     )
                                     # output_grad projector
                                     random_project_2 = random_project(
-                                        val_2_flatten,
-                                        val_2_flatten.shape[0],
+                                        grad_comp_2_flatten,
+                                        grad_comp_2_flatten.shape[0],
                                         proj_seed=base_seed + 1,
                                         proj_dim=proj_dim,
                                         **self.projector_kwargs,
                                     )
 
                                     # when input is sequence
-                                    if val_1.dim() == 3:
-                                        val_1 = random_project_1(val_1_flatten).view(val_1.shape[0], val_1.shape[1], -1)
-                                        val_2 = random_project_2(val_2_flatten).view(val_2.shape[0], val_2.shape[1], -1)
+                                    if grad_comp_1.dim() == 3:
+                                        grad_comp_1 = random_project_1(grad_comp_1_flatten).view(grad_comp_1.shape[0], grad_comp_1.shape[1], -1)
+                                        grad_comp_2 = random_project_2(grad_comp_2_flatten).view(grad_comp_2.shape[0], grad_comp_2.shape[1], -1)
                                     else:
-                                        val_1 = random_project_1(val_1_flatten)
-                                        val_2 = random_project_2(val_2_flatten)
+                                        grad_comp_1 = random_project_1(grad_comp_1_flatten)
+                                        grad_comp_2 = random_project_2(grad_comp_2_flatten)
 
-                                dLdZ_test, z_test = test_val_1[layer_id], test_val_2[layer_id]
-                                dLdZ_train, z_train = val_1, val_2
+                                dLdZ_test, z_test = test_grad_comp_1[layer_id], test_grad_comp_2[layer_id]
+                                dLdZ_train, z_train = grad_comp_1, grad_comp_2
 
                                 row_st = train_batch_idx * train_dataloader.batch_size
                                 row_ed = min((train_batch_idx + 1) * train_dataloader.batch_size, num_train)

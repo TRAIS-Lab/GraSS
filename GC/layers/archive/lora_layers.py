@@ -163,7 +163,7 @@ class GCLoRALinear(LoRALinear):
         self.layer_input = input[0]  # input is a tuple
         self.pre_activation = output
 
-    def per_sample_grad(self, deriv_pre_activ, per_sample=True):
+    def per_sample_grad_component(self, deriv_pre_activ, per_sample=True):
         is_2d = self.layer_input.dim() == 2
 
         a = self.layer_input
