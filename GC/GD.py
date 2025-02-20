@@ -319,7 +319,6 @@ class GCGradDotAttributor():
                             torch.cuda.synchronize()
                             start = time.time()
 
-                            # input projector
                             random_project_1 = random_project(
                                 grad_comp_1_flatten,
                                 grad_comp_1_flatten.shape[0],
@@ -327,7 +326,6 @@ class GCGradDotAttributor():
                                 proj_dim=proj_dim,
                                 **self.projector_kwargs,
                             )
-                            # output_grad projector
                             random_project_2 = random_project(
                                 grad_comp_2_flatten,
                                 grad_comp_2_flatten.shape[0],
@@ -412,7 +410,6 @@ class GCGradDotAttributor():
                         torch.cuda.synchronize()
                         start = time.time()
 
-                        # input projector
                         random_project_1 = random_project(
                             grad_comp_1_flatten,
                             grad_comp_1_flatten.shape[0],
@@ -420,7 +417,6 @@ class GCGradDotAttributor():
                             proj_dim=proj_dim,
                             **self.projector_kwargs,
                         )
-                        # output_grad projector
                         random_project_2 = random_project(
                             grad_comp_2_flatten,
                             grad_comp_2_flatten.shape[0],
