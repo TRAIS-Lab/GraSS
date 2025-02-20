@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 
+from torch import Tensor
+
 class GCLayerNorm(nn.LayerNorm):
     """
     Gradient Component (GC) LayerNorm layer implementation with gradient factor calculation support.
@@ -58,3 +60,20 @@ class GCLayerNorm(nn.LayerNorm):
                 grad_bias = torch.sum(grad_pre_activation, dim=0)
 
         return grad_weight, grad_bias
+
+    def grad_dot_prod(self, A1: Tensor, B1: Tensor, A2: Tensor, B2: Tensor) -> Tensor:
+        """Compute gradient sample norm for the weight matrix in a GCLayerNorm layer.
+
+        Args:
+            A1 (Tensor): train weight gradient of the layer.
+            B1 (Tensor): train bias gradient of the layer.
+            A2 (Tensor): test weight gradient of the layer.
+            B2 (Tensor): test bias gradient of the layer.
+
+        Returns:
+            Tensor: the gradient sample norm.
+        """
+        if A1.dim() == 2 and B1.dim() == 2:
+            return torch.matmul(A1, A2.T) + torch.matmul(B1, B2.T)
+        else:
+            raise ValueError(f"Unexpected grad_weight shape: {A1.size()}, grad_bias shape: {B1.size()}")

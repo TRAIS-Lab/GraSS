@@ -10,7 +10,7 @@ from torch import Tensor
 from tqdm import tqdm
 from .layers.linear import GCLinear, GCEmbedding
 from .layers.layer_norm import GCLayerNorm
-from .helper import find_GClayers, grad_dotprod
+from .helper import find_GClayers
 
 from _dattri.func.projection import random_project
 
@@ -294,7 +294,6 @@ class GCGradDotAttributor():
                 )
                 logp = -outputs.loss
                 train_loss = logp - torch.log(1 - torch.exp(logp))
-                # train_loss = -(logp - torch.log(1 - torch.exp(logp)))
 
                 # Get pre-activations from trainable layers
                 train_pre_acts = [layer.pre_activation for layer in self.layer_name]
@@ -382,8 +381,6 @@ class GCGradDotAttributor():
                 labels=test_labels
             )
             logp = -outputs.loss
-
-            # test_loss = -(logp - torch.log(1 - torch.exp(logp)))
             test_loss = logp - torch.log(1 - torch.exp(logp))
 
             # Get pre-activations from trainable layers
@@ -403,7 +400,6 @@ class GCGradDotAttributor():
             # Calculate scores
             with torch.no_grad():
                 for layer_id, (layer, z_grad_test) in enumerate(zip(self.layer_name, Z_grad_test)):
-                    print(layer)
                     val_1, val_2 = layer.per_sample_grad(z_grad_test, per_sample=True)
                     if self.projector_kwargs is not None:
                         val_1_flatten = val_1.view(-1, val_1.shape[-1])
@@ -455,27 +451,8 @@ class GCGradDotAttributor():
                     torch.cuda.synchronize()
                     start = time.time()
 
-                    if isinstance(layer, GCLinear):
-                        dLdZ_train, z_train = train_val_1[layer_id], train_val_2[layer_id]
-                        dLdZ_val, z_val = val_1, val_2
+                    result = layer.grad_dot_prod(train_val_1[layer_id], train_val_2[layer_id], val_1, val_2)
 
-                        grad = torch.einsum('BSA,BSC->BAC', dLdZ_train, z_train).reshape(dLdZ_train.shape[0], -1)
-
-                        print(grad.shape)
-                        print(grad[:, :3])
-
-                        result = grad_dotprod(dLdZ_train, z_train, dLdZ_val, z_val)
-                    elif isinstance(layer, GCLayerNorm):
-                        dLdgamma_train, dLdbeta_train = train_val_1[layer_id], train_val_2[layer_id]
-                        dLdgamma_val, dLdbeta_val = val_1, val_2
-
-                        print(dLdgamma_train.shape)
-                        print(dLdgamma_train[:, :3])
-
-                        print(dLdbeta_train.shape)
-                        print(dLdbeta_train[:, :3])
-
-                        result = (dLdgamma_train @ dLdgamma_val.T + dLdbeta_train @ dLdbeta_val.T)
                     torch.cuda.synchronize()
                     end = time.time()
                     time_inner_product += end - start
@@ -532,7 +509,7 @@ class GCGradDotAttributor():
             labels=combined_labels
         )
         logp = -outputs.loss
-        full_loss = -(logp - torch.log(1 - torch.exp(logp)))
+        full_loss = logp - torch.log(1 - torch.exp(logp))
 
         # Get pre-activations from trainable layers
         full_pre_acts = [layer.pre_activation for layer in self.layer_name]
@@ -576,9 +553,9 @@ class GCGradDotAttributor():
                         val_1 = random_project_1(val_1_flatten)
                         val_2 = random_project_2(val_2_flatten)
 
-                dLdZ_train, z_train = val_1[:num_train], val_2[:num_train]
-                dLdZ_val, z_val = val_1[num_train:], val_2[num_train:]
-                grad_dot += grad_dotprod(dLdZ_train, z_train, dLdZ_val, z_val) * self.lr
+                result = layer.grad_dotprod(val_1[:num_train], val_2[:num_train], val_1[num_train:], val_2[num_train:])
+
+                grad_dot += result * self.lr
 
         return grad_dot
 

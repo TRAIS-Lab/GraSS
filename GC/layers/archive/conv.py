@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
-from .base_layer import BasePGradLayer
+from .archive.base_layer import BasePGradLayer
 from fastGC.common.im2col import im2col_indices
 from fastGC.util import conv_outsize
 
