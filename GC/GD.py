@@ -140,7 +140,7 @@ class GCGradDotAttributor():
 
             with torch.no_grad():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
-                    grad_comp_1, grad_comp_2 = layer.per_sample_grad_component(z_grad_full, per_sample=True)
+                    grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_full, per_sample=True)
                     if self.projector_kwargs is not None:
                         grad_comp_1_flatten = grad_comp_1.view(-1, grad_comp_1.shape[-1])
                         grad_comp_2_flatten = grad_comp_2.view(-1, grad_comp_2.shape[-1])
@@ -307,7 +307,7 @@ class GCGradDotAttributor():
 
                 with torch.no_grad():
                     for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
-                        grad_comp_1, grad_comp_2 = layer.per_sample_grad_component(z_grad_full, per_sample=True)
+                        grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_full, per_sample=True)
                         if self.projector_kwargs is not None:
                             grad_comp_1_flatten = grad_comp_1.view(-1, grad_comp_1.shape[-1])
                             grad_comp_2_flatten = grad_comp_2.view(-1, grad_comp_2.shape[-1])
@@ -400,7 +400,7 @@ class GCGradDotAttributor():
             # Calculate scores
             with torch.no_grad():
                 for layer_id, (layer, z_grad_test) in enumerate(zip(self.layer_name, Z_grad_test)):
-                    grad_comp_1, grad_comp_2 = layer.per_sample_grad_component(z_grad_test, per_sample=True)
+                    grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_test, per_sample=True)
                     if self.projector_kwargs is not None:
                         grad_comp_1_flatten = grad_comp_1.view(-1, grad_comp_1.shape[-1])
                         grad_comp_2_flatten = grad_comp_2.view(-1, grad_comp_2.shape[-1])
@@ -451,7 +451,7 @@ class GCGradDotAttributor():
                     torch.cuda.synchronize()
                     start = time.time()
 
-                    result = layer.grad_dot_prod(train_grad_comp_1[layer_id], train_grad_comp_2[layer_id], grad_comp_1, grad_comp_2)
+                    result = layer.grad_dot_prod_from_grad_comp(train_grad_comp_1[layer_id], train_grad_comp_2[layer_id], grad_comp_1, grad_comp_2)
 
                     torch.cuda.synchronize()
                     end = time.time()
@@ -520,7 +520,7 @@ class GCGradDotAttributor():
         # Calculate scores
         with torch.no_grad():
             for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_full)):
-                grad_comp_1, grad_comp_2 = layer.per_sample_grad_component(z_grad_full, per_sample=True)
+                grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_full, per_sample=True)
                 if self.projector_kwargs is not None:
                     grad_comp_1_flatten = grad_comp_1.view(-1, grad_comp_1.shape[-1])
                     grad_comp_2_flatten = grad_comp_2.view(-1, grad_comp_2.shape[-1])
@@ -665,7 +665,7 @@ class GCGradDotAttributor():
 
             with torch.no_grad():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad)):
-                    grad_comp_1, grad_comp_2 = layer.per_sample_grad_component(z_grad_full, per_sample=True)
+                    grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_full, per_sample=True)
 
                     # Calculate sparsity for each threshold
                     for threshold in thresholds:

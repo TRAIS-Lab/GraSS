@@ -139,7 +139,7 @@ class MemEffGhostInnerProductAttributor():
 
             with torch.no_grad():
                 for layer_id, (layer, z_grad) in enumerate(zip(self.layer_name, Z_grad)):
-                    grad_comp_1, grad_comp_2 = layer.per_sample_grad_component(z_grad, per_sample=True)
+                    grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad, per_sample=True)
                     if self.projector_kwargs is not None:
                         grad_comp_1_flatten = grad_comp_1.view(-1, grad_comp_1.shape[-1])
                         grad_comp_2_flatten = grad_comp_2.view(-1, grad_comp_2.shape[-1])
@@ -353,7 +353,7 @@ class MemEffGhostInnerProductAttributor():
 
                         with torch.no_grad():
                             for layer_id, (layer, z_grad_train) in enumerate(zip(self.layer_name, Z_grad_train)):
-                                grad_comp_1, grad_comp_2 = layer.per_sample_grad_component(z_grad_train, per_sample=True)
+                                grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_train, per_sample=True)
                                 if self.projector_kwargs is not None:
                                     grad_comp_1_flatten = grad_comp_1.view(-1, grad_comp_1.shape[-1])
                                     grad_comp_2_flatten = grad_comp_2.view(-1, grad_comp_2.shape[-1])

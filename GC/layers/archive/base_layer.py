@@ -28,7 +28,7 @@ class BasePGradLayer(nn.Module):
 
         return out
 
-    def per_sample_grad_component(self):
+    def grad_comp(self):
         is_2d = self.layer_input.dim() == 2
         Z = self.layer_input
 

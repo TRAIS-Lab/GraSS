@@ -55,9 +55,11 @@ class GCLinear(nn.Linear):
 
         return self.pre_activation
 
-    def per_sample_grad_component(self, grad_pre_activation, per_sample=True):
+    def grad_comp(self, grad_pre_activation, per_sample=True):
         """
-        Return gradient of the pre_activation and the input. Handles both 2D and 3D inputs.
+        Return the components of the gradient of parameters (for both 2D and 3D inputs).
+
+        For Linear, gradient can be decomposed into the gradient of the pre_activation and the input.
 
         Args:
             grad_pre_activation: Gradient of the loss w.r.t. the pre-activation (dL/dx_o)
@@ -97,7 +99,9 @@ class GCLinear(nn.Linear):
 
     def per_sample_grad(self, grad_pre_activation, input_features):
         """
-        Construct gradient from the per-sample gradients component (gradient of the pre-activation and the input features).
+        Construct gradient from the gradient components.
+
+        For Linear, components are gradient of the pre-activation and the input features.
 
         Args:
             grad_pre_activation: Gradient of loss w.r.t. the pre-activation
@@ -110,7 +114,7 @@ class GCLinear(nn.Linear):
         grad = torch.einsum('BSA,BSC->BAC', grad_pre_activation, input_features).reshape(batch_size, -1)
         return grad
 
-    def grad_dot_prod(self, A1: Tensor, B1: Tensor, A2: Tensor, B2: Tensor) -> Tensor:
+    def grad_dot_prod_from_grad_comp(self, A1: Tensor, B1: Tensor, A2: Tensor, B2: Tensor) -> Tensor:
         """Compute gradient sample norm for the weight matrix in a GClinear layer.
 
         Args:
@@ -177,10 +181,10 @@ class GCEmbedding(nn.Embedding):
 #         self.pre_activation = embedded
 #         return embedded
 
-#     def per_sample_grad_component(self, deriv_pre_activ, per_sample=True):
+#     def grad_comp(self, deriv_pre_activ, per_sample=True):
 #         """
 #         Prepare components for gradient computation in embedding layer.
-#         Similar to linear layer's per_sample_grad_component but handles sparse embedding lookups.
+#         Similar to linear layer's grad_comp but handles sparse embedding lookups.
 
 #         Parameters:
 #         -------------------

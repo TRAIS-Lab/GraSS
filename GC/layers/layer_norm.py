@@ -26,9 +26,11 @@ class GCLayerNorm(nn.LayerNorm):
 
         return self.pre_activation
 
-    def per_sample_grad_component(self, grad_pre_activation, per_sample=True):
+    def grad_comp(self, grad_pre_activation, per_sample=True):
         """
-        Compute gradients for the weight and bias. Handles both 2D and 3D inputs.
+        Return the components of the gradient of parameters (for both 2D and 3D inputs).
+
+        For LayerNorm, since the parameter is small, we directly return gradients for the weight and bias.
 
         Args:
             grad_pre_activation: Gradient of loss w.r.t. pre-activation (dL/dx_o)
@@ -61,9 +63,11 @@ class GCLayerNorm(nn.LayerNorm):
 
         return grad_weight, grad_bias
 
-    def per_sample_grad(self, grad_weight, grad_bias):
+    def grad_from_grad_comp(self, grad_weight, grad_bias):
         """
-        Construct gradient from the per-sample gradients component (gradient of weight and bias).
+        Construct gradient from the gradient components.
+
+        For LayerNorm, components are gradient of weight and bias.
 
         Args:
             grad_weight: Gradient of loss w.r.t. the weight
@@ -75,7 +79,7 @@ class GCLayerNorm(nn.LayerNorm):
         grad = torch.cat((grad_weight, grad_bias), dim=1)
         return grad
 
-    def grad_dot_prod(self, A1: Tensor, B1: Tensor, A2: Tensor, B2: Tensor) -> Tensor:
+    def grad_dot_prod_from_grad_comp(self, A1: Tensor, B1: Tensor, A2: Tensor, B2: Tensor) -> Tensor:
         """Compute gradient sample norm for the weight matrix in a GCLayerNorm layer.
 
         Args:

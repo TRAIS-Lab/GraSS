@@ -214,7 +214,7 @@ class GCIFAttributorKFAC():
             # Compute K-FAC factors for each layer
             with torch.no_grad():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
-                    grad_comp_1, grad_comp_2 = layer.per_sample_grad_component(z_grad_full, per_sample=True)
+                    grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_full, per_sample=True)
 
                     # Apply projection if needed
                     if self.projector_kwargs_1 is not None and self.projector_kwargs_2 is not None:
@@ -257,7 +257,7 @@ class GCIFAttributorKFAC():
                             torch.cuda.synchronize()
                             self.profiling_stats['projection'] += time.time() - start_time
 
-                    grad = layer.per_sample_grad(grad_comp_1, grad_comp_2)
+                    grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
 
                     if train_grad[layer_id] is None:
                         train_grad[layer_id] = torch.zeros((num_samples, *grad.shape[1:]), device=self.device)
@@ -411,7 +411,7 @@ class GCIFAttributorKFAC():
 
             with torch.no_grad():
                 for layer_id, (layer, z_grad_test) in enumerate(zip(self.layer_name, Z_grad_test)):
-                    grad_comp_1, grad_comp_2 = layer.per_sample_grad_component(z_grad_test, per_sample=True)
+                    grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_test, per_sample=True)
 
                     if self.projector_kwargs_1 is not None and self.projector_kwargs_2 is not None:
                         if self.profile:
@@ -456,7 +456,7 @@ class GCIFAttributorKFAC():
                             torch.cuda.synchronize()
                             self.profiling_stats['projection'] += time.time() - start_time
 
-                    test_grad = layer.per_sample_grad(grad_comp_1, grad_comp_2)
+                    test_grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
 
                     col_st = test_batch_idx * test_dataloader.batch_size
                     col_ed = min(
@@ -507,7 +507,7 @@ class GCIFAttributorKFAC():
 
             with torch.no_grad():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad)):
-                    grad_comp_1, grad_comp_2 = layer.per_sample_grad_component(z_grad_full, per_sample=True)
+                    grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_full, per_sample=True)
 
                     # Calculate sparsity for each threshold
                     for threshold in thresholds:
