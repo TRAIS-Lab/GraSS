@@ -879,7 +879,7 @@ def main():
     filename_parts = [f"{tda_mode}"]
 
     if args.proj is not None:
-        if tda_method == "GD":
+        if tda_method == "GD" or tda_method == "IF":
             if args.proj_dim_dist == "non-uniform":
                 filename_parts.append(f"{proj_method}-{proj_dim}(NU)")
             elif args.proj_dim_dist == "uniform":
