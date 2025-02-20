@@ -14,38 +14,6 @@ class GGGPT2LMHeadModel(GPT2LMHeadModel):
         self.hooks = []
         self._replace_with_GG_layers()
 
-    # def _register_embedding_hooks(self, token_embedding, position_embedding):
-    #     """Register hooks to capture embedding outputs"""
-
-    #     def token_hook(module, input, output):
-    #         # Store token embedding output for later use
-    #         # token_embedding.token_output = output  # Detach to prevent gradient issues
-    #         # token_embedding.pre_activation = output
-    #         pass
-
-    #     def position_hook(module, input, output):
-    #         # Get the token embeddings and ensure they require grad
-    #         if hasattr(token_embedding, 'token_output'):
-    #             # token_emb = token_embedding.token_output
-    #             # # Create a new tensor that requires grad
-    #             # combined = output + token_emb
-    #             # position_embedding.pre_activation = combined
-    #             # # Store the combined output for gradient computation
-    #             # position_embedding.combined_output = combined
-    #             # return combined  # Return the combined output to maintain gradient flow
-    #             pass
-    #         else:
-    #             # print("Warning: token_output not found in token_embedding")
-    #             # position_embedding.pre_activation = output
-    #             # return output
-    #             pass
-
-    #     # Register the hooks
-    #     token_hook_handle = token_embedding.register_forward_hook(token_hook)
-    #     position_hook_handle = position_embedding.register_forward_hook(position_hook)
-
-    #     # Store hook handles for potential cleanup
-    #     self.hooks.extend([token_hook_handle, position_hook_handle])
 
     def _replace_with_GG_layers(self):
         """
@@ -92,7 +60,7 @@ class GGGPT2LMHeadModel(GPT2LMHeadModel):
                 # Replace LayerNorm layers
                 for ln_attr in ['ln_1', 'ln_2']:
                     if hasattr(block, ln_attr):
-                        new_ln_layer = self._create_GGLayernorm(getattr(block, ln_attr))
+                        new_ln_layer = self._create_GGLayerNorm(getattr(block, ln_attr))
                         setattr(block, ln_attr, new_ln_layer)
 
         # Replace final layers
@@ -101,7 +69,7 @@ class GGGPT2LMHeadModel(GPT2LMHeadModel):
             self.lm_head = new_layer
 
         if hasattr(self.transformer, 'ln_f'):
-            new_ln_layer = self._create_GGLayernorm(self.transformer.ln_f)
+            new_ln_layer = self._create_GGLayerNorm(self.transformer.ln_f)
             self.transformer.ln_f = new_ln_layer
 
     def _create_GGLinear(self, old_layer):
@@ -132,7 +100,7 @@ class GGGPT2LMHeadModel(GPT2LMHeadModel):
 
         return new_layer
 
-    def _create_GGLayernorm(self, old_layer):
+    def _create_GGLayerNorm(self, old_layer):
         """
         Create a GGLayerNorm from a standard LayerNorm.
         """

@@ -6,7 +6,6 @@ if TYPE_CHECKING:
     from typing import List, Optional, Union, Tuple
 
 import torch
-from torch import Tensor
 from tqdm import tqdm
 from .layers.linear import GGLinear, GGEmbedding
 from .layers.layer_norm import GGLayerNorm

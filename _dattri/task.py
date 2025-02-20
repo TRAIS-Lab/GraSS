@@ -315,7 +315,7 @@ class AttributionTask:
                 dimension of the tensor.
             layer_name (Optional[Union[str, List[str]]]): The name of the layer as
                 to calculate the gradient w.r.t. If None, all the parameters
-                will be used to calcluate the gradient of loss. This should be
+                will be used to calculate the gradient of loss. This should be
                 a string or a list of strings if multiple layers are needed. The name
                 of layer should follow the key of model.named_parameters().
             ckpt_idx (Optional[int]): The index of the checkpoint to be loaded, only

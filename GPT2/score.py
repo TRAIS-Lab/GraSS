@@ -570,7 +570,7 @@ def main():
     test_dataset = lm_datasets["validation"]
 
     if args.debug: # toy dataset
-        train_dataset = train_dataset.select(range(40))
+        train_dataset = train_dataset.select(range(4))
         test_dataset = test_dataset.select(range(4))
 
     # Dataset length
@@ -676,7 +676,8 @@ def main():
         model.eval()
 
         trainable_layers = find_GGlayers(model)
-        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GGLayerNorm) and not isinstance(layer, GGEmbedding)] # remove all LayerNorm and Embedding layers
+        # trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GGLayerNorm) and not isinstance(layer, GGEmbedding)] # remove all LayerNorm and Embedding layers
+        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GGEmbedding)]
 
         attributor = GGGradDotAttributor(
             model=model,
@@ -722,7 +723,8 @@ def main():
         model.eval()
 
         trainable_layers = find_GGlayers(model)
-        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GGLayerNorm) and not isinstance(layer, GGEmbedding)] # remove all LayerNorm and Embedding layers
+        # trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GGLayerNorm) and not isinstance(layer, GGEmbedding)] # remove all LayerNorm and Embedding layers
+        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GGEmbedding)]
 
         attributor = GGIFAttributorKFAC(
             model=model,
@@ -822,33 +824,58 @@ def main():
                             checkpoints=checkpoint,
                             checkpoints_load_func=checkpoints_load_func)
 
-        attributor = TracInAttributor(
-            task=task,
-            weight_list=torch.ones(1) * 1e-3,
-            normalized_grad=False, # For Grad-Dot, True if Grad-Cos
-            projector_kwargs=projector_kwargs,
-            device=device,
-            layer_name=[name for name, _ in model.named_parameters() if 'ln' not in name.lower()],  # Consider only Linear layers (exclude LayerNorm).
-            mode=tda_mode,
-        )
+        from collections import defaultdict
 
-        torch.cuda.reset_peak_memory_stats(device)
+        # Group parameters by their base layer name
+        layer_groups = defaultdict(list)
+        for name, _ in model.named_parameters():
+            base_name = ".".join(name.split(".")[:-1])  # Remove 'weight' or 'bias' suffix
+            layer_groups[base_name].append(name)
 
-        torch.cuda.synchronize(device)
-        start = time.time()
+        # Iterate over combined layer names
+        for base_name, param_names in layer_groups.items():
+            print(f"Grouping: {param_names}")
+            attributor = TracInAttributor(
+                task=task,
+                weight_list=torch.ones(1) * 1e-3,
+                normalized_grad=False,  # For Grad-Dot, True if Grad-Cos
+                projector_kwargs=projector_kwargs,
+                device=device,
+                layer_name=param_names,  # Pass the grouped names
+                mode=tda_mode,
+            )
+        # for name, _ in model.named_parameters():
+        #     print(name)
+        #     attributor = TracInAttributor(
+        #         task=task,
+        #         weight_list=torch.ones(1) * 1e-3,
+        #         normalized_grad=False, # For Grad-Dot, True if Grad-Cos
+        #         projector_kwargs=projector_kwargs,
+        #         device=device,
+        #         layer_name=[name],
+        #         # layer_name=[name for name, _ in model.named_parameters() if 'ln' not in name.lower()],  # Consider only Linear layers (exclude LayerNorm).
+        #         mode=tda_mode,
+        #     )
 
-        with torch.no_grad():
-            score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
+            torch.cuda.reset_peak_memory_stats(device)
 
-        torch.cuda.synchronize(device)
-        end = time.time()
+            torch.cuda.synchronize(device)
+            start = time.time()
 
-        peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
+            with torch.no_grad():
+                score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
+
+            torch.cuda.synchronize(device)
+            end = time.time()
+
+            peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
+
+            # print(score)
 
     logger.info(f"Time taken: {end - start} seconds")
     logger.info(f"Peak memory usage: {peak_memory} MB")
 
-    print(score)
+    # print(score)
 
     # Build the filename components
     filename_parts = [f"{tda_mode}"]

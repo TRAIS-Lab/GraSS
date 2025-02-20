@@ -293,11 +293,11 @@ class GGGradDotAttributor():
                     labels=train_labels
                 )
                 logp = -outputs.loss
-                train_loss = -(logp - torch.log(1 - torch.exp(logp)))
+                train_loss = logp - torch.log(1 - torch.exp(logp))
+                # train_loss = -(logp - torch.log(1 - torch.exp(logp)))
 
                 # Get pre-activations from trainable layers
                 train_pre_acts = [layer.pre_activation for layer in self.layer_name]
-
 
                 # Calculate gradients
                 Z_grad_train = torch.autograd.grad(train_loss, train_pre_acts, retain_graph=True)
@@ -381,9 +381,10 @@ class GGGradDotAttributor():
                 attention_mask=test_attention_masks,
                 labels=test_labels
             )
-
             logp = -outputs.loss
-            test_loss = -(logp - torch.log(1 - torch.exp(logp)))
+
+            # test_loss = -(logp - torch.log(1 - torch.exp(logp)))
+            test_loss = logp - torch.log(1 - torch.exp(logp))
 
             # Get pre-activations from trainable layers
             test_pre_acts = [layer.pre_activation for layer in self.layer_name]
@@ -402,6 +403,7 @@ class GGGradDotAttributor():
             # Calculate scores
             with torch.no_grad():
                 for layer_id, (layer, z_grad_test) in enumerate(zip(self.layer_name, Z_grad_test)):
+                    print(layer)
                     val_1, val_2 = layer.per_example_gradient(z_grad_test, per_sample=True)
                     if self.projector_kwargs is not None:
                         val_1_flatten = val_1.view(-1, val_1.shape[-1])
@@ -443,8 +445,6 @@ class GGGradDotAttributor():
                         end = time.time()
                         time_projection += end - start
 
-                    dLdZ_train, z_train = train_val_1[layer_id], train_val_2[layer_id]
-                    dLdZ_val, z_val = val_1, val_2
                     col_st = test_batch_idx * test_dataloader.batch_size
                     col_ed = min(
                         (test_batch_idx + 1) * test_dataloader.batch_size,
@@ -455,13 +455,32 @@ class GGGradDotAttributor():
                     torch.cuda.synchronize()
                     start = time.time()
 
-                    result = grad_dotprod(dLdZ_train, z_train, dLdZ_val, z_val) * self.lr
+                    if isinstance(layer, GGLinear):
+                        dLdZ_train, z_train = train_val_1[layer_id], train_val_2[layer_id]
+                        dLdZ_val, z_val = val_1, val_2
 
+                        grad = torch.einsum('BSA,BSC->BAC', dLdZ_train, z_train).reshape(dLdZ_train.shape[0], -1)
+
+                        print(grad.shape)
+                        print(grad[:, :3])
+
+                        result = grad_dotprod(dLdZ_train, z_train, dLdZ_val, z_val)
+                    elif isinstance(layer, GGLayerNorm):
+                        dLdgamma_train, dLdbeta_train = train_val_1[layer_id], train_val_2[layer_id]
+                        dLdgamma_val, dLdbeta_val = val_1, val_2
+
+                        print(dLdgamma_train.shape)
+                        print(dLdgamma_train[:, :3])
+
+                        print(dLdbeta_train.shape)
+                        print(dLdbeta_train[:, :3])
+
+                        result = (dLdgamma_train @ dLdgamma_val.T + dLdbeta_train @ dLdbeta_val.T)
                     torch.cuda.synchronize()
                     end = time.time()
                     time_inner_product += end - start
 
-                    grad_dot[:, col_st:col_ed] += result
+                    grad_dot[:, col_st:col_ed] += result * self.lr
 
         print(f"Time for projection: {time_projection}")
         print(f"Time for inner product: {time_inner_product}")

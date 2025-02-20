@@ -2,78 +2,59 @@ import torch
 import torch.nn as nn
 
 class GGLayerNorm(nn.LayerNorm):
-    """LayerNorm implementation with Ghost Inner-Product computation support.
-    """
     def __init__(self, normalized_shape, eps=1e-5, elementwise_affine=True):
         super(GGLayerNorm, self).__init__(normalized_shape, eps=eps, elementwise_affine=elementwise_affine)
-        self.normalized_shape = normalized_shape
+        # self.weight = nn.Parameter(torch.ones(normalized_shape))
+        # self.bias = nn.Parameter(torch.zeros(normalized_shape))
         self.eps = eps
-        self.elementwise_affine = elementwise_affine
-
-        # Save intermediate values for gradient computation
-        self.mean = None
-        self.sigma = None
-        self.normalized = None
         self.layer_input = None
+        self.normalized = None
         self.pre_activation = None
         self.name = 'layernorm'
 
-    def forward(self, input):
-        self.layer_input = input
+    def forward(self, x):
+        """Forward pass storing intermediate values"""
+        self.layer_input = x
 
-        # Calculate mean and variance
-        mean = input.mean(dim=-1, keepdim=True)
-        var = input.var(dim=-1, keepdim=True, unbiased=False)
-        sigma = (var + self.eps).sqrt()
+        # Calculate statistics
+        mean = x.mean(dim=-1, keepdim=True)
+        var = x.var(dim=-1, keepdim=True, unbiased=False)
 
-        # Save intermediate values
-        self.mean = mean
-        self.sigma = sigma
+        # Normalize
+        self.normalized = (x - mean) / torch.sqrt(var + self.eps)
 
-        # Normalize input
-        normalized = (input - mean) / sigma
-        self.normalized = normalized
-
-        # Apply affine transformation if enabled
+        # Apply affine transformation
         if self.elementwise_affine:
-            output = normalized * self.weight + self.bias
+            self.pre_activation = self.weight * self.normalized + self.bias
         else:
-            output = normalized
+            self.pre_activation = self.normalized
 
-        self.pre_activation = output
-        return output
+        return self.pre_activation
 
     def per_example_gradient(self, output_gradient, per_sample=True):
-        is_3d = self.layer_input.dim() == 3
-        if is_3d:
-            batch_size, seq_length, hidden_size = self.layer_input.shape
+        """Calculate per-example gradients for LayerNorm parameters"""
+        if not self.elementwise_affine:
+            raise ValueError("LayerNorm must have learnable parameters for per-example gradients.")
 
-        # For gamma, we need:
-        # - output_gradient: dL/dy
-        # - normalized input: (x-μ)/σ (should have approximately unit variance)
-        normalized = self.normalized  # This should be (x-μ)/σ
+        is_3d = self.layer_input.dim() == 3
 
         if per_sample:
-            output_gradient = output_gradient * batch_size
-
-        if self.elementwise_affine:
-            # For γ (weight): need normalized input
-            gamma_grad_terms = (output_gradient, normalized)
-
-            # For β (bias): just need output gradient
-            ones = torch.ones_like(output_gradient)
-            beta_grad_terms = (output_gradient, ones)
-
+            output_gradient = output_gradient * self.layer_input.shape[0]
             if is_3d:
-                gamma_grad_terms = (
-                    gamma_grad_terms[0],  # Already in correct shape
-                    gamma_grad_terms[1]   # Already in correct shape
-                )
-                beta_grad_terms = (
-                    beta_grad_terms[0],
-                    beta_grad_terms[1]
-                )
-
-            return gamma_grad_terms, beta_grad_terms
+                grad_weight = torch.einsum("ijk,ijk->ik", output_gradient, self.normalized)
+                grad_bias = torch.sum(output_gradient, dim=1)
+            else:
+                # For 2D input (batch_size, hidden_dim)
+                grad_weight = output_gradient * self.normalized
+                grad_bias = output_gradient
         else:
-            return None
+            if is_3d:
+                # Sum over batch and sequence dimensions
+                grad_weight = torch.sum(output_gradient * self.normalized, dim=(0, 1))
+                grad_bias = torch.sum(output_gradient, dim=(0, 1))
+            else:
+                # Sum over batch dimension
+                grad_weight = torch.sum(output_gradient * self.normalized, dim=0)
+                grad_bias = torch.sum(output_gradient, dim=0)
+
+        return grad_weight, grad_bias

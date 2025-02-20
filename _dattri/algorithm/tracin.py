@@ -269,6 +269,7 @@ class TracInAttributor(BaseAttributor):
 
                     grad_t = self.grad_loss_func(parameters, train_batch_data)
                     print(grad_t.shape)
+                    print(grad_t[:, :3])
 
                     # torch.cuda.synchronize()
                     # end = time.time()
