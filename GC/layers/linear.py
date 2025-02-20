@@ -4,7 +4,6 @@ import torch.nn.functional as F
 
 from torch import Tensor
 
-
 def chunked_matmul(A1: Tensor, A2: Tensor, chunk_size=128) -> Tensor:
     """Chuncked matrix multiplication for memory efficiency.
 
@@ -112,7 +111,7 @@ class GCLinear(nn.Linear):
             Tensor: Gradient of loss w.r.t. all parameters of the layer
         """
         batch_size = grad_pre_activation.shape[0]
-        grad = torch.einsum('BSA,BSC->BAC', grad_pre_activation, input_features).reshape(batch_size, -1)
+        grad = torch.einsum('ijk,ijl->ikl', grad_pre_activation, input_features).reshape(batch_size, -1)
         return grad
 
     @staticmethod
