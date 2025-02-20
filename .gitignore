@@ -49,3 +49,5 @@ dist
 # all files in result folder
 */result/*
 **/checkpoints*/
+
+visualization.ipynb
