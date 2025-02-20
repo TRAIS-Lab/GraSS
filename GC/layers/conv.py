@@ -3,8 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.init as init
 from .base_layer import BasePGradLayer
-from fastGG.common.im2col import im2col_indices
-from fastGG.util import conv_outsize
+from fastGC.common.im2col import im2col_indices
+from fastGC.util import conv_outsize
 
 import sys
 
@@ -27,7 +27,7 @@ class Conv2d(nn.Conv2d):
 
         return out
 
-    def per_example_gradient(self, deriv_pre_activ):
+    def per_sample_grad(self, deriv_pre_activ):
         dLdZ = deriv_pre_activ
         H = self.layer_input
 
@@ -53,7 +53,7 @@ class Conv2d(nn.Conv2d):
     def pe_grad_sqnorm(self, deriv_pre_activ):
         batch_size = deriv_pre_activ.shape[0]
 
-        pe_grad_weight, pe_grad_bias = self.per_example_gradient(deriv_pre_activ)
+        pe_grad_weight, pe_grad_bias = self.per_sample_grad(deriv_pre_activ)
         sq_norm_weight = pe_grad_weight.pow(2).view(batch_size, -1).sum(1)
 
         if self.bias is not None:
@@ -62,7 +62,7 @@ class Conv2d(nn.Conv2d):
         else:
             return sq_norm_weight
 
-    def per_example_gradient(self, deriv_pre_activ, per_sample=True):
+    def per_sample_grad(self, deriv_pre_activ, per_sample=True):
 
         batch_size = deriv_pre_activ.shape[0]
 

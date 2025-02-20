@@ -7,9 +7,9 @@ if TYPE_CHECKING:
 
 import torch
 from tqdm import tqdm
-from .layers.linear import GGLinear, GGEmbedding
-from .layers.layer_norm import GGLayerNorm
-from .helper import find_GGlayers
+from .layers.linear import GCLinear, GCEmbedding
+from .layers.layer_norm import GCLayerNorm
+from .helper import find_GClayers
 
 from _dattri.func.projection import random_project
 
@@ -17,14 +17,14 @@ import time
 
 def setup_projectors(
         projector_kwargs: Dict[str, Any],
-        layer_name: List[Union[GGLinear, GGEmbedding, GGLayerNorm]],
+        layer_name: List[Union[GCLinear, GCEmbedding, GCLayerNorm]],
         mode: Optional[str] = "default",
     ) -> Tuple[Dict[str, Any], List[int], int]:
     """Setup projection dimensions and seeds for each layer.
 
     Args:
         projector_kwargs (Dict[str, Any]): projector's arguments.
-        layer_name (List[Union[GGLinear, GGEmbedding, GGLayerNorm]]): the list of layers to be projected.
+        layer_name (List[Union[GCLinear, GCEmbedding, GCLayerNorm]]): the list of layers to be projected.
         mode (Optional[str], optional): the data attribution's running mode. Defaults to "default".
 
     Returns:
@@ -49,13 +49,13 @@ def setup_projectors(
     layer_dim_1 = []
     layer_dim_2 = []
     for layer in layer_name:
-        if isinstance(layer, GGLinear):
+        if isinstance(layer, GCLinear):
             layer_dim_1.append(layer.weight.shape[0])
             layer_dim_2.append(layer.weight.shape[0] * layer.weight.shape[1])
-        elif isinstance(layer, GGEmbedding):
+        elif isinstance(layer, GCEmbedding):
             layer_dim_1.append(layer.embedding_dim)
             layer_dim_2.append(layer.embedding_dim * layer.num_embeddings)
-        elif isinstance(layer, GGLayerNorm):
+        elif isinstance(layer, GCLayerNorm):
             layer_dim_1.append(layer.normalized_shape[0])
             layer_dim_2.append(layer.normalized_shape[0])
         else:
@@ -114,7 +114,7 @@ def eigen_stable_inverse(matrix: torch.Tensor, damping: float = 1e-5, eigen_thre
 
     return inverse
 
-class GGIFAttributorKFAC():
+class GCIFAttributorKFAC():
     def __init__(
         self,
         model,
@@ -137,7 +137,7 @@ class GGIFAttributorKFAC():
             device (str, optional): _description_. Defaults to 'cpu'.
         """
         self.model = model
-        self.layer_name = find_GGlayers(model) if layer_name is None else layer_name
+        self.layer_name = find_GClayers(model) if layer_name is None else layer_name
         (self.projector_kwargs_1, self.projector_kwargs_2), (self.proj_dim_1, self.proj_dim_2), self.proj_seed = setup_projectors(projector_kwargs, self.layer_name, mode)
         self.damping = damping
         self.profile = profile
@@ -160,7 +160,7 @@ class GGIFAttributorKFAC():
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """
         Compute K-FAC inverse Hessian vector product for each layer.
-        Uses GGN approximation for the Hessian computation.
+        Uses GCN approximation for the Hessian computation.
 
         Args:
             train_dataloader: DataLoader for training data
@@ -214,7 +214,7 @@ class GGIFAttributorKFAC():
             # Compute K-FAC factors for each layer
             with torch.no_grad():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
-                    val_1, val_2 = layer.per_example_gradient(z_grad_full, per_sample=True)
+                    val_1, val_2 = layer.per_sample_grad(z_grad_full, per_sample=True)
 
                     # Apply projection if needed
                     if self.projector_kwargs_1 is not None and self.projector_kwargs_2 is not None:
@@ -412,7 +412,7 @@ class GGIFAttributorKFAC():
 
             with torch.no_grad():
                 for layer_id, (layer, z_grad_test) in enumerate(zip(self.layer_name, Z_grad_test)):
-                    val_1, val_2 = layer.per_example_gradient(z_grad_test, per_sample=True)
+                    val_1, val_2 = layer.per_sample_grad(z_grad_test, per_sample=True)
 
                     if self.projector_kwargs_1 is not None and self.projector_kwargs_2 is not None:
                         if self.profile:
@@ -509,7 +509,7 @@ class GGIFAttributorKFAC():
 
             with torch.no_grad():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad)):
-                    val_1, val_2 = layer.per_example_gradient(z_grad_full, per_sample=True)
+                    val_1, val_2 = layer.per_sample_grad(z_grad_full, per_sample=True)
 
                     # Calculate sparsity for each threshold
                     for threshold in thresholds:

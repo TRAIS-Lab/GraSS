@@ -2,14 +2,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class GGLinear(nn.Linear):
-    """LayerNorm implementation with Ghost Inner-Product computation support.
+class GCLinear(nn.Linear):
+    """
+    Gradient Component (GC) Linear layer implementation with gradient factor calculation support.
     """
     def __init__(self, in_features, out_features, bias=True):
-        super(GGLinear, self).__init__(in_features, out_features, bias)
+        super(GCLinear, self).__init__(in_features, out_features, bias)
+        self.name = 'linear'
         self.pre_activation = None
         self.layer_input = None
-        self.name = 'linear'
         self.has_bias = bias
 
     def forward(self, input):
@@ -19,18 +20,16 @@ class GGLinear(nn.Linear):
 
         return self.pre_activation
 
-    def per_example_gradient(self, output_gradient, per_sample=True):
+    def per_sample_grad(self, grad_pre_activation, per_sample=True):
         """
-        Compute terms needed for Ghost Inner-Product calculation.
-
-        Handles both 2D and 3D inputs by properly reshaping tensors.
+        Return gradient of the pre_activation and the input. Handles both 2D and 3D inputs.
 
         Args:
-            output_gradient: Gradient of loss w.r.t. pre-activation (dL/dx_o)
+            grad_pre_activation: Gradient of the loss w.r.t. the pre-activation (dL/dx_o)
             per_sample: Whether to maintain per-sample gradients (default: True)
 
         Returns:
-            tuple: (output_gradient, augmented_input)
+            tuple: (grad_pre_activation, augmented_input)
         """
         input_features = self.layer_input
         is_3d = input_features.dim() == 3
@@ -39,13 +38,13 @@ class GGLinear(nn.Linear):
             batch_size, seq_length, hidden_size = input_features.shape
             # Reshape 3D tensors to 2D for consistent processing
             input_features = input_features.reshape(-1, hidden_size)
-            output_gradient = output_gradient.reshape(-1, self.out_features)
+            grad_pre_activation = grad_pre_activation.reshape(-1, self.out_features)
         else:
             batch_size = input_features.shape[0]
 
         # Scale the gradient if we're computing per-sample gradients
         if per_sample:
-            output_gradient = output_gradient * batch_size
+            grad_pre_activation = grad_pre_activation * batch_size
 
         # Handle bias term by augmenting input with ones
         if self.has_bias:
@@ -57,18 +56,18 @@ class GGLinear(nn.Linear):
         if is_3d:
             # Reshape back to 3D
             input_features = input_features.reshape(batch_size, seq_length, -1)
-            output_gradient = output_gradient.reshape(batch_size, seq_length, -1)
+            grad_pre_activation = grad_pre_activation.reshape(batch_size, seq_length, -1)
 
-        return output_gradient, input_features
+        return grad_pre_activation, input_features
 
-class GGEmbedding(nn.Embedding):
+class GCEmbedding(nn.Embedding):
     def __init__(self, *args, **kwargs):
         # Simply call the parent class's constructor
         super().__init__(*args, **kwargs)
 
-# class GGEmbedding(nn.Embedding):
+# class GCEmbedding(nn.Embedding):
 #     def __init__(self, num_embeddings, embedding_dim):
-#         super(GGEmbedding, self).__init__(num_embeddings, embedding_dim)
+#         super(GCEmbedding, self).__init__(num_embeddings, embedding_dim)
 #         self.pre_activation = None
 #         self.indices = None
 #         self.name = 'embedding'
@@ -81,10 +80,10 @@ class GGEmbedding(nn.Embedding):
 #         self.pre_activation = embedded
 #         return embedded
 
-#     def per_example_gradient(self, deriv_pre_activ, per_sample=True):
+#     def per_sample_grad(self, deriv_pre_activ, per_sample=True):
 #         """
 #         Prepare components for gradient computation in embedding layer.
-#         Similar to linear layer's per_example_gradient but handles sparse embedding lookups.
+#         Similar to linear layer's per_sample_grad but handles sparse embedding lookups.
 
 #         Parameters:
 #         -------------------

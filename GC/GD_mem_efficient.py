@@ -9,7 +9,7 @@ from dataclasses import dataclass
 import h5py
 import math
 
-from .helper import find_GGlayers, grad_dotprod, setup_projectors
+from .helper import find_GClayers, grad_dotprod, setup_projectors
 
 from _dattri.func.projection import random_project
 
@@ -36,7 +36,7 @@ class MemEffGhostInnerProductAttributor():
     ) -> None:
         self.model = model
         self.lr = lr
-        self.layer_name = find_GGlayers(model) if layer_name is None else layer_name
+        self.layer_name = find_GClayers(model) if layer_name is None else layer_name
         self.device = device
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(exist_ok=True)
@@ -139,7 +139,7 @@ class MemEffGhostInnerProductAttributor():
 
             with torch.no_grad():
                 for layer_id, (layer, z_grad) in enumerate(zip(self.layer_name, Z_grad)):
-                    val_1, val_2 = layer.per_example_gradient(z_grad, per_sample=True)
+                    val_1, val_2 = layer.per_sample_grad(z_grad, per_sample=True)
                     if self.projector_kwargs is not None:
                         val_1_flatten = val_1.view(-1, val_1.shape[-1])
                         val_2_flatten = val_2.view(-1, val_2.shape[-1])
@@ -353,7 +353,7 @@ class MemEffGhostInnerProductAttributor():
 
                         with torch.no_grad():
                             for layer_id, (layer, z_grad_train) in enumerate(zip(self.layer_name, Z_grad_train)):
-                                val_1, val_2 = layer.per_example_gradient(z_grad_train, per_sample=True)
+                                val_1, val_2 = layer.per_sample_grad(z_grad_train, per_sample=True)
                                 if self.projector_kwargs is not None:
                                     val_1_flatten = val_1.view(-1, val_1.shape[-1])
                                     val_2_flatten = val_2.view(-1, val_2.shape[-1])

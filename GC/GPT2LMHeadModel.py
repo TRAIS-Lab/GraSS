@@ -1,34 +1,36 @@
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 from transformers.models.gpt2.modeling_gpt2 import Conv1D
-from .layers.linear import GGLinear, GGEmbedding
-from .layers.layer_norm import GGLayerNorm
+from .layers.linear import GCLinear, GCEmbedding
+from .layers.layer_norm import GCLayerNorm
 from .helper import transpose_Conv1D
 import torch
 import torch.nn as nn
 import os
 
-class GGGPT2LMHeadModel(GPT2LMHeadModel):
-    """Custom GPT2 model that directly inherits from GPT2LMHeadModel with Ghost-Gradient (GG) layers."""
+class GCGPT2LMHeadModel(GPT2LMHeadModel):
+    """
+    Custom GPT2 model that directly inherits from GPT2LMHeadModel with Gradient Component (GC) layers.
+    """
     def __init__(self, config):
         super().__init__(config)
         self.hooks = []
-        self._replace_with_GG_layers()
+        self._replace_with_GC_layers()
 
 
-    def _replace_with_GG_layers(self):
+    def _replace_with_GC_layers(self):
         """
-        Replace standard layers with GG layers in GPT2 model.
+        Replace standard layers with GC layers in GPT2 model.
         """
         # Replace word embeddings
         if hasattr(self.transformer, 'wte'):
-            token_embedding = GGEmbedding(
+            token_embedding = GCEmbedding(
                 num_embeddings=self.transformer.wte.num_embeddings,
                 embedding_dim=self.transformer.wte.embedding_dim
             )
             self.transformer.wte = token_embedding
 
         if hasattr(self.transformer, 'wpe'):
-            position_embedding = GGEmbedding(
+            position_embedding = GCEmbedding(
                 num_embeddings=self.transformer.wpe.num_embeddings,
                 embedding_dim=self.transformer.wpe.embedding_dim
             )
@@ -40,45 +42,45 @@ class GGGPT2LMHeadModel(GPT2LMHeadModel):
                 # Replace attention layers
                 if hasattr(block, 'attn'):
                     if hasattr(block.attn, 'c_attn'):
-                        new_layer = self._create_GGLinear(block.attn.c_attn)
+                        new_layer = self._create_GCLinear(block.attn.c_attn)
                         block.attn.c_attn = new_layer
 
                     if hasattr(block.attn, 'c_proj'):
-                        new_layer = self._create_GGLinear(block.attn.c_proj)
+                        new_layer = self._create_GCLinear(block.attn.c_proj)
                         block.attn.c_proj = new_layer
 
                 # Replace MLP layers
                 if hasattr(block, 'mlp'):
                     if hasattr(block.mlp, 'c_fc'):
-                        new_layer = self._create_GGLinear(block.mlp.c_fc)
+                        new_layer = self._create_GCLinear(block.mlp.c_fc)
                         block.mlp.c_fc = new_layer
 
                     if hasattr(block.mlp, 'c_proj'):
-                        new_layer = self._create_GGLinear(block.mlp.c_proj)
+                        new_layer = self._create_GCLinear(block.mlp.c_proj)
                         block.mlp.c_proj = new_layer
 
                 # Replace LayerNorm layers
                 for ln_attr in ['ln_1', 'ln_2']:
                     if hasattr(block, ln_attr):
-                        new_ln_layer = self._create_GGLayerNorm(getattr(block, ln_attr))
+                        new_ln_layer = self._create_GCLayerNorm(getattr(block, ln_attr))
                         setattr(block, ln_attr, new_ln_layer)
 
         # Replace final layers
         if hasattr(self, 'lm_head'):
-            new_layer = self._create_GGLinear(self.lm_head)
+            new_layer = self._create_GCLinear(self.lm_head)
             self.lm_head = new_layer
 
         if hasattr(self.transformer, 'ln_f'):
-            new_ln_layer = self._create_GGLayerNorm(self.transformer.ln_f)
+            new_ln_layer = self._create_GCLayerNorm(self.transformer.ln_f)
             self.transformer.ln_f = new_ln_layer
 
-    def _create_GGLinear(self, old_layer):
+    def _create_GCLinear(self, old_layer):
         """
-        Create a GG layer from either Conv1D or Linear layer.
+        Create a GC layer from either Conv1D or Linear layer.
         """
         if isinstance(old_layer, Conv1D):
             # Conv1D uses transposed weights compared to Linear
-            new_layer = GGLinear(
+            new_layer = GCLinear(
                 in_features=old_layer.weight.shape[0],  # nx
                 out_features=old_layer.weight.shape[1], # nf
                 bias=old_layer.bias is not None
@@ -87,7 +89,7 @@ class GGGPT2LMHeadModel(GPT2LMHeadModel):
             if old_layer.bias is not None:
                 new_layer.bias.data = old_layer.bias.clone()
         elif isinstance(old_layer, nn.Linear):
-            new_layer = GGLinear(
+            new_layer = GCLinear(
                 in_features=old_layer.in_features,
                 out_features=old_layer.out_features,
                 bias=old_layer.bias is not None
@@ -100,13 +102,13 @@ class GGGPT2LMHeadModel(GPT2LMHeadModel):
 
         return new_layer
 
-    def _create_GGLayerNorm(self, old_layer):
+    def _create_GCLayerNorm(self, old_layer):
         """
-        Create a GGLayerNorm from a standard LayerNorm.
+        Create a GCLayerNorm from a standard LayerNorm.
         """
         if isinstance(old_layer, nn.LayerNorm):
             # Create the custom LayerNorm layer with the same configuration
-            new_layer = GGLayerNorm(
+            new_layer = GCLayerNorm(
                 normalized_shape=old_layer.normalized_shape,
                 elementwise_affine=old_layer.elementwise_affine,
             )
@@ -121,7 +123,7 @@ class GGGPT2LMHeadModel(GPT2LMHeadModel):
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
         """
-        Load pretrained model and convert weight to be compatible with GG layers.
+        Load pretrained model and convert weight to be compatible with GC layers.
         """
         original_model = GPT2LMHeadModel.from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
         state_dict = transpose_Conv1D(original_model.state_dict())
@@ -132,7 +134,7 @@ class GGGPT2LMHeadModel(GPT2LMHeadModel):
 
     def save_pretrained(self, save_directory: str, is_main_process: bool = True, save_function = torch.save, **kwargs):
         """
-        Save the GG model weight while converting back to standard model format (Conv1D).
+        Save the GC model weight while converting back to standard model format (Conv1D).
         """
         if is_main_process:
             os.makedirs(save_directory, exist_ok=True)

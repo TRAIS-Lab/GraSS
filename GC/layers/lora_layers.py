@@ -1,7 +1,3 @@
-#  ------------------------------------------------------------------------------------------
-#  Copyright (c) Microsoft Corporation. All rights reserved.
-#  Licensed under the MIT License (MIT). See LICENSE in the repo root for license information.
-#  ------------------------------------------------------------------------------------------
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -153,21 +149,21 @@ class LoRALinear(nn.Linear, LoRALayer):
             return F.linear(x, T(self.weight), bias=self.bias)
 
 
-class GGLoRALinear(LoRALinear):
+class GCLoRALinear(LoRALinear):
     def __init__(self, in_features, out_features, r=0, lora_alpha=1, lora_dropout=0.,
                  fan_in_fan_out=False, merge_weights=True, **kwargs):
-        super(GGLoRALinear, self).__init__(in_features, out_features, r=r, lora_alpha=lora_alpha,
+        super(GCLoRALinear, self).__init__(in_features, out_features, r=r, lora_alpha=lora_alpha,
                                            lora_dropout=lora_dropout, fan_in_fan_out=fan_in_fan_out,
                                            merge_weights=merge_weights, **kwargs)
 
-        self.layer_type = 'GG_Linear_LoRA'
+        self.layer_type = 'GC_Linear_LoRA'
         self.register_forward_hook(self.capture_hook)
 
     def capture_hook(self, module, input, output):
         self.layer_input = input[0]  # input is a tuple
         self.pre_activation = output
 
-    def per_example_gradient(self, deriv_pre_activ, per_sample=True):
+    def per_sample_grad(self, deriv_pre_activ, per_sample=True):
         is_2d = self.layer_input.dim() == 2
 
         a = self.layer_input

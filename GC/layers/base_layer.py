@@ -28,7 +28,7 @@ class BasePGradLayer(nn.Module):
 
         return out
 
-    def per_example_gradient(self):
+    def per_sample_grad(self):
         is_2d = self.layer_input.dim() == 2
         Z = self.layer_input
 
@@ -41,7 +41,7 @@ class BasePGradLayer(nn.Module):
             pe_grad_bias = dLdZ
         else:
             dLdZ = self.deriv_pre_activ.permute(1, 2, 0)
-            dLdZ *= dLdZ.size(0)    
+            dLdZ *= dLdZ.size(0)
             pe_grad_weight = torch.bmm(dLdZ,
                                        Z.transpose(0, 1))
             pe_grad_bias = dLdZ.sum(dim=-1)

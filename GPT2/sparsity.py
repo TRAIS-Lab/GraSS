@@ -60,7 +60,7 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from GG.GPT2LMHeadModel import GGGPT2LMHeadModel
+from GC.GPT2LMHeadModel import GCGPT2LMHeadModel
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
@@ -257,7 +257,7 @@ def parse_args():
         "--mode",
         type=str,
         default="GD-default",
-        help="Specify which mode we want to run the sparsity inspection. Available options: GG-default, GD-default, and TRAK-default",
+        help="Specify which mode we want to run the sparsity inspection. Available options: GC-default, GD-default, and TRAK-default",
     )
     parser.add_argument(
         "--device",
@@ -440,7 +440,7 @@ def main():
         )
 
     if args.model_name_or_path:
-        model = GGGPT2LMHeadModel.from_pretrained(
+        model = GCGPT2LMHeadModel.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
             config=config,
@@ -449,7 +449,7 @@ def main():
         )
     else:
         logger.info("Training new model from scratch")
-        model = GGGPT2LMHeadModel.from_config(config, trust_remote_code=args.trust_remote_code)
+        model = GCGPT2LMHeadModel.from_config(config, trust_remote_code=args.trust_remote_code)
 
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
@@ -531,7 +531,7 @@ def main():
 
     model_id = 0
     checkpoint = f"{args.output_dir}/{model_id}"
-    model = GGGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device) # reload the model with custom GG checkpoints
+    model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device) # reload the model with custom GC checkpoints
 
     train_dataset = lm_datasets["train"]
     test_dataset = lm_datasets["validation"]
@@ -552,7 +552,7 @@ def main():
 
     logger.info(f"TDA Method: {tda_method} with mode: {tda_mode}")
 
-    if tda_method == "GG":
+    if tda_method == "GC":
         if tda_mode == "default":
                 train_batch_size = 4
                 test_batch_size = 4
@@ -573,7 +573,7 @@ def main():
     elif tda_method == "LoGra":
         pass
     else:
-        raise ValueError("Invalid method type. Choose from 'GG' or 'GD'.")
+        raise ValueError("Invalid method type. Choose from 'GC' or 'GD'.")
 
     logger.info(f"The training batch size: {train_batch_size}")
     logger.info(f"The eval batch size: {test_batch_size}")
@@ -591,17 +591,17 @@ def main():
 
     logger.info("***** Running sparsity calculation *****")
 
-    if tda_method == "GG":
-        from GG.GD import GGGradDotAttributor
-        from GG.GD_mem_efficient import MemEffGhostInnerProductAttributor
-        from GG.helper import find_GGlayers
-        from GG.layers.layer_norm import GGLayerNorm
+    if tda_method == "GC":
+        from GC.GD import GCGradDotAttributor
+        from GC.GD_mem_efficient import MemEffGhostInnerProductAttributor
+        from GC.helper import find_GClayers
+        from GC.layers.layer_norm import GCLayerNorm
 
-        trainable_layers = find_GGlayers(model)
+        trainable_layers = find_GClayers(model)
         trainable_layers = trainable_layers[1:] # Omit the first embedding layer due to weight tying with the last linear layer
-        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GGLayerNorm)] # remove all LayerNorm layers
+        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GCLayerNorm)] # remove all LayerNorm layers
 
-        attributor = GGGradDotAttributor(
+        attributor = GCGradDotAttributor(
             model=model,
             lr=1e-3,
             layer_name=trainable_layers,
@@ -633,7 +633,7 @@ def main():
             return logp - torch.log(1 - torch.exp(logp))
 
         def checkpoints_load_func(model, checkpoint):
-            model = GGGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
+            model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
             model.eval()
             return model
 
@@ -685,7 +685,7 @@ def main():
                     for i in range(5)]
 
         def checkpoints_load_func(model, checkpoint):
-            model = GGGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
+            model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
             model.eval()
             return model
 

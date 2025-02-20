@@ -8,9 +8,9 @@ if TYPE_CHECKING:
 import torch
 from torch import Tensor
 from tqdm import tqdm
-from .layers.linear import GGLinear, GGEmbedding
-from .layers.layer_norm import GGLayerNorm
-from .helper import find_GGlayers, grad_dotprod
+from .layers.linear import GCLinear, GCEmbedding
+from .layers.layer_norm import GCLayerNorm
+from .helper import find_GClayers, grad_dotprod
 
 from _dattri.func.projection import random_project
 
@@ -18,14 +18,14 @@ import time
 
 def setup_projectors(
         projector_kwargs: Dict[str, Any],
-        layer_name: List[Union[GGLinear, GGEmbedding, GGLayerNorm]],
+        layer_name: List[Union[GCLinear, GCEmbedding, GCLayerNorm]],
         mode: Optional[str] = "default",
     ) -> Tuple[Dict[str, Any], List[int], int]:
     """Setup projection dimensions and seeds for each layer.
 
     Args:
         projector_kwargs (Dict[str, Any]): projector's arguments.
-        layer_name (List[Union[GGLinear, GGEmbedding, GGLayerNorm]]): the list of layers to be projected.
+        layer_name (List[Union[GCLinear, GCEmbedding, GCLayerNorm]]): the list of layers to be projected.
         mode (Optional[str], optional): the data attribution's running mode. Defaults to "default".
 
     Returns:
@@ -43,11 +43,11 @@ def setup_projectors(
 
     layer_dim = []
     for layer in layer_name:
-        if isinstance(layer, GGLinear):
+        if isinstance(layer, GCLinear):
             layer_dim.append(layer.weight.shape[0] * layer.weight.shape[1])
-        elif isinstance(layer, GGEmbedding):
+        elif isinstance(layer, GCEmbedding):
             layer_dim.append(layer.embedding_dim * layer.num_embeddings)
-        elif isinstance(layer, GGLayerNorm):
+        elif isinstance(layer, GCLayerNorm):
             layer_dim.append(layer.normalized_shape[0])
         else:
             raise ValueError(f"Layer {layer} is not supported")
@@ -61,7 +61,7 @@ def setup_projectors(
     print(f"proj_dim: {proj_dim}")
     return projector_kwargs, proj_dim, proj_seed
 
-class GGGradDotAttributor():
+class GCGradDotAttributor():
     def __init__(
         self,
         model,
@@ -97,7 +97,7 @@ class GGGradDotAttributor():
         """
         self.model = model
         self.lr = lr
-        self.layer_name = find_GGlayers(model) if layer_name is None else layer_name
+        self.layer_name = find_GClayers(model) if layer_name is None else layer_name
         self.projector_kwargs, self.proj_dim, self.proj_seed = setup_projectors(projector_kwargs, self.layer_name, mode)
         self.mode = mode
         self.device = device
@@ -140,7 +140,7 @@ class GGGradDotAttributor():
 
             with torch.no_grad():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
-                    val_1, val_2 = layer.per_example_gradient(z_grad_full, per_sample=True)
+                    val_1, val_2 = layer.per_sample_grad(z_grad_full, per_sample=True)
                     if self.projector_kwargs is not None:
                         val_1_flatten = val_1.view(-1, val_1.shape[-1])
                         val_2_flatten = val_2.view(-1, val_2.shape[-1])
@@ -308,7 +308,7 @@ class GGGradDotAttributor():
 
                 with torch.no_grad():
                     for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
-                        val_1, val_2 = layer.per_example_gradient(z_grad_full, per_sample=True)
+                        val_1, val_2 = layer.per_sample_grad(z_grad_full, per_sample=True)
                         if self.projector_kwargs is not None:
                             val_1_flatten = val_1.view(-1, val_1.shape[-1])
                             val_2_flatten = val_2.view(-1, val_2.shape[-1])
@@ -404,7 +404,7 @@ class GGGradDotAttributor():
             with torch.no_grad():
                 for layer_id, (layer, z_grad_test) in enumerate(zip(self.layer_name, Z_grad_test)):
                     print(layer)
-                    val_1, val_2 = layer.per_example_gradient(z_grad_test, per_sample=True)
+                    val_1, val_2 = layer.per_sample_grad(z_grad_test, per_sample=True)
                     if self.projector_kwargs is not None:
                         val_1_flatten = val_1.view(-1, val_1.shape[-1])
                         val_2_flatten = val_2.view(-1, val_2.shape[-1])
@@ -455,7 +455,7 @@ class GGGradDotAttributor():
                     torch.cuda.synchronize()
                     start = time.time()
 
-                    if isinstance(layer, GGLinear):
+                    if isinstance(layer, GCLinear):
                         dLdZ_train, z_train = train_val_1[layer_id], train_val_2[layer_id]
                         dLdZ_val, z_val = val_1, val_2
 
@@ -465,7 +465,7 @@ class GGGradDotAttributor():
                         print(grad[:, :3])
 
                         result = grad_dotprod(dLdZ_train, z_train, dLdZ_val, z_val)
-                    elif isinstance(layer, GGLayerNorm):
+                    elif isinstance(layer, GCLayerNorm):
                         dLdgamma_train, dLdbeta_train = train_val_1[layer_id], train_val_2[layer_id]
                         dLdgamma_val, dLdbeta_val = val_1, val_2
 
@@ -543,7 +543,7 @@ class GGGradDotAttributor():
         # Calculate scores
         with torch.no_grad():
             for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_full)):
-                val_1, val_2 = layer.per_example_gradient(z_grad_full, per_sample=True)
+                val_1, val_2 = layer.per_sample_grad(z_grad_full, per_sample=True)
                 if self.projector_kwargs is not None:
                     val_1_flatten = val_1.view(-1, val_1.shape[-1])
                     val_2_flatten = val_2.view(-1, val_2.shape[-1])
@@ -688,7 +688,7 @@ class GGGradDotAttributor():
 
             with torch.no_grad():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad)):
-                    val_1, val_2 = layer.per_example_gradient(z_grad_full, per_sample=True)
+                    val_1, val_2 = layer.per_sample_grad(z_grad_full, per_sample=True)
 
                     # Calculate sparsity for each threshold
                     for threshold in thresholds:

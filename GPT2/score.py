@@ -60,7 +60,7 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from GG.GPT2LMHeadModel import GGGPT2LMHeadModel
+from GC.GPT2LMHeadModel import GCGPT2LMHeadModel
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
@@ -473,7 +473,7 @@ def main():
         )
 
     if args.model_name_or_path:
-        model = GGGPT2LMHeadModel.from_pretrained(
+        model = GCGPT2LMHeadModel.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
             config=config,
@@ -482,7 +482,7 @@ def main():
         )
     else:
         logger.info("Training new model from scratch")
-        model = GGGPT2LMHeadModel.from_config(config, trust_remote_code=args.trust_remote_code)
+        model = GCGPT2LMHeadModel.from_config(config, trust_remote_code=args.trust_remote_code)
 
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
@@ -564,7 +564,7 @@ def main():
 
     model_id = 0
     checkpoint = f"{args.output_dir}/{model_id}"
-    model = GGGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device) # reload the model with custom GG checkpoints
+    model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device) # reload the model with custom GC checkpoints
 
     train_dataset = lm_datasets["train"]
     test_dataset = lm_datasets["validation"]
@@ -668,18 +668,18 @@ def main():
     logger.info("***** Running attribution *****")
 
     if tda_method == "GD":
-        from GG.GD import GGGradDotAttributor
-        from GG.helper import find_GGlayers
-        from GG.layers.layer_norm import GGLayerNorm
-        from GG.layers.linear import GGEmbedding
+        from GC.GD import GCGradDotAttributor
+        from GC.helper import find_GClayers
+        from GC.layers.layer_norm import GCLayerNorm
+        from GC.layers.linear import GCEmbedding
 
         model.eval()
 
-        trainable_layers = find_GGlayers(model)
-        # trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GGLayerNorm) and not isinstance(layer, GGEmbedding)] # remove all LayerNorm and Embedding layers
-        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GGEmbedding)]
+        trainable_layers = find_GClayers(model)
+        # trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GCLayerNorm) and not isinstance(layer, GCEmbedding)] # remove all LayerNorm and Embedding layers
+        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GCEmbedding)]
 
-        attributor = GGGradDotAttributor(
+        attributor = GCGradDotAttributor(
             model=model,
             lr=1e-3,
             layer_name=trainable_layers,
@@ -715,18 +715,18 @@ def main():
 
         peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
     elif tda_method == "IF":
-        from GG.IF import GGIFAttributorKFAC
-        from GG.helper import find_GGlayers
-        from GG.layers.layer_norm import GGLayerNorm
-        from GG.layers.linear import GGEmbedding
+        from GC.IF import GCIFAttributorKFAC
+        from GC.helper import find_GClayers
+        from GC.layers.layer_norm import GCLayerNorm
+        from GC.layers.linear import GCEmbedding
 
         model.eval()
 
-        trainable_layers = find_GGlayers(model)
-        # trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GGLayerNorm) and not isinstance(layer, GGEmbedding)] # remove all LayerNorm and Embedding layers
-        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GGEmbedding)]
+        trainable_layers = find_GClayers(model)
+        # trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GCLayerNorm) and not isinstance(layer, GCEmbedding)] # remove all LayerNorm and Embedding layers
+        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GCEmbedding)]
 
-        attributor = GGIFAttributorKFAC(
+        attributor = GCIFAttributorKFAC(
             model=model,
             layer_name=trainable_layers,
             projector_kwargs=projector_kwargs,
@@ -773,7 +773,7 @@ def main():
                     for i in range(5)]
 
         def checkpoints_load_func(model, checkpoint):
-            model = GGGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
+            model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
             model.eval()
             return model
 
@@ -816,7 +816,7 @@ def main():
             return logp - torch.log(1 - torch.exp(logp))
 
         def checkpoints_load_func(model, checkpoint):
-            model = GGGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
+            model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
             model.eval()
             return model
 
@@ -881,7 +881,7 @@ def main():
     filename_parts = [f"{tda_mode}"]
 
     if args.proj is not None:
-        if tda_method == "GG":
+        if tda_method == "GD":
             if args.proj_dim_dist == "non-uniform":
                 filename_parts.append(f"{proj_method}-{proj_dim}(NU)")
             elif args.proj_dim_dist == "uniform":
