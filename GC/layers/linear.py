@@ -97,7 +97,8 @@ class GCLinear(nn.Linear):
 
         return grad_pre_activation, input_features
 
-    def per_sample_grad(self, grad_pre_activation, input_features):
+    @staticmethod
+    def grad_from_grad_comp(grad_pre_activation: Tensor, input_features: Tensor) -> Tensor:
         """
         Construct gradient from the gradient components.
 
@@ -114,7 +115,8 @@ class GCLinear(nn.Linear):
         grad = torch.einsum('BSA,BSC->BAC', grad_pre_activation, input_features).reshape(batch_size, -1)
         return grad
 
-    def grad_dot_prod_from_grad_comp(self, A1: Tensor, B1: Tensor, A2: Tensor, B2: Tensor) -> Tensor:
+    @staticmethod
+    def grad_dot_prod_from_grad_comp(A1: Tensor, B1: Tensor, A2: Tensor, B2: Tensor) -> Tensor:
         """Compute gradient sample norm for the weight matrix in a GClinear layer.
 
         Args:

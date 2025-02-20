@@ -63,7 +63,8 @@ class GCLayerNorm(nn.LayerNorm):
 
         return grad_weight, grad_bias
 
-    def grad_from_grad_comp(self, grad_weight, grad_bias):
+    @staticmethod
+    def grad_from_grad_comp(grad_weight: Tensor, grad_bias: Tensor) -> Tensor:
         """
         Construct gradient from the gradient components.
 
@@ -79,7 +80,8 @@ class GCLayerNorm(nn.LayerNorm):
         grad = torch.cat((grad_weight, grad_bias), dim=1)
         return grad
 
-    def grad_dot_prod_from_grad_comp(self, A1: Tensor, B1: Tensor, A2: Tensor, B2: Tensor) -> Tensor:
+    @staticmethod
+    def grad_dot_prod_from_grad_comp(A1: Tensor, B1: Tensor, A2: Tensor, B2: Tensor) -> Tensor:
         """Compute gradient sample norm for the weight matrix in a GCLayerNorm layer.
 
         Args:
