@@ -15,64 +15,64 @@ from _dattri.func.projection import random_project
 
 import time
 
-def setup_projectors(
-        projector_kwargs: Dict[str, Any],
-        layer_name: List[Union[GCLinear, GCEmbedding, GCLayerNorm]],
-        mode: Optional[str] = "default",
-    ) -> Tuple[Dict[str, Any], List[int], int]:
-    """Setup projection dimensions and seeds for each layer.
+# def setup_projectors(
+#         projector_kwargs: Dict[str, Any],
+#         layer_name: List[Union[GCLinear, GCEmbedding, GCLayerNorm]],
+#         mode: Optional[str] = "default",
+#     ) -> Tuple[Dict[str, Any], List[int], int]:
+#     """Setup projection dimensions and seeds for each layer.
 
-    Args:
-        projector_kwargs (Dict[str, Any]): projector's arguments.
-        layer_name (List[Union[GCLinear, GCEmbedding, GCLayerNorm]]): the list of layers to be projected.
-        mode (Optional[str], optional): the data attribution's running mode. Defaults to "default".
+#     Args:
+#         projector_kwargs (Dict[str, Any]): projector's arguments.
+#         layer_name (List[Union[GCLinear, GCEmbedding, GCLayerNorm]]): the list of layers to be projected.
+#         mode (Optional[str], optional): the data attribution's running mode. Defaults to "default".
 
-    Returns:
-        Tuple[Dict[str, Any], List[int], int]: processed projector's arguments, projection dimensions, and projection seed.
-    """
-    if projector_kwargs is None:
-        return None, None, None
-    proj_seed = projector_kwargs.get("proj_seed", 0)
-    proj_dim = projector_kwargs.get("proj_dim", 32)
-    proj_dim_dist = projector_kwargs.get("proj_dim_dist", "uniform")
+#     Returns:
+#         Tuple[Dict[str, Any], List[int], int]: processed projector's arguments, projection dimensions, and projection seed.
+#     """
+#     if projector_kwargs is None:
+#         return None, None, None
+#     proj_seed = projector_kwargs.get("proj_seed", 0)
+#     proj_dim = projector_kwargs.get("proj_dim", 32)
+#     proj_dim_dist = projector_kwargs.get("proj_dim_dist", "uniform")
 
-    projector_kwargs.pop("proj_seed")
-    projector_kwargs.pop("proj_dim")
-    projector_kwargs.pop("proj_dim_dist")
+#     projector_kwargs.pop("proj_seed")
+#     projector_kwargs.pop("proj_dim")
+#     projector_kwargs.pop("proj_dim_dist")
 
-    # Control the thresholding for different vals
-    projector_kwargs_1 = projector_kwargs.copy()
-    projector_kwargs_2 = projector_kwargs.copy()
+#     # Control the thresholding for different vals
+#     projector_kwargs_1 = projector_kwargs.copy()
+#     projector_kwargs_2 = projector_kwargs.copy()
 
-    # projector_kwargs_2["threshold"] = 0.0 #TODO threshold for gradient of pre-activation, which shouldn't be sparse so better set to 0
+#     # projector_kwargs_2["threshold"] = 0.0 #TODO threshold for gradient of pre-activation, which shouldn't be sparse so better set to 0
 
-    layer_dim_1 = []
-    layer_dim_2 = []
-    for layer in layer_name:
-        if isinstance(layer, GCLinear):
-            layer_dim_1.append(layer.weight.shape[0])
-            layer_dim_2.append(layer.weight.shape[0] * layer.weight.shape[1])
-        elif isinstance(layer, GCEmbedding):
-            layer_dim_1.append(layer.embedding_dim)
-            layer_dim_2.append(layer.embedding_dim * layer.num_embeddings)
-        elif isinstance(layer, GCLayerNorm):
-            layer_dim_1.append(layer.normalized_shape[0])
-            layer_dim_2.append(layer.normalized_shape[0])
-        else:
-            raise ValueError(f"Layer {layer} is not supported")
+#     layer_dim_1 = []
+#     layer_dim_2 = []
+#     for layer in layer_name:
+#         if isinstance(layer, GCLinear):
+#             layer_dim_1.append(layer.weight.shape[0])
+#             layer_dim_2.append(layer.weight.shape[0] * layer.weight.shape[1])
+#         elif isinstance(layer, GCEmbedding):
+#             layer_dim_1.append(layer.embedding_dim)
+#             layer_dim_2.append(layer.embedding_dim * layer.num_embeddings)
+#         elif isinstance(layer, GCLayerNorm):
+#             layer_dim_1.append(layer.normalized_shape[0])
+#             layer_dim_2.append(layer.normalized_shape[0])
+#         else:
+#             raise ValueError(f"Layer {layer} is not supported")
 
-    if mode == "default" and proj_dim_dist == "non-uniform":
-        total_dim_1 = sum(layer_dim_1)
-        total_dim_2 = sum(layer_dim_2)
-        proj_dim_1 = [int(proj_dim * dim / total_dim_1) for dim in layer_dim_1]
-        proj_dim_2 = [int(proj_dim * dim / total_dim_2) for dim in layer_dim_2]
-    elif mode in ["one_run", "iterate"] or (mode == "default" and proj_dim_dist == "uniform"):
-        proj_dim_1 = [proj_dim] * len(layer_dim_1)
-        proj_dim_2 = [proj_dim] * len(layer_dim_2)
+#     if mode == "default" and proj_dim_dist == "non-uniform":
+#         total_dim_1 = sum(layer_dim_1)
+#         total_dim_2 = sum(layer_dim_2)
+#         proj_dim_1 = [int(proj_dim * dim / total_dim_1) for dim in layer_dim_1]
+#         proj_dim_2 = [int(proj_dim * dim / total_dim_2) for dim in layer_dim_2]
+#     elif mode in ["one_run", "iterate"] or (mode == "default" and proj_dim_dist == "uniform"):
+#         proj_dim_1 = [proj_dim] * len(layer_dim_1)
+#         proj_dim_2 = [proj_dim] * len(layer_dim_2)
 
-    print(f"proj_dim for input: {proj_dim_1}")
-    print(f"proj_dim for gradient of pre-activation: {proj_dim_2}")
-    return (projector_kwargs_1, projector_kwargs_2), (proj_dim_1, proj_dim_2), proj_seed
+#     print(f"proj_dim for gradient component 1: {proj_dim_1}")
+#     print(f"proj_dim for gradient component 2: {proj_dim_2}")
+#     return (projector_kwargs_1, projector_kwargs_2), (proj_dim_1, proj_dim_2), proj_seed
 
 def eigen_stable_inverse(matrix: torch.Tensor, damping: float = 1e-5, eigen_threshold: float = 1e-6) -> torch.Tensor:
     """
@@ -119,7 +119,7 @@ class GCIFAttributorKFAC():
         self,
         model,
         layer_name: Optional[Union[str, List[str]]] = None,
-        projector_kwargs: Optional[Dict[str, Any]] = None,
+        # projector_kwargs: Optional[Dict[str, Any]] = None,
         damping = 1e-4,
         profile: bool = False,
         mode: str = "default",
@@ -138,7 +138,7 @@ class GCIFAttributorKFAC():
         """
         self.model = model
         self.layer_name = find_GClayers(model) if layer_name is None else layer_name
-        (self.projector_kwargs_1, self.projector_kwargs_2), (self.proj_dim_1, self.proj_dim_2), self.proj_seed = setup_projectors(projector_kwargs, self.layer_name, mode)
+        # (self.projector_kwargs_1, self.projector_kwargs_2), (self.proj_dim_1, self.proj_dim_2), self.proj_seed = setup_projectors(projector_kwargs, self.layer_name, mode)
         self.damping = damping
         self.profile = profile
         self.mode = mode
@@ -215,48 +215,6 @@ class GCIFAttributorKFAC():
             with torch.no_grad():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
                     grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_full, per_sample=True)
-
-                    # Apply projection if needed
-                    if self.projector_kwargs_1 is not None and self.projector_kwargs_2 is not None:
-                        # Time projection
-                        if self.profile:
-                            torch.cuda.synchronize()
-                            start_time = time.time()
-
-                        grad_comp_1_flatten = grad_comp_1.view(-1, grad_comp_1.shape[-1])
-                        grad_comp_2_flatten = grad_comp_2.view(-1, grad_comp_2.shape[-1])
-
-                        base_seed = self.proj_seed + int(1e4) * layer_id
-
-                        # input projector
-                        random_project_1 = random_project(
-                            grad_comp_1_flatten,
-                            grad_comp_1_flatten.shape[0],
-                            proj_seed=base_seed,
-                            proj_dim=self.proj_dim_1[layer_id],
-                            **self.projector_kwargs_1,
-                        )
-                        # output_grad projector
-                        random_project_2 = random_project(
-                            grad_comp_2_flatten,
-                            grad_comp_2_flatten.shape[0],
-                            proj_seed=base_seed + 1,
-                            proj_dim=self.proj_dim_2[layer_id],
-                            **self.projector_kwargs_2,
-                        )
-
-                        # when input is sequence
-                        if grad_comp_1.dim() == 3:
-                            grad_comp_1 = random_project_1(grad_comp_1_flatten).view(grad_comp_1.shape[0], grad_comp_1.shape[1], -1)
-                            grad_comp_2 = random_project_2(grad_comp_2_flatten).view(grad_comp_2.shape[0], grad_comp_2.shape[1], -1)
-                        else:
-                            grad_comp_1 = random_project_1(grad_comp_1_flatten)
-                            grad_comp_2 = random_project_2(grad_comp_2_flatten)
-
-                        if self.profile:
-                            torch.cuda.synchronize()
-                            self.profiling_stats['projection'] += time.time() - start_time
-
                     grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
 
                     if train_grad[layer_id] is None:
@@ -413,49 +371,6 @@ class GCIFAttributorKFAC():
                 for layer_id, (layer, z_grad_test) in enumerate(zip(self.layer_name, Z_grad_test)):
                     grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_test, per_sample=True)
 
-                    if self.projector_kwargs_1 is not None and self.projector_kwargs_2 is not None:
-                        if self.profile:
-                            torch.cuda.synchronize()
-                            start_time = time.time()
-
-                        grad_comp_1_flatten = grad_comp_1.view(-1, grad_comp_1.shape[-1])
-                        grad_comp_2_flatten = grad_comp_2.view(-1, grad_comp_2.shape[-1])
-
-                        base_seed = self.proj_seed + int(1e4) * layer_id
-
-                        # time projection
-                        torch.cuda.synchronize()
-                        start = time.time()
-
-                        # input projector
-                        random_project_1 = random_project(
-                            grad_comp_1_flatten,
-                            grad_comp_1_flatten.shape[0],
-                            proj_seed=base_seed,
-                            proj_dim=self.proj_dim_1[layer_id],
-                            **self.projector_kwargs_1,
-                        )
-                        # output_grad projector
-                        random_project_2 = random_project(
-                            grad_comp_2_flatten,
-                            grad_comp_2_flatten.shape[0],
-                            proj_seed=base_seed + 1,
-                            proj_dim=self.proj_dim_2[layer_id],
-                            **self.projector_kwargs_2,
-                        )
-
-                        # when input is sequence
-                        if grad_comp_1.dim() == 3:
-                            grad_comp_1 = random_project_1(grad_comp_1_flatten).view(grad_comp_1.shape[0], grad_comp_1.shape[1], -1)
-                            grad_comp_2 = random_project_2(grad_comp_2_flatten).view(grad_comp_2.shape[0], grad_comp_2.shape[1], -1)
-                        else:
-                            grad_comp_1 = random_project_1(grad_comp_1_flatten)
-                            grad_comp_2 = random_project_2(grad_comp_2_flatten)
-
-                        if self.profile:
-                            torch.cuda.synchronize()
-                            self.profiling_stats['projection'] += time.time() - start_time
-
                     test_grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
 
                     col_st = test_batch_idx * test_dataloader.batch_size
@@ -464,7 +379,7 @@ class GCIFAttributorKFAC():
                         len(test_dataloader.sampler),
                     )
 
-                    # Use grad_dotprod between pre-computed iHVP components and test gradients
+                    # Compute the influence function score from pre-computed iHVP components and test gradients
                     result = torch.matmul(ihvp_train[layer_id], test_grad.t())
 
                     IF_score[:, col_st:col_ed] += result

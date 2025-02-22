@@ -4,6 +4,8 @@ import torch.nn.functional as F
 
 from torch import Tensor
 
+from _dattri.func.projection import random_project
+
 def chunked_matmul(A1: Tensor, A2: Tensor, chunk_size=128) -> Tensor:
     """Chuncked matrix multiplication for memory efficiency.
 
@@ -47,6 +49,9 @@ class GCLinear(nn.Linear):
         self.layer_input = None
         self.has_bias = bias
 
+        self.projector_grad_comp_1 = None
+        self.projector_grad_comp_2 = None
+
     def forward(self, input):
         self.layer_input = input
         out = F.linear(input, self.weight, self.bias)
@@ -57,6 +62,7 @@ class GCLinear(nn.Linear):
     def grad_comp(self, grad_pre_activation, per_sample=True):
         """
         Return the components of the gradient of parameters (for both 2D and 3D inputs).
+        If projector is set, apply the projector to the gradient components.
 
         For Linear, gradient can be decomposed into the gradient of the pre_activation and the input.
 
@@ -94,7 +100,55 @@ class GCLinear(nn.Linear):
             input_features = input_features.reshape(batch_size, seq_length, -1)
             grad_pre_activation = grad_pre_activation.reshape(batch_size, seq_length, -1)
 
+        # print(f"Linear: {grad_pre_activation.shape}", f"Input: {input_features.shape}")
+
+        if self.projector_grad_comp_1 is not None:
+            grad_pre_activation_flatten = grad_pre_activation.view(-1, grad_pre_activation.shape[-1])
+
+            if is_3d:
+                grad_pre_activation = self.projector_grad_comp_1(grad_pre_activation_flatten).view(grad_pre_activation.shape[0], grad_pre_activation.shape[1], -1)
+            else:
+                grad_pre_activation = self.projector_grad_comp_1(grad_pre_activation_flatten)
+
+        if self.projector_grad_comp_2 is not None:
+            input_features_flatten = input_features.view(-1, input_features.shape[-1])
+
+            if is_3d:
+                input_features = self.projector_grad_comp_2(input_features_flatten).view(input_features.shape[0], input_features.shape[1], -1)
+            else:
+                input_features = self.projector_grad_comp_2(input_features_flatten)
+
         return grad_pre_activation, input_features
+
+    def set_projector(self, base_seed, proj_dim_1, proj_dim_2, projector_kwargs_1, projector_kwargs_2):
+        """Set the projection function for this layer.
+
+        Args:
+            projector_fn_1: A callable that projects the first gradient components (gradient of pre-activation)
+            projector_fn_1: A callable that projects the second gradient components (input features)
+        """
+        if self.pre_activation is None or self.layer_input is None:
+            raise ValueError("Layer input and pre-activation must be set before setting projectors.")
+
+        dumb_grad_comp_1 = torch.zeros_like(self.pre_activation.view(-1, self.pre_activation.shape[-1]))
+
+        self.projector_grad_comp_1 = random_project(
+            dumb_grad_comp_1,
+            dumb_grad_comp_1.shape[0],
+            proj_seed=base_seed,
+            proj_dim=proj_dim_1,
+            **projector_kwargs_1,
+        )
+
+        dumb_grad_comp_2 = torch.zeros_like(self.layer_input.view(-1, self.layer_input.shape[-1]))
+
+        self.projector_grad_comp_2 = random_project(
+            dumb_grad_comp_2,
+            dumb_grad_comp_2.shape[0],
+            proj_seed=base_seed + 1,
+            proj_dim=proj_dim_2,
+            **projector_kwargs_2,
+        )
 
     @staticmethod
     def grad_from_grad_comp(grad_pre_activation: Tensor, input_features: Tensor) -> Tensor:
@@ -167,6 +221,14 @@ class GCEmbedding(nn.Embedding):
         # Simply call the parent class's constructor
         super().__init__(*args, **kwargs)
 
+    def set_projector(self, base_seed, proj_dim_1, proj_dim_2, projector_kwargs_1, projector_kwargs_2):
+        """Set the projection function for this layer.
+
+        Args:
+            projector_fn_1: A callable that projects the first gradient components (gradient of weight)
+            projector_fn_1: A callable that projects the second gradient components (gradient of bias)
+        """
+        pass
 # class GCEmbedding(nn.Embedding):
 #     def __init__(self, num_embeddings, embedding_dim):
 #         super(GCEmbedding, self).__init__(num_embeddings, embedding_dim)

@@ -3,6 +3,8 @@ import torch.nn as nn
 
 from torch import Tensor
 
+from _dattri.func.projection import random_project
+
 class GCLayerNorm(nn.LayerNorm):
     """
     Gradient Component (GC) LayerNorm layer implementation with gradient factor calculation support.
@@ -61,7 +63,39 @@ class GCLayerNorm(nn.LayerNorm):
                 grad_weight = torch.sum(grad_pre_activation * normalized, dim=0)
                 grad_bias = torch.sum(grad_pre_activation, dim=0)
 
+        if self.projector_grad_comp_1 is not None:
+            grad_weight = self.projector_grad_comp_1(grad_weight)
+        if self.projector_grad_comp_2 is not None:
+            grad_bias = self.projector_grad_comp_2(grad_bias)
+
         return grad_weight, grad_bias
+
+    def set_projector(self, base_seed, proj_dim_1, proj_dim_2, projector_kwargs_1, projector_kwargs_2):
+        """Set the projection function for this layer.
+
+        Args:
+            projector_fn_1: A callable that projects the first gradient components (gradient of weight)
+            projector_fn_1: A callable that projects the second gradient components (gradient of bias)
+        """
+        # Create dummy tensors to get the shape
+        dumb_grad_comp_1 = torch.zeros((self.normalized.shape[0], self.normalized.shape[-1]))
+        dumb_grad_comp_2 = torch.zeros((self.normalized.shape[0], self.normalized.shape[-1]))
+
+        self.projector_grad_comp_1 = random_project(
+            dumb_grad_comp_1,
+            dumb_grad_comp_1.shape[0],
+            proj_seed=base_seed,
+            proj_dim=proj_dim_1,
+            **projector_kwargs_1,
+        )
+
+        self.projector_grad_comp_2 = random_project(
+            dumb_grad_comp_2,
+            dumb_grad_comp_2.shape[0],
+            proj_seed=base_seed + 1,
+            proj_dim=proj_dim_2,
+            **projector_kwargs_2,
+        )
 
     @staticmethod
     def grad_from_grad_comp(grad_weight: Tensor, grad_bias: Tensor) -> Tensor:

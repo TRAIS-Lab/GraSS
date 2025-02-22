@@ -67,7 +67,7 @@ class GCGradDotAttributor():
         model,
         lr: float = 1e-3,
         layer_name: Optional[Union[str, List[str]]] = None,
-        projector_kwargs: Optional[Dict[str, Any]] = None,
+        # projector_kwargs: Optional[Dict[str, Any]] = None,
         mode: str = "default",
         device: str = 'cpu'
     ) -> None:
@@ -98,7 +98,7 @@ class GCGradDotAttributor():
         self.model = model
         self.lr = lr
         self.layer_name = find_GClayers(model) if layer_name is None else layer_name
-        self.projector_kwargs, self.proj_dim, self.proj_seed = setup_projectors(projector_kwargs, self.layer_name, mode)
+        # self.projector_kwargs, self.proj_dim, self.proj_seed = setup_projectors(projector_kwargs, self.layer_name, mode)
         self.mode = mode
         self.device = device
         self.full_train_dataloader = None
@@ -141,37 +141,6 @@ class GCGradDotAttributor():
             with torch.no_grad():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
                     grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_full, per_sample=True)
-                    if self.projector_kwargs is not None:
-                        grad_comp_1_flatten = grad_comp_1.view(-1, grad_comp_1.shape[-1])
-                        grad_comp_2_flatten = grad_comp_2.view(-1, grad_comp_2.shape[-1])
-
-                        base_seed = self.proj_seed + int(1e4) * layer_id
-                        proj_dim = self.proj_dim[layer_id]
-
-                        # input projector
-                        random_project_1 = random_project(
-                            grad_comp_1_flatten,
-                            grad_comp_1_flatten.shape[0],
-                            proj_seed=base_seed,
-                            proj_dim=proj_dim,
-                            **self.projector_kwargs,
-                        )
-                        # output_grad projector
-                        random_project_2 = random_project(
-                            grad_comp_2_flatten,
-                            grad_comp_2_flatten.shape[0],
-                            proj_seed=base_seed + 1,
-                            proj_dim=proj_dim,
-                            **self.projector_kwargs,
-                        )
-
-                        # when input is sequence
-                        if grad_comp_1.dim() == 3:
-                            grad_comp_1 = random_project_1(grad_comp_1_flatten).view(grad_comp_1.shape[0], grad_comp_1.shape[1], -1)
-                            grad_comp_2 = random_project_2(grad_comp_2_flatten).view(grad_comp_2.shape[0], grad_comp_2.shape[1], -1)
-                        else:
-                            grad_comp_1 = random_project_1(grad_comp_1_flatten)
-                            grad_comp_2 = random_project_2(grad_comp_2_flatten)
 
                     if self.cached_train_grad_comp_1[layer_id] is None:
                         total_samples = len(self.full_train_dataloader.sampler)
@@ -308,43 +277,6 @@ class GCGradDotAttributor():
                 with torch.no_grad():
                     for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
                         grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_full, per_sample=True)
-                        if self.projector_kwargs is not None:
-                            grad_comp_1_flatten = grad_comp_1.view(-1, grad_comp_1.shape[-1])
-                            grad_comp_2_flatten = grad_comp_2.view(-1, grad_comp_2.shape[-1])
-
-                            base_seed = self.proj_seed + int(1e4) * layer_id
-                            proj_dim = self.proj_dim[layer_id]
-
-                            # time projection
-                            torch.cuda.synchronize()
-                            start = time.time()
-
-                            random_project_1 = random_project(
-                                grad_comp_1_flatten,
-                                grad_comp_1_flatten.shape[0],
-                                proj_seed=base_seed,
-                                proj_dim=proj_dim,
-                                **self.projector_kwargs,
-                            )
-                            random_project_2 = random_project(
-                                grad_comp_2_flatten,
-                                grad_comp_2_flatten.shape[0],
-                                proj_seed=base_seed + 1,
-                                proj_dim=proj_dim,
-                                **self.projector_kwargs,
-                            )
-
-                            # when input is sequence
-                            if grad_comp_1.dim() == 3:
-                                grad_comp_1 = random_project_1(grad_comp_1_flatten).view(grad_comp_1.shape[0], grad_comp_1.shape[1], -1)
-                                grad_comp_2 = random_project_2(grad_comp_2_flatten).view(grad_comp_2.shape[0], grad_comp_2.shape[1], -1)
-                            else:
-                                grad_comp_1 = random_project_1(grad_comp_1_flatten)
-                                grad_comp_2 = random_project_2(grad_comp_2_flatten)
-
-                            torch.cuda.synchronize()
-                            end = time.time()
-                            time_projection += end - start
 
                         if train_grad_comp_1[layer_id] is None:
                             total_samples = len(train_dataloader.sampler)
@@ -399,49 +331,6 @@ class GCGradDotAttributor():
             with torch.no_grad():
                 for layer_id, (layer, z_grad_test) in enumerate(zip(self.layer_name, Z_grad_test)):
                     grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_test, per_sample=True)
-                    if self.projector_kwargs is not None:
-                        grad_comp_1_flatten = grad_comp_1.view(-1, grad_comp_1.shape[-1])
-                        grad_comp_2_flatten = grad_comp_2.view(-1, grad_comp_2.shape[-1])
-
-                        base_seed = self.proj_seed + int(1e4) * layer_id
-                        proj_dim = self.proj_dim[layer_id]
-
-                        # time projection
-                        torch.cuda.synchronize()
-                        start = time.time()
-
-                        random_project_1 = random_project(
-                            grad_comp_1_flatten,
-                            grad_comp_1_flatten.shape[0],
-                            proj_seed=base_seed,
-                            proj_dim=proj_dim,
-                            **self.projector_kwargs,
-                        )
-                        random_project_2 = random_project(
-                            grad_comp_2_flatten,
-                            grad_comp_2_flatten.shape[0],
-                            proj_seed=base_seed + 1,
-                            proj_dim=proj_dim,
-                            **self.projector_kwargs,
-                        )
-
-                        # when input is sequence
-                        if grad_comp_1.dim() == 3:
-                            grad_comp_1 = random_project_1(grad_comp_1_flatten).view(grad_comp_1.shape[0], grad_comp_1.shape[1], -1)
-                            grad_comp_2 = random_project_2(grad_comp_2_flatten).view(grad_comp_2.shape[0], grad_comp_2.shape[1], -1)
-                        else:
-                            grad_comp_1 = random_project_1(grad_comp_1_flatten)
-                            grad_comp_2 = random_project_2(grad_comp_2_flatten)
-
-                        torch.cuda.synchronize()
-                        end = time.time()
-                        time_projection += end - start
-
-                    col_st = test_batch_idx * test_dataloader.batch_size
-                    col_ed = min(
-                        (test_batch_idx + 1) * test_dataloader.batch_size,
-                        len(test_dataloader.sampler),
-                    )
 
                     # time inner product
                     torch.cuda.synchronize()
@@ -453,6 +342,11 @@ class GCGradDotAttributor():
                     end = time.time()
                     time_inner_product += end - start
 
+                    col_st = test_batch_idx * test_dataloader.batch_size
+                    col_ed = min(
+                        (test_batch_idx + 1) * test_dataloader.batch_size,
+                        len(test_dataloader.sampler),
+                    )
                     grad_dot[:, col_st:col_ed] += result * self.lr
 
         print(f"Time for projection: {time_projection}")
@@ -517,37 +411,6 @@ class GCGradDotAttributor():
         with torch.no_grad():
             for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_full)):
                 grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_full, per_sample=True)
-                if self.projector_kwargs is not None:
-                    grad_comp_1_flatten = grad_comp_1.view(-1, grad_comp_1.shape[-1])
-                    grad_comp_2_flatten = grad_comp_2.view(-1, grad_comp_2.shape[-1])
-
-                    base_seed = self.proj_seed + int(1e4) * layer_id
-                    proj_dim = self.proj_dim[layer_id]
-
-                    # input projector
-                    random_project_1 = random_project(
-                        grad_comp_1_flatten,
-                        grad_comp_1_flatten.shape[0],
-                        proj_seed=base_seed,
-                        proj_dim=proj_dim,
-                        **self.projector_kwargs,
-                    )
-                    # output_grad projector
-                    random_project_2 = random_project(
-                        grad_comp_2_flatten,
-                        grad_comp_2_flatten.shape[0],
-                        proj_seed=base_seed + 1,
-                        proj_dim=proj_dim,
-                        **self.projector_kwargs,
-                    )
-
-                    # when input is sequence
-                    if grad_comp_1.dim() == 3:
-                        grad_comp_1 = random_project_1(grad_comp_1_flatten).view(grad_comp_1.shape[0], grad_comp_1.shape[1], -1)
-                        grad_comp_2 = random_project_2(grad_comp_2_flatten).view(grad_comp_2.shape[0], grad_comp_2.shape[1], -1)
-                    else:
-                        grad_comp_1 = random_project_1(grad_comp_1_flatten)
-                        grad_comp_2 = random_project_2(grad_comp_2_flatten)
 
                 result = layer.grad_dotprod(grad_comp_1[:num_train], grad_comp_2[:num_train], grad_comp_1[num_train:], grad_comp_2[num_train:])
 

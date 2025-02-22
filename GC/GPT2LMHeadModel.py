@@ -120,6 +120,64 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
             raise ValueError(f"Unsupported layer type for LayerNorm: {type(old_layer)}")
         return new_layer
 
+    def set_projectors(self, mode, projector_kwargs):
+        """
+        Set projectors for all GC layers in the model.
+
+        Args:
+            projector_factory: A function that takes a layer as input and returns
+                            an appropriate projector function for that layer.
+                            If None, a default projector will be used.
+        """
+        if projector_kwargs is None:
+            return
+
+        proj_seed = projector_kwargs.get('proj_seed', 0)
+        proj_dim = projector_kwargs.get("proj_dim", 32)
+        proj_dim_dist = projector_kwargs.get("proj_dim_dist", "uniform")
+
+        projector_kwargs.pop("proj_seed")
+        projector_kwargs.pop("proj_dim")
+        projector_kwargs.pop("proj_dim_dist")
+
+        # Control the thresholding for different vals
+        projector_kwargs_1 = projector_kwargs.copy()
+        projector_kwargs_2 = projector_kwargs.copy()
+
+        # projector_kwargs_2["threshold"] = 0.0 #TODO threshold for gradient of pre-activation, which shouldn't be sparse so better set to 0
+
+        layer_dim_1 = []
+        layer_dim_2 = []
+        for layer_id, layer in enumerate(self.modules()):
+            if isinstance(layer, GCLinear):
+                layer_dim_1.append(layer.weight.shape[0])
+                layer_dim_2.append(layer.weight.shape[0] * layer.weight.shape[1])
+            elif isinstance(layer, GCEmbedding):
+                layer_dim_1.append(layer.embedding_dim)
+                layer_dim_2.append(layer.embedding_dim * layer.num_embeddings)
+            elif isinstance(layer, GCLayerNorm):
+                layer_dim_1.append(layer.normalized_shape[0])
+                layer_dim_2.append(layer.normalized_shape[0])
+            else:
+                layer_dim_1.append(0)
+                layer_dim_2.append(0)
+
+        if mode == "default" and proj_dim_dist == "non-uniform":
+            total_dim_1 = sum(layer_dim_1)
+            total_dim_2 = sum(layer_dim_2)
+            proj_dim_1 = [int(proj_dim * dim / total_dim_1) for dim in layer_dim_1]
+            proj_dim_2 = [int(proj_dim * dim / total_dim_2) for dim in layer_dim_2]
+        elif mode in ["one_run", "iterate"] or (mode == "default" and proj_dim_dist == "uniform"):
+            proj_dim_1 = [proj_dim] * len(layer_dim_1)
+            proj_dim_2 = [proj_dim] * len(layer_dim_2)
+
+        # Apply projectors to all GC layers
+        for module_id, module in enumerate(self.modules()):
+            if isinstance(module, GCLinear) or isinstance(module, GCEmbedding) or isinstance(module, GCLayerNorm):
+                base_seed = proj_seed + int(1e4) * module_id
+                module.set_projector(base_seed, proj_dim_1[module_id], proj_dim_2[module_id], projector_kwargs_1, projector_kwargs_2)
+
+
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, *model_args, **kwargs):
         """

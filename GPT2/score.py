@@ -299,9 +299,10 @@ def parse_args():
         help="Debug mode.",
     )
     parser.add_argument(
-        "--test",
-        action="store_true",
-        help="Testing mode.",
+        "--setting",
+        type=str,
+        default="Linear",
+        help="Ad-hoc directory name for the training setting to save the results.",
     )
 
     args = parser.parse_args()
@@ -562,10 +563,6 @@ def main():
     device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
 
-    model_id = 0
-    checkpoint = f"{args.output_dir}/{model_id}"
-    model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device) # reload the model with custom GC checkpoints
-
     train_dataset = lm_datasets["train"]
     test_dataset = lm_datasets["validation"]
 
@@ -665,24 +662,48 @@ def main():
 
         logger.info(f"Projector: {projector_kwargs}")
 
+    logger.info(f"Setting: {args.setting}")
+
     logger.info("***** Running attribution *****")
+
+
+    model_id = 0
+    checkpoint = f"{args.output_dir}/{model_id}"
+    model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device) # reload the model with custom GC checkpoints
+    # test the model with the first batch
+    for batch in train_dataloader:
+        model(batch["input_ids"].cuda(device), attention_mask=batch["attention_mask"].cuda(device), labels=batch["labels"].cuda(device))
+        break
+
+    model.set_projectors(tda_mode, projector_kwargs)
 
     if tda_method == "GD":
         from GC.GD import GCGradDotAttributor
         from GC.helper import find_GClayers
         from GC.layers.layer_norm import GCLayerNorm
-        from GC.layers.linear import GCEmbedding
+        from GC.layers.linear import GCLinear, GCEmbedding
 
         model.eval()
 
         trainable_layers = find_GClayers(model)
-        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GCEmbedding)] # Currently Embedding layer is not supported
+        if args.setting == "Linear":
+            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear)]
+        elif args.setting == "Linear_LayerNorm":
+            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear) or isinstance(layer, GCLayerNorm)]
+        elif args.setting == "all_but_last_Linear":
+            trainable_layers = trainable_layers[:-1]
+            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear)]
+        elif args.setting == "all_but_last_Linear_and_LayerNorm":
+            trainable_layers = trainable_layers[:-1]
+            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear) or isinstance(layer, GCLayerNorm)]
+        else:
+            raise ValueError("Invalid setting now. Choose from 'Linear', 'Linear_LayerNorm', 'all_but_last_Linear', 'all_but_last_Linear_and_LayerNorm'.")
 
         attributor = GCGradDotAttributor(
             model=model,
             lr=1e-3,
             layer_name=trainable_layers,
-            projector_kwargs=projector_kwargs,
+            # projector_kwargs=projector_kwargs,
             mode=tda_mode,
             device=device,
         )
@@ -717,17 +738,28 @@ def main():
         from GC.IF import GCIFAttributorKFAC
         from GC.helper import find_GClayers
         from GC.layers.layer_norm import GCLayerNorm
-        from GC.layers.linear import GCEmbedding
+        from GC.layers.linear import GCLinear, GCEmbedding
 
         model.eval()
 
         trainable_layers = find_GClayers(model)
-        trainable_layers = [layer for layer in trainable_layers if not isinstance(layer, GCEmbedding)] # Currently Embedding layer is not supported
+        if args.setting == "Linear":
+            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear)]
+        elif args.setting == "Linear_LayerNorm":
+            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear) or isinstance(layer, GCLayerNorm)]
+        elif args.setting == "all_but_last_Linear":
+            trainable_layers = trainable_layers[:-1]
+            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear)]
+        elif args.setting == "all_but_last_Linear_and_LayerNorm":
+            trainable_layers = trainable_layers[:-1]
+            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear) or isinstance(layer, GCLayerNorm)]
+        else:
+            raise ValueError("Invalid setting now. Choose from 'Linear', 'Linear_LayerNorm', 'all_but_last_Linear', 'all_but_last_Linear_and_LayerNorm'.")
 
         attributor = GCIFAttributorKFAC(
             model=model,
             layer_name=trainable_layers,
-            projector_kwargs=projector_kwargs,
+            # projector_kwargs=projector_kwargs,
             profile = args.profile,
             mode=tda_mode,
             device=device,
@@ -895,18 +927,13 @@ def main():
     training_setting = args.output_dir.split("/")[-1]
     # Join parts and save the file
     if args.debug:
-        filename = f"./results/{training_setting}/debug/{tda_method}/{'_'.join(filename_parts)}.pt"
-    elif args.test:
-        filename = f"./results/{training_setting}/test/{tda_method}/{'_'.join(filename_parts)}.pt"
+        filename = f"./results/{training_setting}/debug/{tda_method}/{args.setting}/{'_'.join(filename_parts)}.pt"
     else:
-        filename = f"./results/{training_setting}/{tda_method}/{'_'.join(filename_parts)}.pt"
+        filename = f"./results/{training_setting}/{tda_method}/{args.setting}/{'_'.join(filename_parts)}.pt"
     torch.save(score, filename)
 
     if args.profile:
-        if args.test:
-            filename = f"./results/{training_setting}/test/{tda_method}/{'_'.join(filename_parts)}_profile.pt"
-        else:
-            filename = f"./results/{training_setting}/{tda_method}/{'_'.join(filename_parts)}_profile.pt"
+        filename = f"./results/{training_setting}/{tda_method}/{args.setting}/{'_'.join(filename_parts)}_profile.pt"
         torch.save(profile, filename)
 
 

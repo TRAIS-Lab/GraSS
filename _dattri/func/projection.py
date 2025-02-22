@@ -329,9 +329,7 @@ class CudaProjector(AbstractProjector):
                 (the fast_jl library)."
                 raise ModuleNotFoundError(msg) from None
         elif self.method == "SJLT":
-            # test run at init time if projection goes through
-            # SJLT(torch.zeros(8, 1_000, device="cuda"), 512, c=5)
-            pass
+            self.pos_and_neg_indices = backward_SJLT_indices(feature_dim, proj_dim, c=1, device=device, seed=self.seed)
 
         self.threshold = threshold
 
@@ -400,14 +398,28 @@ class CudaProjector(AbstractProjector):
                     raise RuntimeError(msg) from e
                 raise e from None
         elif self.method == "SJLT":
-            result = SJLT(
+            result = SJLT_reverse(
                 features,
                 self.proj_dim,
                 self.threshold,
-                seed=self.seed + int(1e4) * ensemble_id,
-                batch_size=effective_batch_size,
-                c=1,
+                self.pos_and_neg_indices,
+                c=1
             )
+            # result = SJLT(
+            #     features,
+            #     self.proj_dim,
+            #     self.threshold,
+            #     seed=self.seed + int(1e4) * ensemble_id,
+            #     batch_size=effective_batch_size,
+            #     c=1,
+            # )
+        elif self.method == "Gaussian":
+            features = torch.where(
+                    torch.abs(features) < self.threshold,
+                    torch.zeros_like(features),
+                    features,
+                )
+            raise NotImplementedError("Gaussian projection is not implemented yet.")#TODO
 
         return result
 
@@ -890,14 +902,15 @@ def make_random_projector(
             except (ImportError, RuntimeError, AttributeError):
                 projector = BasicProjector
                 raise
+
+            proj_type = ProjectionType.rademacher
         elif method == "SJLT":
-            # test_feature = torch.ones(1, feature_dim).cuda()
-            # SJLT(test_feature, proj_dim, c=5)
-            pass
+            proj_type = ProjectionType.rademacher
+        elif method == "Gaussian":
+            proj_type = ProjectionType.normal
 
         projector = CudaProjector
         using_cuda_projector = True
-        proj_type = ProjectionType.rademacher
 
     if using_cuda_projector:
         # TODO: make this support dict input
@@ -1191,10 +1204,6 @@ def sjlt(vecs, proj_dim, threshold, rand_indices, rand_signs, c, blow_up):
 
     values = vecs[batch_idx, input_idx]
 
-    # Old implementation
-    # scaled_vals = values.unsqueeze(1) * rand_signs[input_idx]
-    # final_indices = (batch_idx.view(-1, 1) * (proj_dim * blow_up) + rand_indices[input_idx]).flatten()
-
     scaled_vals = values.repeat_interleave(c) * rand_signs[input_idx].flatten()
     final_indices = batch_idx.repeat_interleave(c) * (proj_dim * blow_up) + rand_indices[input_idx].flatten()
 
@@ -1206,7 +1215,7 @@ def sjlt(vecs, proj_dim, threshold, rand_indices, rand_signs, c, blow_up):
     vecs_p = vecs_p.view(batch_size, proj_dim, blow_up).sum(dim=2)
     return vecs_p / (c ** 0.5)
 
-def SJLT_reverse(batch_vec, proj_dim, pos_indices=None, neg_indices=None, c=5):
+def SJLT_reverse(batch_vec, proj_dim, threshold, pos_and_neg_indices=None, c=5):
     """
     Backward SJLT implementation that processes entire batch at once.
 
@@ -1221,6 +1230,11 @@ def SJLT_reverse(batch_vec, proj_dim, pos_indices=None, neg_indices=None, c=5):
         torch.Tensor: Projected tensor of shape [batch_size, proj_dim]
     """
     batch_size, original_dim = batch_vec.size()
+    if pos_and_neg_indices is None:
+        pass
+    else:
+        pos_indices, neg_indices = pos_and_neg_indices
+
     max_pos_len = pos_indices.size(1) if pos_indices is not None else 0
     max_neg_len = neg_indices.size(1) if neg_indices is not None else 0
 
@@ -1247,7 +1261,7 @@ def SJLT_reverse(batch_vec, proj_dim, pos_indices=None, neg_indices=None, c=5):
 
     return batch_vec_p / (c ** 0.5)
 
-def backward_SJLT_indices(original_dim, proj_dim, c, device, rand_indices=None, rand_signs=None):
+def backward_SJLT_indices(original_dim, proj_dim, c, device, rand_indices_and_signs=None, seed=0):
     """
     Vectorized computation of SJLT contribution indices.
 
@@ -1260,9 +1274,9 @@ def backward_SJLT_indices(original_dim, proj_dim, c, device, rand_indices=None, 
         rand_signs (torch.Tensor): Optional precomputed random signs [original_dim, c]
     """
     # Generate random indices and signs if not provided
-    if rand_indices is None:
+    if rand_indices_and_signs is None:
+        torch.manual_seed(seed)
         rand_indices = torch.randint(proj_dim, (original_dim, c), device=device)
-    if rand_signs is None:
         rand_signs = torch.randint(0, 2, (original_dim, c), device=device) * 2 - 1
 
     # Create index pairs for sorting
@@ -1316,4 +1330,4 @@ def backward_SJLT_indices(original_dim, proj_dim, c, device, rand_indices=None, 
         for i, (output_idx, count, start) in enumerate(zip(neg_unique, neg_counts, neg_start_idx)):
             neg_indices[output_idx, :count] = neg_input_sorted[start:start + count]
 
-    return pos_indices, neg_indices
+    return (pos_indices, neg_indices)
