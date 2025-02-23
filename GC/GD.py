@@ -8,58 +8,11 @@ if TYPE_CHECKING:
 import torch
 from torch import Tensor
 from tqdm import tqdm
-from .layers.linear import GCLinear, GCEmbedding
-from .layers.layer_norm import GCLayerNorm
 from .helper import find_GClayers
 
 from _dattri.func.projection import random_project
 
 import time
-
-def setup_projectors(
-        projector_kwargs: Dict[str, Any],
-        layer_name: List[Union[GCLinear, GCEmbedding, GCLayerNorm]],
-        mode: Optional[str] = "default",
-    ) -> Tuple[Dict[str, Any], List[int], int]:
-    """Setup projection dimensions and seeds for each layer.
-
-    Args:
-        projector_kwargs (Dict[str, Any]): projector's arguments.
-        layer_name (List[Union[GCLinear, GCEmbedding, GCLayerNorm]]): the list of layers to be projected.
-        mode (Optional[str], optional): the data attribution's running mode. Defaults to "default".
-
-    Returns:
-        Tuple[Dict[str, Any], List[int], int]: processed projector's arguments, projection dimensions, and projection seed.
-    """
-    if projector_kwargs is None:
-        return None, None, None
-    proj_seed = projector_kwargs.get("proj_seed", 0)
-    proj_dim = projector_kwargs.get("proj_dim", 512)
-    proj_dim_dist = projector_kwargs.get("proj_dim_dist", "uniform")
-
-    projector_kwargs.pop("proj_seed")
-    projector_kwargs.pop("proj_dim")
-    projector_kwargs.pop("proj_dim_dist")
-
-    layer_dim = []
-    for layer in layer_name:
-        if isinstance(layer, GCLinear):
-            layer_dim.append(layer.weight.shape[0] * layer.weight.shape[1])
-        elif isinstance(layer, GCEmbedding):
-            layer_dim.append(layer.embedding_dim * layer.num_embeddings)
-        elif isinstance(layer, GCLayerNorm):
-            layer_dim.append(layer.normalized_shape[0])
-        else:
-            raise ValueError(f"Layer {layer} is not supported")
-
-    if mode == "default" and proj_dim_dist == "non-uniform":
-        total_dim = sum(layer_dim)
-        proj_dim = [int(proj_dim * dim / total_dim) for dim in layer_dim]
-    elif mode in ["one_run", "iterate"] or (mode == "default" and proj_dim_dist == "uniform"):
-        proj_dim = [proj_dim] * len(layer_dim)
-
-    print(f"proj_dim: {proj_dim}")
-    return projector_kwargs, proj_dim, proj_seed
 
 class GCGradDotAttributor():
     def __init__(
@@ -98,7 +51,6 @@ class GCGradDotAttributor():
         self.model = model
         self.lr = lr
         self.layer_name = find_GClayers(model) if layer_name is None else layer_name
-        # self.projector_kwargs, self.proj_dim, self.proj_seed = setup_projectors(projector_kwargs, self.layer_name, mode)
         self.mode = mode
         self.device = device
         self.full_train_dataloader = None

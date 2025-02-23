@@ -7,72 +7,9 @@ if TYPE_CHECKING:
 
 import torch
 from tqdm import tqdm
-from .layers.linear import GCLinear, GCEmbedding
-from .layers.layer_norm import GCLayerNorm
 from .helper import find_GClayers
 
-from _dattri.func.projection import random_project
-
 import time
-
-# def setup_projectors(
-#         projector_kwargs: Dict[str, Any],
-#         layer_name: List[Union[GCLinear, GCEmbedding, GCLayerNorm]],
-#         mode: Optional[str] = "default",
-#     ) -> Tuple[Dict[str, Any], List[int], int]:
-#     """Setup projection dimensions and seeds for each layer.
-
-#     Args:
-#         projector_kwargs (Dict[str, Any]): projector's arguments.
-#         layer_name (List[Union[GCLinear, GCEmbedding, GCLayerNorm]]): the list of layers to be projected.
-#         mode (Optional[str], optional): the data attribution's running mode. Defaults to "default".
-
-#     Returns:
-#         Tuple[Dict[str, Any], List[int], int]: processed projector's arguments, projection dimensions, and projection seed.
-#     """
-#     if projector_kwargs is None:
-#         return None, None, None
-#     proj_seed = projector_kwargs.get("proj_seed", 0)
-#     proj_dim = projector_kwargs.get("proj_dim", 32)
-#     proj_dim_dist = projector_kwargs.get("proj_dim_dist", "uniform")
-
-#     projector_kwargs.pop("proj_seed")
-#     projector_kwargs.pop("proj_dim")
-#     projector_kwargs.pop("proj_dim_dist")
-
-#     # Control the thresholding for different vals
-#     projector_kwargs_1 = projector_kwargs.copy()
-#     projector_kwargs_2 = projector_kwargs.copy()
-
-#     # projector_kwargs_2["threshold"] = 0.0 #TODO threshold for gradient of pre-activation, which shouldn't be sparse so better set to 0
-
-#     layer_dim_1 = []
-#     layer_dim_2 = []
-#     for layer in layer_name:
-#         if isinstance(layer, GCLinear):
-#             layer_dim_1.append(layer.weight.shape[0])
-#             layer_dim_2.append(layer.weight.shape[0] * layer.weight.shape[1])
-#         elif isinstance(layer, GCEmbedding):
-#             layer_dim_1.append(layer.embedding_dim)
-#             layer_dim_2.append(layer.embedding_dim * layer.num_embeddings)
-#         elif isinstance(layer, GCLayerNorm):
-#             layer_dim_1.append(layer.normalized_shape[0])
-#             layer_dim_2.append(layer.normalized_shape[0])
-#         else:
-#             raise ValueError(f"Layer {layer} is not supported")
-
-#     if mode == "default" and proj_dim_dist == "non-uniform":
-#         total_dim_1 = sum(layer_dim_1)
-#         total_dim_2 = sum(layer_dim_2)
-#         proj_dim_1 = [int(proj_dim * dim / total_dim_1) for dim in layer_dim_1]
-#         proj_dim_2 = [int(proj_dim * dim / total_dim_2) for dim in layer_dim_2]
-#     elif mode in ["one_run", "iterate"] or (mode == "default" and proj_dim_dist == "uniform"):
-#         proj_dim_1 = [proj_dim] * len(layer_dim_1)
-#         proj_dim_2 = [proj_dim] * len(layer_dim_2)
-
-#     print(f"proj_dim for gradient component 1: {proj_dim_1}")
-#     print(f"proj_dim for gradient component 2: {proj_dim_2}")
-#     return (projector_kwargs_1, projector_kwargs_2), (proj_dim_1, proj_dim_2), proj_seed
 
 def eigen_stable_inverse(matrix: torch.Tensor, damping: float = 1e-5, eigen_threshold: float = 1e-6) -> torch.Tensor:
     """
@@ -214,7 +151,15 @@ class GCIFAttributorKFAC():
             # Compute K-FAC factors for each layer
             with torch.no_grad():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
+                    if self.profile:
+                        torch.cuda.synchronize()
+                        start_time = time.time()
                     grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_full, per_sample=True)
+
+                    if self.profile:
+                        torch.cuda.synchronize()
+                        self.profiling_stats['projection'] += time.time() - start_time
+
                     grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
 
                     if train_grad[layer_id] is None:
@@ -369,7 +314,15 @@ class GCIFAttributorKFAC():
 
             with torch.no_grad():
                 for layer_id, (layer, z_grad_test) in enumerate(zip(self.layer_name, Z_grad_test)):
+                    if self.profile:
+                        torch.cuda.synchronize()
+                        start_time = time.time()
+
                     grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_test, per_sample=True)
+
+                    if self.profile:
+                        torch.cuda.synchronize()
+                        self.profiling_stats['projection'] += time.time() - start_time
 
                     test_grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
 

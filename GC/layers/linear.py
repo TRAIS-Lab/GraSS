@@ -1,3 +1,10 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Dict
+
+if TYPE_CHECKING:
+    from typing import Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -59,7 +66,7 @@ class GCLinear(nn.Linear):
 
         return self.pre_activation
 
-    def grad_comp(self, grad_pre_activation, per_sample=True):
+    def grad_comp(self, grad_pre_activation: Tensor, per_sample: bool = True) -> Tuple[Tensor, Tensor]:
         """
         Return the components of the gradient of parameters (for both 2D and 3D inputs).
         If projector is set, apply the projector to the gradient components.
@@ -100,8 +107,6 @@ class GCLinear(nn.Linear):
             input_features = input_features.reshape(batch_size, seq_length, -1)
             grad_pre_activation = grad_pre_activation.reshape(batch_size, seq_length, -1)
 
-        # print(f"Linear: {grad_pre_activation.shape}", f"Input: {input_features.shape}")
-
         if self.projector_grad_comp_1 is not None:
             grad_pre_activation_flatten = grad_pre_activation.view(-1, grad_pre_activation.shape[-1])
 
@@ -120,18 +125,21 @@ class GCLinear(nn.Linear):
 
         return grad_pre_activation, input_features
 
-    def set_projector(self, base_seed, proj_dim_1, proj_dim_2, projector_kwargs_1, projector_kwargs_2):
-        """Set the projection function for this layer.
+    def set_projector(self, base_seed: int, proj_dim_1: int, proj_dim_2: int, projector_kwargs_1: dict, projector_kwargs_2: dict):
+        """
+        Set the projection function for this layer.
 
         Args:
-            projector_fn_1: A callable that projects the first gradient components (gradient of pre-activation)
-            projector_fn_1: A callable that projects the second gradient components (input features)
+            base_seed (int): Base seed for the random projection
+            proj_dim_1 (int): Dimension of the projection for the weight
+            proj_dim_2 (int): Dimension of the projection for the bias
+            projector_kwargs_1 (dict): Keyword arguments for the projection function for the weight
+            projector_kwargs_2 (dict): Keyword arguments for the projection function for the bias
         """
         if self.pre_activation is None or self.layer_input is None:
             raise ValueError("Layer input and pre-activation must be set before setting projectors.")
 
         dumb_grad_comp_1 = torch.zeros_like(self.pre_activation.view(-1, self.pre_activation.shape[-1]))
-
         self.projector_grad_comp_1 = random_project(
             dumb_grad_comp_1,
             dumb_grad_comp_1.shape[0],
@@ -140,8 +148,27 @@ class GCLinear(nn.Linear):
             **projector_kwargs_1,
         )
 
-        dumb_grad_comp_2 = torch.zeros_like(self.layer_input.view(-1, self.layer_input.shape[-1]))
+        #TODO: clean up this part
+        if self.has_bias:
+            input_features = self.layer_input
+            is_3d = input_features.dim() == 3
+            if is_3d:
+                batch_size, seq_length, hidden_size = input_features.shape
+                input_features = input_features.reshape(-1, hidden_size)
+            else:
+                batch_size = input_features.shape[0]
 
+            if self.has_bias:
+                ones = torch.ones(input_features.size(0), 1,
+                                device=input_features.device,
+                                dtype=input_features.dtype)
+                input_features = torch.cat([input_features, ones], dim=1)
+            if is_3d:
+                input_features = input_features.reshape(batch_size, seq_length, -1)
+
+            dumb_grad_comp_2 = torch.zeros_like(input_features.view(-1, input_features.shape[-1]))
+        else:
+            dumb_grad_comp_2 = torch.zeros_like(self.layer_input.view(-1, self.layer_input.shape[-1]))
         self.projector_grad_comp_2 = random_project(
             dumb_grad_comp_2,
             dumb_grad_comp_2.shape[0],
@@ -170,7 +197,8 @@ class GCLinear(nn.Linear):
 
     @staticmethod
     def grad_dot_prod_from_grad_comp(A1: Tensor, B1: Tensor, A2: Tensor, B2: Tensor) -> Tensor:
-        """Compute gradient sample norm for the weight matrix in a GClinear layer.
+        """
+        Compute gradient sample norm for the weight matrix in a GClinear layer.
 
         Args:
             A1 (Tensor): train pre_activation gradient of the layer.
@@ -221,59 +249,15 @@ class GCEmbedding(nn.Embedding):
         # Simply call the parent class's constructor
         super().__init__(*args, **kwargs)
 
-    def set_projector(self, base_seed, proj_dim_1, proj_dim_2, projector_kwargs_1, projector_kwargs_2):
-        """Set the projection function for this layer.
+    def set_projector(self, base_seed: int, proj_dim_1: int, proj_dim_2: int, projector_kwargs_1: dict, projector_kwargs_2: dict):
+        """
+        Set the projection function for this layer.
 
         Args:
-            projector_fn_1: A callable that projects the first gradient components (gradient of weight)
-            projector_fn_1: A callable that projects the second gradient components (gradient of bias)
+            base_seed (int): Base seed for the random projection
+            proj_dim_1 (int): Dimension of the projection for the weight
+            proj_dim_2 (int): Dimension of the projection for the bias
+            projector_kwargs_1 (dict): Keyword arguments for the projection function for the weight
+            projector_kwargs_2 (dict): Keyword arguments for the projection function for the bias
         """
         pass
-# class GCEmbedding(nn.Embedding):
-#     def __init__(self, num_embeddings, embedding_dim):
-#         super(GCEmbedding, self).__init__(num_embeddings, embedding_dim)
-#         self.pre_activation = None
-#         self.indices = None
-#         self.name = 'embedding'
-#         self.token_output = None
-#         self.combined_output = None
-
-#     def forward(self, input):
-#         self.indices = input
-#         embedded = super().forward(input)
-#         self.pre_activation = embedded
-#         return embedded
-
-#     def grad_comp(self, deriv_pre_activ, per_sample=True):
-#         """
-#         Prepare components for gradient computation in embedding layer.
-#         Similar to linear layer's grad_comp but handles sparse embedding lookups.
-
-#         Parameters:
-#         -------------------
-#         deriv_pre_activ: derivative of cost function w.r.t. the pre-activation of layer
-#         per_sample: whether to return per-sample gradients
-#         """
-#         batch_size = deriv_pre_activ.size(0)
-
-#         # Scale gradients by batch size as in linear layer
-#         dLdZ = deriv_pre_activ * batch_size
-
-#         # For sequence inputs (3D)
-#         if deriv_pre_activ.dim() == 3:
-#             # Create one-hot encoding matrix for the sequence
-#             # [batch_size, seq_len, num_embeddings]
-#             H = torch.zeros(batch_size, self.indices.size(1), self.num_embeddings,
-#                           device=deriv_pre_activ.device)
-#             # Fill in ones at the positions indicated by indices
-#             H.scatter_(2, self.indices.unsqueeze(-1), 1)
-#         else:
-#             # For single token inputs (2D)
-#             # Create one-hot encoding matrix [batch_size, num_embeddings]
-#             H = torch.zeros(batch_size, self.num_embeddings,
-#                           device=deriv_pre_activ.device)
-#             # Fill in ones at the positions indicated by indices
-#             H.scatter_(1, self.indices.unsqueeze(1), 1)
-
-#         print(f"Embedding: {H}", f"Gradient: {dLdZ}")
-#         return dLdZ, H

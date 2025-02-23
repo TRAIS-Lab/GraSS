@@ -1,3 +1,10 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Dict
+
+if TYPE_CHECKING:
+    from typing import Tuple
+
 import torch
 import torch.nn as nn
 
@@ -28,7 +35,7 @@ class GCLayerNorm(nn.LayerNorm):
 
         return self.pre_activation
 
-    def grad_comp(self, grad_pre_activation, per_sample=True):
+    def grad_comp(self, grad_pre_activation: Tensor, per_sample: bool = True) -> Tuple[Tensor, Tensor]:
         """
         Return the components of the gradient of parameters (for both 2D and 3D inputs).
 
@@ -70,17 +77,18 @@ class GCLayerNorm(nn.LayerNorm):
 
         return grad_weight, grad_bias
 
-    def set_projector(self, base_seed, proj_dim_1, proj_dim_2, projector_kwargs_1, projector_kwargs_2):
-        """Set the projection function for this layer.
+    def set_projector(self, base_seed: int, proj_dim_1: int, proj_dim_2: int, projector_kwargs_1: dict, projector_kwargs_2: dict):
+        """
+        Set the projection function for this layer.
 
         Args:
-            projector_fn_1: A callable that projects the first gradient components (gradient of weight)
-            projector_fn_1: A callable that projects the second gradient components (gradient of bias)
+            base_seed (int): Base seed for the random projection
+            proj_dim_1 (int): Dimension of the projection for the weight
+            proj_dim_2 (int): Dimension of the projection for the bias
+            projector_kwargs_1 (dict): Keyword arguments for the projection function for the weight
+            projector_kwargs_2 (dict): Keyword arguments for the projection function for the bias
         """
-        # Create dummy tensors to get the shape
         dumb_grad_comp_1 = torch.zeros((self.normalized.shape[0], self.normalized.shape[-1]))
-        dumb_grad_comp_2 = torch.zeros((self.normalized.shape[0], self.normalized.shape[-1]))
-
         self.projector_grad_comp_1 = random_project(
             dumb_grad_comp_1,
             dumb_grad_comp_1.shape[0],
@@ -89,6 +97,7 @@ class GCLayerNorm(nn.LayerNorm):
             **projector_kwargs_1,
         )
 
+        dumb_grad_comp_2 = torch.zeros((self.normalized.shape[0], self.normalized.shape[-1]))
         self.projector_grad_comp_2 = random_project(
             dumb_grad_comp_2,
             dumb_grad_comp_2.shape[0],
@@ -101,7 +110,6 @@ class GCLayerNorm(nn.LayerNorm):
     def grad_from_grad_comp(grad_weight: Tensor, grad_bias: Tensor) -> Tensor:
         """
         Construct gradient from the gradient components.
-
         For LayerNorm, components are gradient of weight and bias.
 
         Args:

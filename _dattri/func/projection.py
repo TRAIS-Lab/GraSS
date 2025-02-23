@@ -299,6 +299,7 @@ class CudaProjector(AbstractProjector):
         """
         super().__init__(feature_dim, proj_dim, seed, proj_type, device)
         self.max_batch_size = max_batch_size
+        self.threshold = threshold
 
         if isinstance(device, str):
             device = torch.device(device)
@@ -329,9 +330,14 @@ class CudaProjector(AbstractProjector):
                 (the fast_jl library)."
                 raise ModuleNotFoundError(msg) from None
         elif self.method == "SJLT":
+            c = 1
+            blow_up = 5
+            torch.manual_seed(self.seed)
+            rand_indices = torch.randint(proj_dim * blow_up, (feature_dim, c), device=device)
+            rand_signs = torch.randint(0, 2, (feature_dim, c), device=device) * 2 - 1
+            self.rand_indices_and_signs = (rand_indices, rand_signs)
+        elif self.method == "SJLT_R":
             self.pos_and_neg_indices = backward_SJLT_indices(feature_dim, proj_dim, c=1, device=device, seed=self.seed)
-
-        self.threshold = threshold
 
     def project(
         self,
@@ -398,21 +404,25 @@ class CudaProjector(AbstractProjector):
                     raise RuntimeError(msg) from e
                 raise e from None
         elif self.method == "SJLT":
+            result = SJLT(
+                features,
+                self.proj_dim,
+                self.threshold,
+                # self.rand_indices_and_signs,
+                seed=self.seed + int(1e4) * ensemble_id,
+                batch_size=effective_batch_size,
+                c=1,
+                blow_up=2,
+            )
+        elif self.method == "SJLT_R":
             result = SJLT_reverse(
                 features,
                 self.proj_dim,
                 self.threshold,
                 self.pos_and_neg_indices,
+                seed=self.seed + int(1e4) * ensemble_id,
                 c=1
             )
-            # result = SJLT(
-            #     features,
-            #     self.proj_dim,
-            #     self.threshold,
-            #     seed=self.seed + int(1e4) * ensemble_id,
-            #     batch_size=effective_batch_size,
-            #     c=1,
-            # )
         elif self.method == "Gaussian":
             features = torch.where(
                     torch.abs(features) < self.threshold,
@@ -904,7 +914,7 @@ def make_random_projector(
                 raise
 
             proj_type = ProjectionType.rademacher
-        elif method == "SJLT":
+        elif method == "SJLT" or method == "SJLT_R":
             proj_type = ProjectionType.rademacher
         elif method == "Gaussian":
             proj_type = ProjectionType.normal
@@ -1149,7 +1159,7 @@ def random_project(
 
     return _random_project_func
 
-def SJLT(vecs, proj_dim, threshold=0, rand_indices_and_signs=None, seed=0, batch_size=32, c=5, blow_up=1):
+def SJLT(vecs, proj_dim, threshold=0, rand_indices_and_signs=None, seed=0, batch_size=32, c=1, blow_up=5):
     """
     Batched SJLT implementation that processes input vectors in smaller batches
 
@@ -1175,8 +1185,11 @@ def SJLT(vecs, proj_dim, threshold=0, rand_indices_and_signs=None, seed=0, batch
         rand_signs = torch.randint(0, 2, (original_dim, c), device=device) * 2 - 1
     else:
         rand_indices, rand_signs = rand_indices_and_signs
-        assert rand_indices.size == (original_dim, c), "Invalid random indices shape"
-        assert rand_signs.size == (original_dim, c), "Invalid random signs shape"
+        # print(rand_indices.shape, rand_signs.shape)
+        # print(original_dim, c)
+
+        assert rand_indices.shape == (original_dim, c), "Invalid random indices shape"
+        assert rand_signs.shape == (original_dim, c), "Invalid random signs shape"
 
     # Initialize output tensor
     output = torch.zeros(num_vectors, proj_dim, device=device)
@@ -1215,7 +1228,7 @@ def sjlt(vecs, proj_dim, threshold, rand_indices, rand_signs, c, blow_up):
     vecs_p = vecs_p.view(batch_size, proj_dim, blow_up).sum(dim=2)
     return vecs_p / (c ** 0.5)
 
-def SJLT_reverse(batch_vec, proj_dim, threshold, pos_and_neg_indices=None, c=5):
+def SJLT_reverse(batch_vec, proj_dim, threshold, pos_and_neg_indices=None, seed=0, c=5):
     """
     Backward SJLT implementation that processes entire batch at once.
 
@@ -1230,9 +1243,13 @@ def SJLT_reverse(batch_vec, proj_dim, threshold, pos_and_neg_indices=None, c=5):
         torch.Tensor: Projected tensor of shape [batch_size, proj_dim]
     """
     batch_size, original_dim = batch_vec.size()
+
     if pos_and_neg_indices is None:
-        pass
+        sparse_mask = torch.abs(batch_vec) >= threshold
+        pos_indices, neg_indices = backward_SJLT_indices(original_dim, proj_dim, c, batch_vec.device,  sparse_mask=sparse_mask, seed=seed)
     else:
+        # thresholding the input vector
+        batch_vec = torch.where(torch.abs(batch_vec) >= threshold, batch_vec, torch.zeros_like(batch_vec))
         pos_indices, neg_indices = pos_and_neg_indices
 
     max_pos_len = pos_indices.size(1) if pos_indices is not None else 0
@@ -1261,7 +1278,7 @@ def SJLT_reverse(batch_vec, proj_dim, threshold, pos_and_neg_indices=None, c=5):
 
     return batch_vec_p / (c ** 0.5)
 
-def backward_SJLT_indices(original_dim, proj_dim, c, device, rand_indices_and_signs=None, seed=0):
+def backward_SJLT_indices(original_dim, proj_dim, c, device, sparse_mask=None, seed=0):
     """
     Vectorized computation of SJLT contribution indices.
 
@@ -1273,16 +1290,31 @@ def backward_SJLT_indices(original_dim, proj_dim, c, device, rand_indices_and_si
         rand_indices (torch.Tensor): Optional precomputed random indices [original_dim, c]
         rand_signs (torch.Tensor): Optional precomputed random signs [original_dim, c]
     """
+    if sparse_mask is None:
+        sparse_mask = torch.ones(original_dim, device=device, dtype=torch.bool)
+
+     # Combine sparse masks across batch dimension
+    combined_mask = sparse_mask.any(dim=0)  # [original_dim]
+    active_indices = torch.nonzero(combined_mask).squeeze(-1)
+
     # Generate random indices and signs if not provided
-    if rand_indices_and_signs is None:
-        torch.manual_seed(seed)
-        rand_indices = torch.randint(proj_dim, (original_dim, c), device=device)
-        rand_signs = torch.randint(0, 2, (original_dim, c), device=device) * 2 - 1
+    torch.manual_seed(seed)
+    rand_indices = torch.randint(proj_dim, (original_dim, c), device=device)
+    rand_signs = torch.randint(0, 2, (original_dim, c), device=device) * 2 - 1
 
     # Create index pairs for sorting
-    input_indices = torch.arange(original_dim, device=device).repeat_interleave(c)
-    output_indices = rand_indices.reshape(-1)
-    signs = rand_signs.reshape(-1)
+    # input_indices = torch.arange(original_dim, device=device).repeat_interleave(c)
+    # output_indices = rand_indices.reshape(-1)
+    # signs = rand_signs.reshape(-1)
+
+    # Only process active indices
+    active_rand_indices = rand_indices[active_indices]
+    active_rand_signs = rand_signs[active_indices]
+
+     # Create index pairs for sorting
+    input_indices = active_indices.repeat_interleave(c)
+    output_indices = active_rand_indices.reshape(-1)
+    signs = active_rand_signs.reshape(-1)
 
     # Split positive and negative contributions
     pos_mask = signs == 1
