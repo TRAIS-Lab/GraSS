@@ -76,6 +76,8 @@ def patch_trainer(TrainerClass):
             args.report_to = []
             args.save_strategy = "no"
 
+            args._n_gpu = 1
+
             super().__init__(
                 model,
                 args,

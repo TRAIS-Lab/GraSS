@@ -48,6 +48,7 @@ def main():
         num_train_epochs=1,
         per_device_train_batch_size=args.batch_size,
         report_to="none",
+        _n_gpu = 1,
     )
 
     LogIXTrainer = patch_trainer(Trainer)

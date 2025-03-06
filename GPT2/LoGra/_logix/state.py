@@ -251,7 +251,7 @@ class LogIXState:
             setattr(self, key, value)
 
         for state_name in self._states_to_save:
-            state_dict = torch.load(os.path.join(state_log_dir, f"{state_name}.pt"))
+            state_dict = torch.load(os.path.join(state_log_dir, f"{state_name}.pt"), weights_only=False)
             setattr(self, state_name, state_dict)
 
     def set_state(self, state_name: str, **kwargs) -> None:

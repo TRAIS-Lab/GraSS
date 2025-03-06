@@ -26,7 +26,6 @@ def main():
     parser.add_argument("--project", type=str, default="wiki")
     parser.add_argument("--config_path", type=str, default="./config.yaml")
     parser.add_argument("--batch_size", type=int, default=32)
-    parser.add_argument("--data_name", type=str, default="sst2")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     args = parser.parse_args()
 
