@@ -284,6 +284,12 @@ def parse_args():
         help="Threshold to be used for projection when attributing.",
     )
     parser.add_argument(
+        "--random_drop",
+        type=float,
+        default=0.0,
+        help="Randomly drop the specified percentage of the projection input dimensions.",
+    )
+    parser.add_argument(
         "--profile",
         action="store_true",
         help="Record profiling results.",
@@ -658,6 +664,7 @@ def main():
             "method": proj_method,
             "use_half_precision": False,
             "threshold": args.threshold,
+            "random_drop": args.random_drop,
         }
 
         logger.info(f"Projector: {projector_kwargs}")
@@ -921,8 +928,9 @@ def main():
         else:
             filename_parts.append(f"{proj_method}-{proj_dim}")
 
-        if args.threshold is not None:
-            filename_parts.append(f"thrd-{args.threshold}")
+
+    filename_parts.append(f"thrd-{args.threshold}")
+    filename_parts.append(f"randrop-{args.random_drop}")
 
     training_setting = args.output_dir.split("/")[-1]
     # Join parts and save the file
