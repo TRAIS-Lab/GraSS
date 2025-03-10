@@ -343,11 +343,8 @@ class CudaProjector(AbstractProjector):
         elif self.method == "SJLT_R":
             # randomly dropping some feature dimensions with probability random_drop
             active_mask = torch.rand(feature_dim, device=device) > random_drop
-            # active_indices = torch.nonzero(active_mask).squeeze()
-            # self.pos_and_neg_indices = backward_SJLT_indices(feature_dim, proj_dim, c=1, device=device, active_indices=active_indices, seed=self.seed)
             self.active_indices = torch.nonzero(active_mask).squeeze()
-            active_feature_dim = self.active_indices.size(0)
-            self.pos_and_neg_indices = backward_SJLT_indices(active_feature_dim, proj_dim, c=1, device=device, seed=self.seed)
+            self.backward_indices = backward_SJLT_indices(proj_dim, c=1, active_indices=self.active_indices, device=device, seed=self.seed)
         elif self.method == "Gaussian":
             pass #TODO
 
@@ -428,41 +425,29 @@ class CudaProjector(AbstractProjector):
             )
         elif self.method == "SJLT_R":
             c = 1
+            batch_size, _ = features.size()
 
-            batch_size, original_dim = features.size()
-
-            if self.active_indices is not None:
-                features = features[:, self.active_indices]
-
-            # thresholding the input vector
+            features = features[:, self.active_indices]
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
-            pos_indices, neg_indices = self.pos_and_neg_indices
 
-            max_pos_len = pos_indices.size(1) if pos_indices is not None else 0
-            max_neg_len = neg_indices.size(1) if neg_indices is not None else 0
-
-            # Initialize output projected vector
             batch_vec_p = torch.zeros(batch_size, self.proj_dim, device=features.device)
 
-            # Create masks for valid indices once
-            pos_mask = (pos_indices != -1).float()  # [proj_dim, max_pos_len]
-            neg_mask = (neg_indices != -1).float()  # [proj_dim, max_neg_len]
+            pos_local_indices = self.backward_indices['pos_local_indices']
+            neg_local_indices = self.backward_indices['neg_local_indices']
+            pos_output_mapping = self.backward_indices['pos_output_mapping']
+            neg_output_mapping = self.backward_indices['neg_output_mapping']
 
-            # Process positive contributions for entire batch at once
-            if max_pos_len > 0:
-                # Gather and reshape: [batch_size, proj_dim, max_pos_len]
-                pos_values = features[:, pos_indices.clamp(min=0)]
-                # Apply mask and sum: [batch_size, proj_dim]
-                batch_vec_p += (pos_values * pos_mask).sum(dim=2)
+            if pos_local_indices.numel() > 0:
+                pos_values = features[:, pos_local_indices]
+                batch_pos_output_mapping = pos_output_mapping.unsqueeze(0).expand(batch_size, -1)
+                batch_vec_p.scatter_add_(1, batch_pos_output_mapping, pos_values)
 
-            # Process negative contributions for entire batch at once
-            if max_neg_len > 0:
-                # Gather and reshape: [batch_size, proj_dim, max_neg_len]
-                neg_values = features[:, neg_indices.clamp(min=0)]
-                # Apply mask and sum: [batch_size, proj_dim]
-                batch_vec_p -= (neg_values * neg_mask).sum(dim=2)
+            if neg_local_indices.numel() > 0:
+                neg_values = features[:, neg_local_indices]
+                batch_neg_output_mapping = neg_output_mapping.unsqueeze(0).expand(batch_size, -1)
+                batch_vec_p.scatter_add_(1, batch_neg_output_mapping, -neg_values)
 
-            return batch_vec_p / (c ** 0.5)
+            result = batch_vec_p / (c ** 0.5)
         elif self.method == "Gaussian":
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
             #TODO
@@ -1265,131 +1250,50 @@ def sjlt(vecs, proj_dim, threshold, rand_indices, rand_signs, c, blow_up):
     vecs_p = vecs_p.view(batch_size, proj_dim, blow_up).sum(dim=2)
     return vecs_p / (c ** 0.5)
 
-def SJLT_reverse(batch_vec, proj_dim, threshold, random_drop, pos_and_neg_indices=None, seed=0, c=5):
+
+def backward_SJLT_indices(proj_dim, c, device, active_indices, seed=0):
     """
-    Backward SJLT implementation that processes entire batch at once.
+    Fully vectorized representation for SJLT contribution indices.
 
     Args:
-        batch_vec (torch.Tensor): Input tensor of shape [batch_size, original_dim]
-        proj_dim (int): Target projection dimension
-        pos_and_neg_indices (tuple): Precomputed positive and negative indices. Default: None
-        seed (int): Random seed for reproducibility. Default: 0
-        c (int): Sparsity parameter
-
-    Return:
-        torch.Tensor: Projected tensor of shape [batch_size, proj_dim]
+        original_dim: Original dimension of the input
+        proj_dim: Target projection dimension
+        c: Sparsity parameter
+        device: Device to create tensors on
+        active_indices: Indices of active input dimensions
+        seed: Random seed for reproducibility
     """
-    batch_size, original_dim = batch_vec.size()
-    # thresholding the input vector
-    batch_vec = torch.where(torch.abs(batch_vec) >= threshold, batch_vec, torch.zeros_like(batch_vec))
+    # Get the effective dimensionality
+    active_dim = active_indices.size(0)
 
-    if pos_and_neg_indices is None:
-        random_mask = torch.rand(original_dim, device=batch_vec.device) > random_drop
-        active_indices = torch.nonzero(random_mask).squeeze()
-        # active_indices = torch.nonzero(sparse_mask & random_mask, as_tuple=True)[0]
-        pos_indices, neg_indices = backward_SJLT_indices(original_dim, proj_dim, c, batch_vec.device, active_indices=active_indices, seed=seed)
-    else:
-        pos_indices, neg_indices = pos_and_neg_indices
-
-    max_pos_len = pos_indices.size(1) if pos_indices is not None else 0
-    max_neg_len = neg_indices.size(1) if neg_indices is not None else 0
-
-    # Initialize output projected vector
-    batch_vec_p = torch.zeros(batch_size, proj_dim, device=batch_vec.device)
-
-    # Create masks for valid indices once
-    pos_mask = (pos_indices != -1).float()  # [proj_dim, max_pos_len]
-    neg_mask = (neg_indices != -1).float()  # [proj_dim, max_neg_len]
-
-    # Process positive contributions for entire batch at once
-    if max_pos_len > 0:
-        # Gather and reshape: [batch_size, proj_dim, max_pos_len]
-        pos_values = batch_vec[:, pos_indices.clamp(min=0)]
-        # Apply mask and sum: [batch_size, proj_dim]
-        batch_vec_p += (pos_values * pos_mask).sum(dim=2)
-
-    # Process negative contributions for entire batch at once
-    if max_neg_len > 0:
-        # Gather and reshape: [batch_size, proj_dim, max_neg_len]
-        neg_values = batch_vec[:, neg_indices.clamp(min=0)]
-        # Apply mask and sum: [batch_size, proj_dim]
-        batch_vec_p -= (neg_values * neg_mask).sum(dim=2)
-
-    return batch_vec_p / (c ** 0.5)
-
-def backward_SJLT_indices(original_dim, proj_dim, c, device, active_indices=None, seed=0):
-    """
-    Vectorized computation of SJLT contribution indices.
-
-    Args:
-        original_dim (int): Original input dimension
-        proj_dim (int): Target projection dimension
-        c (int): Sparsity parameter
-        device (torch.device): Device to create tensors on
-        active_indices (torch.Tensor): Indices of active input dimensions. Default: None
-        seed (int): Random seed for reproducibility. Default: 0
-    """
-    if active_indices is None:
-        active_indices = torch.arange(original_dim, device=device)
-
-    # Generate random indices and signs if not provided
+    # Generate random indices and signs only for active dimensions
     torch.manual_seed(seed)
-    rand_indices = torch.randint(proj_dim, (original_dim, c), device=device)
-    rand_signs = torch.randint(0, 2, (original_dim, c), device=device) * 2 - 1
+    rand_indices = torch.randint(proj_dim, (active_dim, c), device=device)
+    rand_signs = torch.randint(0, 2, (active_dim, c), device=device) * 2 - 1
 
-    # Only process active indices
-    active_rand_indices = rand_indices[active_indices]
-    active_rand_signs = rand_signs[active_indices]
+    # Create local indices (0 to active_dim-1) for the active dimensions
+    local_indices = torch.arange(active_dim, device=device)
 
-     # Create index pairs for sorting
-    input_indices = active_indices.repeat_interleave(c)
-    output_indices = active_rand_indices.reshape(-1)
-    signs = active_rand_signs.reshape(-1)
+    # Flatten everything
+    local_input_indices = local_indices.repeat_interleave(c)
+    output_indices = rand_indices.reshape(-1)
+    signs = rand_signs.reshape(-1)
 
-    # Split positive and negative contributions
-    pos_mask = signs == 1
-    neg_mask = ~pos_mask
+    # Split into positive and negative contributions
+    pos_mask = signs > 0
+    neg_mask = signs < 0
 
-    # Handle positive contributions
-    pos_input_indices = input_indices[pos_mask]
-    pos_output_indices = output_indices[pos_mask]
+    # Create flat arrays for positive and negative contributions
+    # These are LOCAL indices within the active set
+    pos_local_indices = local_input_indices[pos_mask]
+    pos_output_mapping = output_indices[pos_mask]
 
-    # Handle negative contributions
-    neg_input_indices = input_indices[neg_mask]
-    neg_output_indices = output_indices[neg_mask]
+    neg_local_indices = local_input_indices[neg_mask]
+    neg_output_mapping = output_indices[neg_mask]
 
-    # Sort by output indices for both positive and negative contributions
-    pos_sort_idx = torch.argsort(pos_output_indices)
-    neg_sort_idx = torch.argsort(neg_output_indices)
-
-    pos_input_sorted = pos_input_indices[pos_sort_idx]
-    pos_output_sorted = pos_output_indices[pos_sort_idx]
-
-    neg_input_sorted = neg_input_indices[neg_sort_idx]
-    neg_output_sorted = neg_output_indices[neg_sort_idx]
-
-    # Find unique output indices and their counts
-    pos_unique, pos_counts = torch.unique_consecutive(pos_output_sorted, return_counts=True)
-    neg_unique, neg_counts = torch.unique_consecutive(neg_output_sorted, return_counts=True)
-
-    # Calculate maximum lengths
-    max_pos_len = pos_counts.max().item() if len(pos_counts) > 0 else 0
-    max_neg_len = neg_counts.max().item() if len(neg_counts) > 0 else 0
-
-    # Create output tensors
-    pos_indices = torch.full((proj_dim, max_pos_len), -1, device=device)
-    neg_indices = torch.full((proj_dim, max_neg_len), -1, device=device)
-
-    # Fill positive indices
-    if max_pos_len > 0:
-        pos_start_idx = torch.cat([torch.tensor([0], device=device), pos_counts.cumsum(0)[:-1]])
-        for i, (output_idx, count, start) in enumerate(zip(pos_unique, pos_counts, pos_start_idx)):
-            pos_indices[output_idx, :count] = pos_input_sorted[start:start + count]
-
-    # Fill negative indices
-    if max_neg_len > 0:
-        neg_start_idx = torch.cat([torch.tensor([0], device=device), neg_counts.cumsum(0)[:-1]])
-        for i, (output_idx, count, start) in enumerate(zip(neg_unique, neg_counts, neg_start_idx)):
-            neg_indices[output_idx, :count] = neg_input_sorted[start:start + count]
-
-    return (pos_indices, neg_indices)
+    return {
+        'pos_local_indices': pos_local_indices,
+        'neg_local_indices': neg_local_indices,
+        'pos_output_mapping': pos_output_mapping,
+        'neg_output_mapping': neg_output_mapping,
+    }

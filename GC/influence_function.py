@@ -56,7 +56,6 @@ class GCIFAttributorKFAC():
         self,
         model,
         layer_name: Optional[Union[str, List[str]]] = None,
-        # projector_kwargs: Optional[Dict[str, Any]] = None,
         damping = 1e-4,
         profile: bool = False,
         mode: str = "default",
@@ -75,7 +74,6 @@ class GCIFAttributorKFAC():
         """
         self.model = model
         self.layer_name = find_GClayers(model) if layer_name is None else layer_name
-        # (self.projector_kwargs_1, self.projector_kwargs_2), (self.proj_dim_1, self.proj_dim_2), self.proj_seed = setup_projectors(projector_kwargs, self.layer_name, mode)
         self.damping = damping
         self.profile = profile
         self.mode = mode
@@ -338,60 +336,3 @@ class GCIFAttributorKFAC():
                     IF_score[:, col_st:col_ed] += result
 
         return (IF_score, self.profiling_stats) if self.profile else IF_score
-
-    def sparsity(
-        self,
-        dataloader: torch.utils.data.DataLoader,
-        thresholds: List[float] = [0.1, 0.5, 0.9],
-    ):
-        if dataloader is None:
-            raise ValueError("Please provide a dataloader to calculate sparsity.")
-
-        # Initialize dictionary to store sparsity values for each layer and threshold
-        sparsity = {threshold: {f"layer_{i}": {"grad_comp_1": [], "grad_comp_2": []}
-                    for i in range(len(self.layer_name))}
-                    for threshold in thresholds}
-
-        for batch in tqdm(
-            dataloader,
-            desc="calculating sparsity of the dataset...",
-            leave=False,
-        ):
-            input_ids = batch["input_ids"].to(self.device)
-            attention_masks = batch["attention_mask"].to(self.device)
-            labels = batch["labels"].to(self.device)
-
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_masks,
-                labels=labels
-            )
-            logp = -outputs.loss
-            loss = -(logp - torch.log(1 - torch.exp(logp)))
-
-
-            pre_acts = [layer.pre_activation for layer in self.layer_name]
-            Z_grad = torch.autograd.grad(loss, pre_acts, retain_graph=True)
-
-            with torch.no_grad():
-                for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad)):
-                    grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_full, per_sample=True)
-
-                    # Calculate sparsity for each threshold
-                    for threshold in thresholds:
-                        # Calculate ratio of elements below threshold
-                        grad_comp_1_sparsity = (torch.abs(grad_comp_1) < threshold).float().mean().item()
-                        grad_comp_2_sparsity = (torch.abs(grad_comp_2) < threshold).float().mean().item()
-
-                        # Store results
-                        sparsity[threshold][f"layer_{layer_id}"]["grad_comp_1"].append(grad_comp_1_sparsity)
-                        sparsity[threshold][f"layer_{layer_id}"]["grad_comp_2"].append(grad_comp_2_sparsity)
-
-        # Average sparsity across batches
-        for threshold in thresholds:
-            for layer_id in range(len(self.layer_name)):
-                for val_type in ["grad_comp_1", "grad_comp_2"]:
-                    sparsity[threshold][f"layer_{layer_id}"][val_type] = \
-                        sum(sparsity[threshold][f"layer_{layer_id}"][val_type]) / len(sparsity[threshold][f"layer_{layer_id}"][val_type])
-
-        return sparsity

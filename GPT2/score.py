@@ -742,7 +742,7 @@ def main():
 
         peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
     elif tda_method == "IF":
-        from GC.IF import GCIFAttributorKFAC
+        from GC.influence_function import GCIFAttributorKFAC
         from GC.helper import find_GClayers
         from GC.layers.layer_norm import GCLayerNorm
         from GC.layers.linear import GCLinear, GCEmbedding
@@ -938,11 +938,17 @@ def main():
         filename = f"./results/{training_setting}/debug/{tda_method}/{args.setting}/{'_'.join(filename_parts)}.pt"
     else:
         filename = f"./results/{training_setting}/{tda_method}/{args.setting}/{'_'.join(filename_parts)}.pt"
-    torch.save(score, filename)
 
-    if args.profile:
-        filename = f"./results/{training_setting}/{tda_method}/{args.setting}/{'_'.join(filename_parts)}_profile.pt"
-        torch.save(profile, filename)
+    from lds import calculate_one
+    lds_score, _, _ = calculate_one(score, training_setting)
+    # create a dict to save the results
+    result = {
+        "score": score,
+        "lds": lds_score,
+        "profile": profile if args.profile else None,
+    }
+    torch.save(result, filename)
+    print(result)
 
 
 if __name__ == "__main__":
