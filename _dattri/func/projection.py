@@ -343,8 +343,13 @@ class CudaProjector(AbstractProjector):
         elif self.method == "SJLT_R":
             # randomly dropping some feature dimensions with probability random_drop
             active_mask = torch.rand(feature_dim, device=device) > random_drop
-            active_indices = torch.nonzero(active_mask).squeeze()
-            self.pos_and_neg_indices = backward_SJLT_indices(feature_dim, proj_dim, c=1, device=device, active_indices=active_indices, seed=self.seed)
+            # active_indices = torch.nonzero(active_mask).squeeze()
+            # self.pos_and_neg_indices = backward_SJLT_indices(feature_dim, proj_dim, c=1, device=device, active_indices=active_indices, seed=self.seed)
+            self.active_indices = torch.nonzero(active_mask).squeeze()
+            active_feature_dim = self.active_indices.size(0)
+            self.pos_and_neg_indices = backward_SJLT_indices(active_feature_dim, proj_dim, c=1, device=device, seed=self.seed)
+        elif self.method == "Gaussian":
+            pass #TODO
 
     def project(
         self,
@@ -425,6 +430,10 @@ class CudaProjector(AbstractProjector):
             c = 1
 
             batch_size, original_dim = features.size()
+
+            if self.active_indices is not None:
+                features = features[:, self.active_indices]
+
             # thresholding the input vector
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
             pos_indices, neg_indices = self.pos_and_neg_indices
@@ -455,12 +464,8 @@ class CudaProjector(AbstractProjector):
 
             return batch_vec_p / (c ** 0.5)
         elif self.method == "Gaussian":
-            features = torch.where(
-                    torch.abs(features) < self.threshold,
-                    torch.zeros_like(features),
-                    features,
-                )
-            raise NotImplementedError("Gaussian projection is not implemented yet.")#TODO
+            features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
+            #TODO
 
         return result
 
@@ -926,6 +931,7 @@ def make_random_projector(
         # normal projection, rather than rademacher.
         proj_type = ProjectionType.normal
     else:
+        proj_type = ProjectionType.rademacher
         if method == "FJLT":
             try:
                 import fast_jl
@@ -944,12 +950,6 @@ def make_random_projector(
             except (ImportError, RuntimeError, AttributeError):
                 projector = BasicProjector
                 raise
-
-            proj_type = ProjectionType.rademacher
-        elif method == "SJLT" or method == "SJLT_R":
-            proj_type = ProjectionType.rademacher
-        elif method == "Gaussian":
-            proj_type = ProjectionType.normal
 
         projector = CudaProjector
         using_cuda_projector = True

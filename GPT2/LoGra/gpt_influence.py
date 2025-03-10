@@ -63,7 +63,10 @@ def main():
         args=training_args,
         logix_args=logix_args,
     )
-    if_scores = trainer.influence()
+    result = trainer.influence()
+    if_scores = result["influence"].T
+    print(if_scores)
+
     torch.save(if_scores, "gpt_influence.pt")
 
 

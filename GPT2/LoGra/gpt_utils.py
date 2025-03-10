@@ -21,7 +21,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from datasets import load_dataset
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GPT2LMHeadModel
 from transformers.pytorch_utils import Conv1D
 
 from safetensors.torch import load_file
@@ -75,18 +75,12 @@ def construct_model(resume=False):
         "openai-community/gpt2", use_fast=True, trust_remote_code=True
     )
     if resume:
-        # state_dict = torch.load(
-        #     "../checkpoints/wd=0.0_lr=5e-5/0/model.safetensors", map_location="cpu"
-        # )
-        original_model = model.from_pretrained("../checkpoints/wd=0.0_lr=5e-5/0/")
+        original_model = GPT2LMHeadModel.from_pretrained("../checkpoints/wd=0.0_lr=5e-5/0/")
         state_dict = transpose_Conv1D(original_model.state_dict())
-
-        # state_dict = load_file("../checkpoints/wd=0.0_lr=5e-5/0/model.safetensors")
-
         for key in list(state_dict.keys()):
             if "model." in key:
                 state_dict[key.replace("model.", "")] = state_dict.pop(key)
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=True)
     return model, tokenizer
 
 

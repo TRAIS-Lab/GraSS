@@ -251,7 +251,7 @@ class InfluenceFunction:
         damping: Optional[float] = None,
     ):
         """
-        Compute influence scores against all traininig data in the log. This can be used
+        Compute influence scores against all training data in the log. This can be used
         for training data attribution.
 
         Args:

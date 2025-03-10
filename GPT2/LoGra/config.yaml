@@ -1,4 +1,4 @@
-root_dir: ./_logix
+root_dir: ./
 logging:
   flush_threshold: 1000000000
   num_workers: 1

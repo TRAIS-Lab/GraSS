@@ -19,6 +19,7 @@ from transformers import Trainer, TrainingArguments, default_data_collator
 
 from _logix.huggingface import LogIXArguments, patch_trainer
 
+import torch
 
 def main():
     parser = argparse.ArgumentParser("GLUE Influence Analysis")
@@ -48,7 +49,6 @@ def main():
         num_train_epochs=1,
         per_device_train_batch_size=args.batch_size,
         report_to="none",
-        _n_gpu = 1,
     )
 
     LogIXTrainer = patch_trainer(Trainer)

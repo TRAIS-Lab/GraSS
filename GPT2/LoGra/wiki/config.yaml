@@ -1,8 +1,8 @@
-log_dir: ./_logix/wiki
+log_dir: ./wiki
 logging:
   cpu_offload: false
   flush_threshold: 1000000000
-  log_dir: ./_logix/wiki
+  log_dir: ./wiki
   log_dtype: none
   num_workers: 1
 lora:
@@ -11,4 +11,4 @@ lora:
   parameter_sharing_groups: null
   rank: 64
 project: wiki
-root_dir: ./_logix
+root_dir: ./

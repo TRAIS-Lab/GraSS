@@ -185,6 +185,8 @@ def patch_trainer(TrainerClass):
                     with amp.scale_loss(loss, self.optimizer) as scaled_loss:
                         scaled_loss.backward()
                 else:
+                    logp = - loss
+                    loss = logp - torch.log(1 - torch.exp(logp))
                     self.accelerator.backward(loss)
 
             return loss.detach() / self.args.gradient_accumulation_steps
