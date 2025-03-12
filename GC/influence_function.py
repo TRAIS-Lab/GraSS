@@ -139,6 +139,10 @@ class GCIFAttributorKFAC():
             logp = -outputs.loss
             train_loss = logp - torch.log(1 - torch.exp(logp))
 
+            print(f"logp: {logp}")
+            print(f"Train Loss: {train_loss}")
+            exit()
+
             train_pre_acts = [layer.pre_activation for layer in self.layer_name]
             Z_grad_train = torch.autograd.grad(train_loss, train_pre_acts, retain_graph=True)
 

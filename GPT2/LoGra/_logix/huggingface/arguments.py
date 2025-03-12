@@ -32,6 +32,9 @@ class LogIXArguments:
     initialize_from_log: bool = field(
         default=False, metadata={"help": "Initialize from the log."}
     )
+    train_data: bool = field(
+        default=True, metadata={"help": "Whether the input data is actually the training data."}
+    )
     name_filter: List[str] = field(
         default_factory=list, metadata={"help": "Filter for layer names."}
     )

@@ -697,6 +697,8 @@ def main():
             trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear)]
         elif args.setting == "Linear_LayerNorm":
             trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear) or isinstance(layer, GCLayerNorm)]
+        elif args.setting == "LayerNorm":
+            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLayerNorm)]
         elif args.setting == "all_but_last_Linear":
             trainable_layers = trainable_layers[:-1]
             trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear)]
@@ -710,20 +712,9 @@ def main():
             model=model,
             lr=1e-3,
             layer_name=trainable_layers,
-            # projector_kwargs=projector_kwargs,
             mode=tda_mode,
             device=device,
         )
-
-        # attributor = MemEffGhostInnerProductAttributor(
-        #     model=model,
-        #     lr=1e-3,
-        #     layer_name=trainable_layers,
-        #     projector_kwargs=projector_kwargs,
-        #     device=device,
-        #     chunk_size=test_batch_size,
-        #     max_test_batches=12,
-        # )
 
         torch.cuda.reset_peak_memory_stats(device)
 
@@ -731,11 +722,6 @@ def main():
         start = time.time()
 
         score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
-
-        # try:
-        #     score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
-        # finally:
-        #     attributor.cleanup()
 
         torch.cuda.synchronize(device)
         end = time.time()
@@ -754,6 +740,8 @@ def main():
             trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear)]
         elif args.setting == "Linear_LayerNorm":
             trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear) or isinstance(layer, GCLayerNorm)]
+        elif args.setting == "LayerNorm":
+            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLayerNorm)]
         elif args.setting == "all_but_last_Linear":
             trainable_layers = trainable_layers[:-1]
             trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear)]
@@ -766,7 +754,6 @@ def main():
         attributor = GCIFAttributorKFAC(
             model=model,
             layer_name=trainable_layers,
-            # projector_kwargs=projector_kwargs,
             profile = args.profile,
             mode=tda_mode,
             device=device,
@@ -911,8 +898,6 @@ def main():
 
     logger.info(f"Time taken: {end - start} seconds")
     logger.info(f"Peak memory usage: {peak_memory} MB")
-
-    # print(score)
 
     # Build the filename components
     filename_parts = [f"{tda_mode}"]

@@ -41,6 +41,7 @@ def main():
         lora=True,
         hessian="raw",
         save="grad",
+        train_data=True,
         label_key="input_ids",
         log_num_workers=4,
     )

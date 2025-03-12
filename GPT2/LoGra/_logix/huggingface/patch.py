@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
 from transformers.trainer import *
+from transformers import default_data_collator
 
 from _logix import LogIX, LogIXScheduler
 from _logix.huggingface.arguments import LogIXArguments
@@ -66,6 +67,7 @@ def patch_trainer(TrainerClass):
             self.logix_label_key = logix_args.label_key
             self.logix_attention_key = logix_args.attention_key
             self.logix_ignore_idx = logix_args.ignore_idx
+            self.logix_data_train = logix_args.train_data
             self.data_id_logic = logix_args.data_id
 
             # Patch TrainingArguments
@@ -154,6 +156,58 @@ def patch_trainer(TrainerClass):
             self.lr_scheduler = DummyScheduler()
             return self.lr_scheduler
 
+        def get_train_dataloader(self) -> DataLoader:
+            """
+            Modification of the original get_train_dataloader method to use a custom Sampler for attribution.
+            """
+            if self.train_dataset is None:
+                raise ValueError("No dataset provided.")
+
+            if self.logix_data_train:
+                class SubsetSampler(torch.utils.data.Sampler):
+                    """Samples elements from a predefined list of indices.
+
+                    Note that for training, the built-in PyTorch
+                    SubsetRandomSampler should be used. This class is for
+                    attributting process.
+                    """
+
+                    def __init__(self, indices: List[int]) -> None:
+                        """Initialize the sampler.
+
+                        Args:
+                            indices (list): A list of indices to sample from.
+                        """
+                        self.indices = indices
+
+                    def __iter__(self):
+                        """Get an iterator for the sampler.
+
+                        Returns:
+                            An iterator for the sampler.
+                        """
+                        return iter(self.indices)
+
+                    def __len__(self) -> int:
+                        """Get the number of indices in the sampler.
+
+                        Returns:
+                            The number of indices in the sampler.
+                        """
+                        return len(self.indices)
+
+                train_sampler = SubsetSampler(range(len(self.train_dataset)))
+                train_dataloader = DataLoader(
+                    self.train_dataset, collate_fn=self.data_collator, batch_size=self._train_batch_size, sampler=train_sampler
+                )
+            else:
+                # Actually a test_dataloader, using a different logic
+                train_dataloader = DataLoader(
+                    self.train_dataset, collate_fn=self.data_collator, batch_size=self._train_batch_size, shuffle=False
+                )
+
+            return self.accelerator.prepare(train_dataloader)
+
         def training_step(
             self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]],
         ) -> torch.Tensor:
@@ -163,6 +217,7 @@ def patch_trainer(TrainerClass):
             data_id = self.get_data_id(inputs)
             mask = inputs.get(self.logix_attention_key, None)
             sum_scale = self.get_sum_scale(inputs)
+            sum_scale = 1.0
 
             with self.logix(data_id=data_id, mask=mask):
                 if is_sagemaker_mp_enabled():
@@ -185,7 +240,7 @@ def patch_trainer(TrainerClass):
                     with amp.scale_loss(loss, self.optimizer) as scaled_loss:
                         scaled_loss.backward()
                 else:
-                    logp = - loss
+                    logp = -loss
                     loss = logp - torch.log(1 - torch.exp(logp))
                     self.accelerator.backward(loss)
 

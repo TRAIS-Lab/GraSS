@@ -155,7 +155,7 @@ class BasicProjector(AbstractProjector):
         self.ensemble_id = ensemble_id
         self.method = method #TODO: currently unused
         self.threshold = threshold #TODO: currently unused
-        self.random_drop = random_drop
+        self.random_drop = random_drop #TODO: currently unused
 
         self.proj_matrix = torch.empty(
             self.feature_dim,
@@ -303,7 +303,9 @@ class CudaProjector(AbstractProjector):
         super().__init__(feature_dim, proj_dim, seed, proj_type, device)
         self.max_batch_size = max_batch_size
         self.threshold = threshold
-        self.random_drop = random_drop
+
+        active_mask = torch.rand(feature_dim, device=device) > random_drop
+        self.active_indices = torch.nonzero(active_mask).squeeze()
 
         if isinstance(device, str):
             device = torch.device(device)
@@ -334,19 +336,27 @@ class CudaProjector(AbstractProjector):
                 (the fast_jl library)."
                 raise ModuleNotFoundError(msg) from None
         elif self.method == "SJLT":
-            c = 1
+            #TODO: fix due to the update
+            self.c = 2
             blow_up = 5
             torch.manual_seed(self.seed)
-            rand_indices = torch.randint(proj_dim * blow_up, (feature_dim, c), device=device)
-            rand_signs = torch.randint(0, 2, (feature_dim, c), device=device) * 2 - 1
+            rand_indices = torch.randint(proj_dim * blow_up, (feature_dim, self.c), device=device)
+            rand_signs = torch.randint(0, 2, (feature_dim, self.c), device=device) * 2 - 1
             self.rand_indices_and_signs = (rand_indices, rand_signs)
         elif self.method == "SJLT_R":
-            # randomly dropping some feature dimensions with probability random_drop
-            active_mask = torch.rand(feature_dim, device=device) > random_drop
-            self.active_indices = torch.nonzero(active_mask).squeeze()
-            self.backward_indices = backward_SJLT_indices(proj_dim, c=1, active_indices=self.active_indices, device=device, seed=self.seed)
-        elif self.method == "Gaussian":
-            pass #TODO
+            self.c = 2
+            self.backward_indices = backward_SJLT_indices(proj_dim, c=self.c, active_indices=self.active_indices, device=device, seed=self.seed)
+        elif self.method == "Rademacher":
+            active_dim = self.active_indices.numel()
+            self.proj_matrix = torch.empty(
+                active_dim,
+                proj_dim,
+                device=device,
+            )
+            torch.manual_seed(self.seed)
+            self.proj_matrix.bernoulli_(p=0.5)
+            self.proj_matrix *= 2.0
+            self.proj_matrix -= 1.0
 
     def project(
         self,
@@ -385,6 +395,7 @@ class CudaProjector(AbstractProjector):
         effective_batch_size = min(self.max_batch_size, effective_batch_size)
 
         if self.method == "FJLT":
+            #TODO: fix due to the update
             import fast_jl
             function_name = f"project_{self.proj_type}_{effective_batch_size}"
 
@@ -413,6 +424,7 @@ class CudaProjector(AbstractProjector):
                     raise RuntimeError(msg) from e
                 raise e from None
         elif self.method == "SJLT":
+            #TODO: fix due to the update
             result = SJLT(
                 features,
                 self.proj_dim,
@@ -420,11 +432,10 @@ class CudaProjector(AbstractProjector):
                 self.rand_indices_and_signs,
                 seed=self.seed + int(1e4) * ensemble_id,
                 batch_size=effective_batch_size,
-                c=1,
-                blow_up=2,
+                c=self.c,
+                blow_up=1,
             )
         elif self.method == "SJLT_R":
-            c = 1
             batch_size, _ = features.size()
 
             features = features[:, self.active_indices]
@@ -447,10 +458,12 @@ class CudaProjector(AbstractProjector):
                 batch_neg_output_mapping = neg_output_mapping.unsqueeze(0).expand(batch_size, -1)
                 batch_vec_p.scatter_add_(1, batch_neg_output_mapping, -neg_values)
 
-            result = batch_vec_p / (c ** 0.5)
-        elif self.method == "Gaussian":
+            result = batch_vec_p / (self.c ** 0.5)
+        elif self.method == "Rademacher":
+            features = features[:, self.active_indices]
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
-            #TODO
+
+            result = features @ self.proj_matrix
 
         return result
 

@@ -42,6 +42,7 @@ def main():
         lora=True,
         hessian="raw",
         save="grad",
+        train_data=False,
         label_key="input_ids",
         initialize_from_log=True,
         log_batch_size=args.batch_size,
