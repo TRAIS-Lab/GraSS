@@ -580,64 +580,30 @@ def main():
     logger.info(f"The training dataset length: {len(train_dataset)}.")
     logger.info(f"The eval dataset length: {len(test_dataset)}.")
 
-    # DataLoaders creation:
-    if args.mode is not None:
-        tda_method, tda_mode = args.mode.split("-")
-
     proj_method, proj_dim = None, None
     if args.proj is not None:
         proj_method, proj_dim = args.proj.split("-")
         proj_dim = int(proj_dim)
 
-    logger.info(f"TDA Method: {tda_method} with mode: {tda_mode}")
+    logger.info(f"TDA Method: {args.tda_method}")
 
-    if tda_method == "GD":
-        if tda_mode == "default":
-            if proj_method == "SJLT":
-                train_batch_size = 4
-                test_batch_size = 4
-            else:
-                train_batch_size = 5
-                test_batch_size = 5
-        elif tda_mode == "iterate":
-            if args.proj is not None:
-                train_batch_size = 4
-                test_batch_size = 4
-            else:
-                train_batch_size = 8
-                test_batch_size = 8
+    if args.tda_method == "GD-GC":
+        train_batch_size = 8
+        test_batch_size = 8
+    elif args.tda_method == "IF-GC":
+        # default will first store all the information for train. Only used with projection.
+        if proj_dim is not None and proj_dim <= 1024 and args.proj_dim_dist == "non-uniform":
+            train_batch_size = 8
+            test_batch_size = 8
         else:
-            raise ValueError("Invalid model type for vanilla Grad-Dot. Choose from 'default', 'iterate'.")
-    elif tda_method == "IF":
-        if tda_mode == "default": # default will first store all the information for train. Only used with projection.
-            if proj_dim is not None and proj_dim <= 1024 and args.proj_dim_dist == "non-uniform":
-                train_batch_size = 8
-                test_batch_size = 8
-            else:
-                train_batch_size = 8
-                test_batch_size = 8
-        elif tda_mode == "iterate": # For iterate, #repeated computation over test set is n / train_bat_size.
-            if args.proj is not None: # need extra memory for projection
-                train_batch_size = 12
-                test_batch_size = 10
-            else:
-                train_batch_size = 10
-                test_batch_size = 10
-        elif tda_mode == "one_run":
-            train_batch_size = 4
-            test_batch_size = 4
-        else:
-            raise ValueError("Invalid mode type for Grad-Dot with Ghost Inner-Product. Choose from 'default', 'iterate', 'one_run'.")
-    elif tda_method =="TRAK":
-        if tda_mode == "default":
-            train_batch_size = 4
-            test_batch_size = 4
-        else:
-            raise ValueError("Invalid method type. Choose from 'default'.")
-    elif tda_method =="dattriGD":
-        if tda_mode == "default":
-            train_batch_size = 4
-            test_batch_size = 4
+            train_batch_size = 8
+            test_batch_size = 8
+    elif args.tda_method =="TRAK-dattri":
+        train_batch_size = 4
+        test_batch_size = 4
+    elif args.tda_method =="GD-dattri":
+        train_batch_size = 4
+        test_batch_size = 4
     else:
         raise ValueError("Invalid method type. Choose from 'IF', 'TRAK', or 'GD'.")
 
@@ -682,9 +648,9 @@ def main():
         model(batch["input_ids"].cuda(device), attention_mask=batch["attention_mask"].cuda(device), labels=batch["labels"].cuda(device))
         break
 
-    model.set_projectors(tda_mode, projector_kwargs)
+    model.set_projectors(projector_kwargs)
 
-    if tda_method == "GD":
+    if args.tda_method == "GD-GC":
         from GC.GD import GCGradDotAttributor
         from GC.helper import find_GClayers
         from GC.layers.layer_norm import GCLayerNorm
@@ -712,7 +678,6 @@ def main():
             model=model,
             lr=1e-3,
             layer_name=trainable_layers,
-            mode=tda_mode,
             device=device,
         )
 
@@ -727,7 +692,7 @@ def main():
         end = time.time()
 
         peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
-    elif tda_method == "IF":
+    elif args.tda_method == "IF-GC":
         from GC.influence_function import GCIFAttributorKFAC
         from GC.helper import find_GClayers
         from GC.layers.layer_norm import GCLayerNorm
@@ -755,7 +720,6 @@ def main():
             model=model,
             layer_name=trainable_layers,
             profile = args.profile,
-            mode=tda_mode,
             device=device,
         )
 
@@ -773,7 +737,7 @@ def main():
         end = time.time()
 
         peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
-    elif tda_method == "TRAK":
+    elif args.tda_method == "TRAK-dattri":
         from _dattri.task import AttributionTask
         from _dattri.algorithm.trak import TRAKAttributor
 
@@ -826,7 +790,7 @@ def main():
 
         peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
 
-    elif tda_method == "dattriGD":
+    elif args.tda_method == "GD-dattri":
         from _dattri.task import AttributionTask
         from _dattri.algorithm.tracin import TracInAttributor
 
@@ -866,7 +830,6 @@ def main():
                 projector_kwargs=projector_kwargs,
                 device=device,
                 layer_name=param_names,  # Pass the grouped names
-                mode=tda_mode,
             )
         # for name, _ in model.named_parameters():
         #     print(name)
@@ -878,7 +841,6 @@ def main():
         #         device=device,
         #         layer_name=[name],
         #         # layer_name=[name for name, _ in model.named_parameters() if 'ln' not in name.lower()],  # Consider only Linear layers (exclude LayerNorm).
-        #         mode=tda_mode,
         #     )
 
             torch.cuda.reset_peak_memory_stats(device)
@@ -900,10 +862,10 @@ def main():
     logger.info(f"Peak memory usage: {peak_memory} MB")
 
     # Build the filename components
-    filename_parts = [f"{tda_mode}"]
+    filename_parts = []
 
     if args.proj is not None:
-        if tda_method == "GD" or tda_method == "IF":
+        if args.tda_method == "GD" or args.tda_method == "IF":
             if args.proj_dim_dist == "non-uniform":
                 filename_parts.append(f"{proj_method}-{proj_dim}(NU)")
             elif args.proj_dim_dist == "uniform":
@@ -920,9 +882,9 @@ def main():
     training_setting = args.output_dir.split("/")[-1]
     # Join parts and save the file
     if args.debug:
-        filename = f"./results/{training_setting}/debug/{tda_method}/{args.setting}/{'_'.join(filename_parts)}.pt"
+        filename = f"./results/{training_setting}/debug/{args.tda_method}/{args.setting}/{'_'.join(filename_parts)}.pt"
     else:
-        filename = f"./results/{training_setting}/{tda_method}/{args.setting}/{'_'.join(filename_parts)}.pt"
+        filename = f"./results/{training_setting}/{args.tda_method}/{args.setting}/{'_'.join(filename_parts)}.pt"
 
     from lds import calculate_one
     lds_score, _, _ = calculate_one(score, training_setting)

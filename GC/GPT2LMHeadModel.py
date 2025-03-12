@@ -120,7 +120,7 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
             raise ValueError(f"Unsupported layer type for LayerNorm: {type(old_layer)}")
         return new_layer
 
-    def set_projectors(self, mode, projector_kwargs):
+    def set_projectors(self, projector_kwargs):
         """
         Set projectors for all GC layers in the model.
 
@@ -162,12 +162,12 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
                 layer_dim_1.append(0)
                 layer_dim_2.append(0)
 
-        if mode == "default" and proj_dim_dist == "non-uniform":
+        if proj_dim_dist == "non-uniform":
             total_dim_1 = sum(layer_dim_1)
             total_dim_2 = sum(layer_dim_2)
             proj_dim_1 = [int(proj_dim * dim / total_dim_1) for dim in layer_dim_1]
             proj_dim_2 = [int(proj_dim * dim / total_dim_2) for dim in layer_dim_2]
-        elif mode in ["one_run", "iterate"] or (mode == "default" and proj_dim_dist == "uniform"):
+        elif proj_dim_dist == "uniform":
             proj_dim_1 = [proj_dim] * len(layer_dim_1)
             proj_dim_2 = [proj_dim] * len(layer_dim_2)
 

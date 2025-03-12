@@ -58,7 +58,6 @@ class GCIFAttributorKFAC():
         layer_name: Optional[Union[str, List[str]]] = None,
         damping = 1e-4,
         profile: bool = False,
-        mode: str = "default",
         device: str = 'cpu'
     ) -> None:
         """Ghost Inner Product Attributor for Gradient Dot.
@@ -76,7 +75,6 @@ class GCIFAttributorKFAC():
         self.layer_name = find_GClayers(model) if layer_name is None else layer_name
         self.damping = damping
         self.profile = profile
-        self.mode = mode
         self.device = device
         self.full_train_dataloader = None
 
@@ -253,10 +251,7 @@ class GCIFAttributorKFAC():
                        training loader or cache a training loader."
             raise ValueError(message)
 
-        if self.mode == "default":
-            return self.attribute_default(test_dataloader, train_dataloader)
-        else:
-            raise ValueError(f"Unknown mode: {self.mode}")
+        return self.attribute_default(test_dataloader, train_dataloader)
 
     def attribute_default(
         self,
