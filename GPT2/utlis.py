@@ -79,24 +79,24 @@ def setup_projector(args, device):
 
     return projector_kwargs
 
-def batch_size(tda):
-    if tda == "GD-GC":
-        train_batch_size = 8
-        test_batch_size = 8
-    elif tda == "IF-GC":
-        train_batch_size = 8
-        test_batch_size = 8
-    elif tda == "IF-LoGra":
-        train_batch_size = 32
-        test_batch_size = 32
-    elif tda =="TRAK-dattri":
-        train_batch_size = 4
-        test_batch_size = 4
-    elif tda =="GD-dattri":
-        train_batch_size = 4
-        test_batch_size = 4
+def batch_size(baseline, tda):
+    if baseline == "GC":
+        if tda == "GD":
+            train_batch_size = 8
+            test_batch_size = 8
+        elif tda in ["IF-RAW", "IF-KFAC", "IF-EKFAC"]:
+            train_batch_size = 10
+            test_batch_size = 10
+    elif baseline == "LoGra":
+        if tda in ["IF-RAW", "IF-KFAC", "IF-EKFAC"]:
+            train_batch_size = 32
+            test_batch_size = 32
+    elif baseline == "dattri":
+        if tda in ["TRAK", "GD"]:
+            train_batch_size = 4
+            test_batch_size = 4
     else:
-        raise ValueError("Invalid method type. Choose from 'GD-GC', 'IF-GC', 'TRAK-dattri', or 'GD-dattri'.")
+        raise ValueError("Invalid baseline and tda combination.")
 
     return train_batch_size, test_batch_size
 
@@ -111,6 +111,6 @@ def result_filename(args):
 
     training_setting = args.output_dir.split("/")[-1]
     # Join parts and save the file
-    result_filename = f"./results/{training_setting}/{args.tda}/{args.layer}/{'_'.join(filename_parts)}.pt"
+    result_filename = f"./results/{training_setting}/{args.baseline}/{args.tda}/{args.layer}/{'_'.join(filename_parts)}.pt"
 
     return result_filename

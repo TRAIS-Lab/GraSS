@@ -266,6 +266,12 @@ def parse_args():
         help="Record profiling results.",
     )
     parser.add_argument(
+        "--baseline",
+        type=str,
+        default="GC",
+        help="Specify which baseline library implementation we want to run the data attribution method. Available options: GC, LoGra, dattri.",
+    )
+    parser.add_argument(
         "--tda",
         type=str,
         default="IF-GC",
@@ -574,7 +580,7 @@ def main():
     # Dataset
     train_dataset = lm_datasets["train"]
     test_dataset = lm_datasets["validation"]
-    train_batch_size, test_batch_size = batch_size(args.tda)
+    train_batch_size, test_batch_size = batch_size(args.baseline, args.tda)
 
     if args.debug: # toy dataset
         train_dataset = train_dataset.select(range(32))
@@ -602,54 +608,54 @@ def main():
     model_id = 0
     checkpoint = f"{args.output_dir}/{model_id}"
 
-    if args.tda == "GD-GC":
-        check_min_version("4.46.0") # Gradient Component is built on top of 4.46.0
-        from _gradcomp.GD import GCGradDotAttributor
+    profile = None
+    if args.baseline == "GC":
         from GC.utlis import find_GClayers
+        check_min_version("4.46.0") # Gradient Component is built on top of 4.46.0
 
         model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
         model.set_projectors(projector_kwargs, train_dataloader)
         model.eval()
 
-        attributor = GCGradDotAttributor(
-            model=model,
-            layer_name=find_GClayers(model, args.layer),
-            lr=1e-3,
-            profile=args.profile,
-            device=device,
-        )
+        if args.tda == "GD":
+            from _gradcomp.GD import GCGradDotAttributor
+            attributor = GCGradDotAttributor(
+                model=model,
+                layer_name=find_GClayers(model, args.layer),
+                lr=1e-3,
+                profile=args.profile,
+                device=device,
+            )
 
-        if args.profile:
-            score, profile = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
+            if args.profile:
+                score, profile = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
+            else:
+                score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
+
+        elif args.tda == "IF-KFAC":
+            from _gradcomp.influence_function import GCIFAttributorKFAC
+            attributor = GCIFAttributorKFAC(
+                model=model,
+                layer_name=find_GClayers(model, args.layer),
+                profile=args.profile,
+                device=device,
+            )
+
+            if args.profile:
+                score, profile = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
+            else:
+                score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
         else:
-            score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
+            raise ValueError("Invalid TDA method for GC.")
 
-    elif args.tda == "IF-GC":
-        check_min_version("4.46.0") # Gradient Component is built on top of 4.46.0
-        from _gradcomp.influence_function import GCIFAttributorKFAC
-        from GC.utlis import find_GClayers
-
-        model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
-        model.set_projectors(projector_kwargs, train_dataloader)
-        model.eval()
-
-        attributor = GCIFAttributorKFAC(
-            model=model,
-            layer_name=find_GClayers(model, args.layer),
-            profile=args.profile,
-            device=device,
-        )
-
-        if args.profile:
-            score, profile = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
-        else:
-            score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
-
-    elif args.tda == "IF-LoGra":
+    elif args.baseline == "LoGra":
         #check_min_version("4.46.0") # LoGra is built on top of 4.40.0, ignore the checking
         from _logix.huggingface import LogIXArguments, patch_trainer
         from LoGra.utils import LoGra_GPT2
 
+        # get which Hessian to use
+        hessian = args.tda.split("-")[1].lower()
+        assert hessian in ["raw", "kfac", "ekfac"], "Invalid Hessian type."
         assert args.layer == "Linear", "LoGra only supports Linear setting now."
 
         model = LoGra_GPT2(checkpoint, config, resume=True)
@@ -662,7 +668,7 @@ def main():
             project=f"./LoGra/project/{args.proj}-{args.proj_dim}",
             config=f"./LoGra/config/{args.proj}-{args.proj_dim}.yaml",
             lora=True,
-            hessian="raw",
+            hessian=hessian,
             save="grad",
             train_data=True,
             label_key="input_ids",
@@ -690,7 +696,7 @@ def main():
             project=f"./LoGra/project/{args.proj}-{args.proj_dim}",
             config=f"./LoGra/config/{args.proj}-{args.proj_dim}.yaml",
             lora=True,
-            hessian="raw",
+            hessian=hessian,
             save="grad",
             train_data=False,
             label_key="input_ids",
@@ -715,107 +721,103 @@ def main():
         result = trainer.influence()
         score = result["influence"].T
 
-    elif args.tda == "TRAK-dattri": #TODO: fix
-        from _dattri.task import AttributionTask
-        from _dattri.algorithm.trak import TRAKAttributor
+    elif args.baseline == "dattri":
+        if args.tda == "GD": #TODO: fix
+            from _dattri.task import AttributionTask
+            from _dattri.algorithm.tracin import TracInAttributor
 
-        # need to ensure model is in eval before defining f
-        model.eval()
-        def f(params, batch):
-            outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
-                                                kwargs={"attention_mask": batch["attention_mask"].cuda(device),
-                                                        "labels": batch["labels"].cuda(device)})
-            logp = -outputs.loss
-            return logp - torch.log(1 - torch.exp(logp))
-
-        def m(params, batch):
-            outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
-                                                kwargs={"attention_mask": batch["attention_mask"].cuda(device),
-                                                        "labels": batch["labels"].cuda(device)})
-            p = torch.exp(-outputs.loss)
-            return p
-
-        checkpoints = [f"{args.output_dir}/{i}"
-                    for i in range(5)]
-
-        def checkpoints_load_func(model, checkpoint):
-            model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
+            # need to ensure model is in eval before defining f
             model.eval()
-            return model
+            def f(params, batch):
+                outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
+                                                    kwargs={"attention_mask": batch["attention_mask"].cuda(device),
+                                                            "labels": batch["labels"].cuda(device)})
+                logp = -outputs.loss
+                return logp - torch.log(1 - torch.exp(logp))
 
-        task = AttributionTask(loss_func=f, model=model,
-                           checkpoints=checkpoints,
-                           checkpoints_load_func=checkpoints_load_func)
+            def checkpoints_load_func(model, checkpoint):
+                model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
+                model.eval()
+                return model
 
-        attributor = TRAKAttributor(
-            task=task,
-            correct_probability_func=m,
-            device=device,
-            projector_kwargs=projector_kwargs,
-        )
+            task = AttributionTask(loss_func=f, model=model,
+                                checkpoints=checkpoint,
+                                checkpoints_load_func=checkpoints_load_func)
 
-        attributor.cache(train_dataloader)
-        with torch.no_grad():
-            score = attributor.attribute(test_dataloader)
+            from collections import defaultdict
 
-    elif args.tda == "GD-dattri": #TODO: fix
-        from _dattri.task import AttributionTask
-        from _dattri.algorithm.tracin import TracInAttributor
+            # Group parameters by their base layer name
+            layer_groups = defaultdict(list)
+            for name, _ in model.named_parameters():
+                base_name = ".".join(name.split(".")[:-1])  # Remove 'weight' or 'bias' suffix
+                layer_groups[base_name].append(name)
 
-        # need to ensure model is in eval before defining f
-        model.eval()
-        def f(params, batch):
-            outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
-                                                kwargs={"attention_mask": batch["attention_mask"].cuda(device),
-                                                        "labels": batch["labels"].cuda(device)})
-            logp = -outputs.loss
-            return logp - torch.log(1 - torch.exp(logp))
+            # Iterate over combined layer names
+            for base_name, param_names in layer_groups.items():
+                print(f"Grouping: {param_names}")
+                attributor = TracInAttributor(
+                    task=task,
+                    weight_list=torch.ones(1) * 1e-3,
+                    normalized_grad=False,  # For Grad-Dot, True if Grad-Cos
+                    projector_kwargs=projector_kwargs,
+                    device=device,
+                    layer_name=param_names,  # Pass the grouped names
+                )
 
-        def checkpoints_load_func(model, checkpoint):
-            model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
+                with torch.no_grad():
+                    score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
+        elif args.tda == "TRAK": #TODO: fix
+            from _dattri.task import AttributionTask
+            from _dattri.algorithm.trak import TRAKAttributor
+
+            # need to ensure model is in eval before defining f
             model.eval()
-            return model
+            def f(params, batch):
+                outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
+                                                    kwargs={"attention_mask": batch["attention_mask"].cuda(device),
+                                                            "labels": batch["labels"].cuda(device)})
+                logp = -outputs.loss
+                return logp - torch.log(1 - torch.exp(logp))
 
-        task = AttributionTask(loss_func=f, model=model,
-                            checkpoints=checkpoint,
+            def m(params, batch):
+                outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
+                                                    kwargs={"attention_mask": batch["attention_mask"].cuda(device),
+                                                            "labels": batch["labels"].cuda(device)})
+                p = torch.exp(-outputs.loss)
+                return p
+
+            checkpoints = [f"{args.output_dir}/{i}"
+                        for i in range(5)]
+
+            def checkpoints_load_func(model, checkpoint):
+                model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
+                model.eval()
+                return model
+
+            task = AttributionTask(loss_func=f, model=model,
+                            checkpoints=checkpoints,
                             checkpoints_load_func=checkpoints_load_func)
 
-        from collections import defaultdict
-
-        # Group parameters by their base layer name
-        layer_groups = defaultdict(list)
-        for name, _ in model.named_parameters():
-            base_name = ".".join(name.split(".")[:-1])  # Remove 'weight' or 'bias' suffix
-            layer_groups[base_name].append(name)
-
-        # Iterate over combined layer names
-        for base_name, param_names in layer_groups.items():
-            print(f"Grouping: {param_names}")
-            attributor = TracInAttributor(
+            attributor = TRAKAttributor(
                 task=task,
-                weight_list=torch.ones(1) * 1e-3,
-                normalized_grad=False,  # For Grad-Dot, True if Grad-Cos
-                projector_kwargs=projector_kwargs,
+                correct_probability_func=m,
                 device=device,
-                layer_name=param_names,  # Pass the grouped names
+                projector_kwargs=projector_kwargs,
             )
 
+            attributor.cache(train_dataloader)
             with torch.no_grad():
-                score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
+                score = attributor.attribute(test_dataloader)
+
     else:
-        raise ValueError("Invalid TDA method. Choose from 'GD-GC', 'IF-GC', 'IF-LoGra', 'GD-dattr'.")
+        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LoGra', and 'dattri'.")
 
     training_setting = args.output_dir.split("/")[-1]
     lds_score, _, _ = lds(score, training_setting)
 
-    # create a dict to save the results
-    result = {
-        "score": score,
-        "lds": lds_score,
-        "profile": None if not args.profile else profile,
-    }
-
     logger.info("***** Attribution finished *****")
+
+    result = {"score": score, "lds": lds_score, "profile": profile}
     logger.info(result)
 
     if not args.debug: # only save the results when not in debug mode
