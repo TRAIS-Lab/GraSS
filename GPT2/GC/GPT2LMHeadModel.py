@@ -5,8 +5,8 @@ sys.path.append(parent_dir)
 
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 from transformers.models.gpt2.modeling_gpt2 import Conv1D
-from _gradcomp.layers.linear import GCLinear, GCEmbedding
-from _gradcomp.layers.layer_norm import GCLayerNorm
+from _GradComp.layers.linear import GCLinear, GCEmbedding
+from _GradComp.layers.layer_norm import GCLayerNorm
 from GC.utlis import transpose_Conv1D
 import torch
 import torch.nn as nn

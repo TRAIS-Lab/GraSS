@@ -618,7 +618,7 @@ def main():
         model.eval()
 
         if args.tda == "GD":
-            from _gradcomp.GD import GCGradDotAttributor
+            from _GradComp.GD import GCGradDotAttributor
             attributor = GCGradDotAttributor(
                 model=model,
                 layer_name=find_GClayers(model, args.layer),
@@ -633,7 +633,7 @@ def main():
                 score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
 
         elif args.tda == "IF-KFAC":
-            from _gradcomp.influence_function import GCIFAttributorKFAC
+            from _GradComp.influence_function import GCIFAttributorKFAC
             attributor = GCIFAttributorKFAC(
                 model=model,
                 layer_name=find_GClayers(model, args.layer),

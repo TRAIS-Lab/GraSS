@@ -3,8 +3,8 @@ import sys
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '...'))
 sys.path.append(parent_dir)
 
-from _gradcomp.layers.linear import GCLinear, GCEmbedding
-from _gradcomp.layers.layer_norm import GCLayerNorm
+from _GradComp.layers.linear import GCLinear, GCEmbedding
+from _GradComp.layers.layer_norm import GCLayerNorm
 
 # For GPT2 specifically
 Conv1DSwitch = [
