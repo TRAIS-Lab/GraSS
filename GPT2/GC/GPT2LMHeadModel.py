@@ -1,8 +1,13 @@
+import os
+import sys
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '...'))
+sys.path.append(parent_dir)
+
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 from transformers.models.gpt2.modeling_gpt2 import Conv1D
-from .layers.linear import GCLinear, GCEmbedding
-from .layers.layer_norm import GCLayerNorm
-from .helper import transpose_Conv1D
+from grad_comp.layers.linear import GCLinear, GCEmbedding
+from grad_comp.layers.layer_norm import GCLayerNorm
+from .utlis import transpose_Conv1D
 import torch
 import torch.nn as nn
 import os

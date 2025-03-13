@@ -8,9 +8,6 @@ if TYPE_CHECKING:
 import torch
 from torch import Tensor
 from tqdm import tqdm
-from .helper import find_GClayers
-
-from _dattri.func.projection import random_project
 
 import time
 
@@ -18,9 +15,8 @@ class GCGradDotAttributor():
     def __init__(
         self,
         model,
+        layer_name: Optional[Union[str, List[str]]],
         lr: float = 1e-3,
-        layer_name: Optional[Union[str, List[str]]] = None,
-        # projector_kwargs: Optional[Dict[str, Any]] = None,
         device: str = 'cpu'
     ) -> None:
         """Ghost Inner Product Attributor for Gradient Dot.
@@ -49,7 +45,7 @@ class GCGradDotAttributor():
         """
         self.model = model
         self.lr = lr
-        self.layer_name = find_GClayers(model) if layer_name is None else layer_name
+        self.layer_name = layer_name
         self.device = device
         self.full_train_dataloader = None
 

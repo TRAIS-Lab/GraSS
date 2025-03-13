@@ -7,7 +7,6 @@ if TYPE_CHECKING:
 
 import torch
 from tqdm import tqdm
-from .helper import find_GClayers
 
 import time
 
@@ -55,11 +54,9 @@ class GCIFAttributorKFAC():
     def __init__(
         self,
         model,
-        layer_name: Optional[Union[str, List[str]]] = None,
-        # projector_kwargs: Optional[Dict[str, Any]] = None,
+        layer_name: Optional[Union[str, List[str]]],
         damping = 1e-4,
         profile: bool = False,
-        mode: str = "default",
         device: str = 'cpu'
     ) -> None:
         """Ghost Inner Product Attributor for Gradient Dot.
@@ -74,11 +71,9 @@ class GCIFAttributorKFAC():
             device (str, optional): _description_. Defaults to 'cpu'.
         """
         self.model = model
-        self.layer_name = find_GClayers(model) if layer_name is None else layer_name
-        # (self.projector_kwargs_1, self.projector_kwargs_2), (self.proj_dim_1, self.proj_dim_2), self.proj_seed = setup_projectors(projector_kwargs, self.layer_name, mode)
+        self.layer_name = layer_name
         self.damping = damping
         self.profile = profile
-        self.mode = mode
         self.device = device
         self.full_train_dataloader = None
 
@@ -140,6 +135,10 @@ class GCIFAttributorKFAC():
             )
             logp = -outputs.loss
             train_loss = logp - torch.log(1 - torch.exp(logp))
+
+            print(f"logp: {logp}")
+            print(f"Train Loss: {train_loss}")
+            exit()
 
             train_pre_acts = [layer.pre_activation for layer in self.layer_name]
             Z_grad_train = torch.autograd.grad(train_loss, train_pre_acts, retain_graph=True)
@@ -251,10 +250,7 @@ class GCIFAttributorKFAC():
                        training loader or cache a training loader."
             raise ValueError(message)
 
-        if self.mode == "default":
-            return self.attribute_default(test_dataloader, train_dataloader)
-        else:
-            raise ValueError(f"Unknown mode: {self.mode}")
+        return self.attribute_default(test_dataloader, train_dataloader)
 
     def attribute_default(
         self,

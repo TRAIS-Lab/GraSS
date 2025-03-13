@@ -565,51 +565,19 @@ def main():
 
     # >>>>>>>>>>>>>>>>>>>>> dattri Code begins here >>>>>>>>>>>>>>>>>>>>>
     from _dattri.benchmark.utils import SubsetSampler
+    from .utlis import batch_size, projection_parsing, lds
 
     device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
 
+    # Dataset
     train_dataset = lm_datasets["train"]
     test_dataset = lm_datasets["validation"]
+    train_batch_size, test_batch_size = batch_size(args.tda_method)
 
     if args.debug: # toy dataset
         train_dataset = train_dataset.select(range(4))
         test_dataset = test_dataset.select(range(4))
-
-    # Dataset length
-    logger.info(f"The training dataset length: {len(train_dataset)}.")
-    logger.info(f"The eval dataset length: {len(test_dataset)}.")
-
-    proj_method, proj_dim = None, None
-    if args.proj is not None:
-        proj_method, proj_dim = args.proj.split("-")
-        proj_dim = int(proj_dim)
-
-    logger.info(f"TDA Method: {args.tda_method}")
-
-    if args.tda_method == "GD-GC":
-        train_batch_size = 8
-        test_batch_size = 8
-    elif args.tda_method == "IF-GC":
-        # default will first store all the information for train. Only used with projection.
-        if proj_dim is not None and proj_dim <= 1024 and args.proj_dim_dist == "non-uniform":
-            train_batch_size = 8
-            test_batch_size = 8
-        else:
-            train_batch_size = 8
-            test_batch_size = 8
-    elif args.tda_method =="TRAK-dattri":
-        train_batch_size = 4
-        test_batch_size = 4
-    elif args.tda_method =="GD-dattri":
-        train_batch_size = 4
-        test_batch_size = 4
-    else:
-        raise ValueError("Invalid method type. Choose from 'IF', 'TRAK', or 'GD'.")
-
-    logger.info(f"The training batch size: {train_batch_size}")
-    logger.info(f"The eval batch size: {test_batch_size}")
-
     train_sampler = SubsetSampler(range(len(train_dataset)))
     train_dataloader = DataLoader(
         train_dataset, collate_fn=default_data_collator, batch_size=train_batch_size, sampler=train_sampler
@@ -618,66 +586,66 @@ def main():
         test_dataset, collate_fn=default_data_collator, batch_size=test_batch_size, shuffle=False
     )
 
-    if proj_method is None:
-        projector_kwargs = None
-    else:
-        projector_kwargs = {
-            "proj_dim": proj_dim,
-            "proj_dim_dist": args.proj_dim_dist,
-            "proj_max_batch_size": 32,
-            "proj_seed": args.seed,
-            "device": device,
-            "method": proj_method,
-            "use_half_precision": False,
-            "threshold": args.threshold,
-            "random_drop": args.random_drop,
-        }
+    # Projector
+    proj_method, proj_dim = projection_parsing(args.proj)
+    projector_kwargs = None if proj_method is None else {
+        "proj_dim": proj_dim,
+        "proj_dim_dist": args.proj_dim_dist,
+        "proj_max_batch_size": 32,
+        "proj_seed": args.seed,
+        "device": device,
+        "method": proj_method,
+        "use_half_precision": False,
+        "threshold": args.threshold,
+        "random_drop": args.random_drop,
+    }
 
-        logger.info(f"Projector: {projector_kwargs}")
+    # Build the filename components
+    filename_parts = []
 
+    if args.proj is not None:
+        if args.tda_method in ["GD-GC", "IF-GC", "IF-LoGra", "GD-dattri"]:
+            if args.proj_dim_dist == "non-uniform":
+                filename_parts.append(f"{proj_method}-{proj_dim}(NU)")
+            elif args.proj_dim_dist == "uniform":
+                filename_parts.append(f"{proj_method}-{proj_dim}(U)")
+            else:
+                raise ValueError("Invalid projection dimension distribution. Choose from 'uniform' or 'non-uniform'.")
+        else:
+            filename_parts.append(f"{proj_method}-{proj_dim}")
+
+    filename_parts.append(f"thrd-{args.threshold}", f"randrop-{args.random_drop}")
+
+    training_setting = args.output_dir.split("/")[-1]
+    # Join parts and save the file
+    result_filename = f"./results/{training_setting}/{args.tda_method}/{args.setting}/{'_'.join(filename_parts)}.pt"
+
+    # Logging setting
+    logger.info(f"The training dataset length: {len(train_dataset)}.")
+    logger.info(f"The eval dataset length: {len(test_dataset)}.")
+    logger.info(f"TDA Method: {args.tda_method}")
+    logger.info(f"The training batch size: {train_batch_size}")
+    logger.info(f"The eval batch size: {test_batch_size}")
+    logger.info(f"Projector: {projector_kwargs}")
     logger.info(f"Setting: {args.setting}")
 
     logger.info("***** Running attribution *****")
 
-
     model_id = 0
     checkpoint = f"{args.output_dir}/{model_id}"
     model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device) # reload the model with custom GC checkpoints
-    # test the model with the first batch
-    for batch in train_dataloader:
-        model(batch["input_ids"].cuda(device), attention_mask=batch["attention_mask"].cuda(device), labels=batch["labels"].cuda(device))
-        break
-
     model.set_projectors(projector_kwargs)
 
     if args.tda_method == "GD-GC":
-        from GC.GD import GCGradDotAttributor
-        from GC.helper import find_GClayers
-        from GC.layers.layer_norm import GCLayerNorm
-        from GC.layers.linear import GCLinear, GCEmbedding
+        from grad_comp.GD import GCGradDotAttributor
+        from GC.utlis import find_GClayers
 
         model.eval()
 
-        trainable_layers = find_GClayers(model)
-        if args.setting == "Linear":
-            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear)]
-        elif args.setting == "Linear_LayerNorm":
-            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear) or isinstance(layer, GCLayerNorm)]
-        elif args.setting == "LayerNorm":
-            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLayerNorm)]
-        elif args.setting == "all_but_last_Linear":
-            trainable_layers = trainable_layers[:-1]
-            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear)]
-        elif args.setting == "all_but_last_Linear_and_LayerNorm":
-            trainable_layers = trainable_layers[:-1]
-            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear) or isinstance(layer, GCLayerNorm)]
-        else:
-            raise ValueError("Invalid setting now. Choose from 'Linear', 'Linear_LayerNorm', 'all_but_last_Linear', 'all_but_last_Linear_and_LayerNorm'.")
-
         attributor = GCGradDotAttributor(
             model=model,
+            layer_name=find_GClayers(model, args.setting),
             lr=1e-3,
-            layer_name=trainable_layers,
             device=device,
         )
 
@@ -693,33 +661,15 @@ def main():
 
         peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
     elif args.tda_method == "IF-GC":
-        from GC.influence_function import GCIFAttributorKFAC
-        from GC.helper import find_GClayers
-        from GC.layers.layer_norm import GCLayerNorm
-        from GC.layers.linear import GCLinear, GCEmbedding
+        from grad_comp.influence_function import GCIFAttributorKFAC
+        from GC.utlis import find_GClayers
 
         model.eval()
 
-        trainable_layers = find_GClayers(model)
-        if args.setting == "Linear":
-            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear)]
-        elif args.setting == "Linear_LayerNorm":
-            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear) or isinstance(layer, GCLayerNorm)]
-        elif args.setting == "LayerNorm":
-            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLayerNorm)]
-        elif args.setting == "all_but_last_Linear":
-            trainable_layers = trainable_layers[:-1]
-            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear)]
-        elif args.setting == "all_but_last_Linear_and_LayerNorm":
-            trainable_layers = trainable_layers[:-1]
-            trainable_layers = [layer for layer in trainable_layers if isinstance(layer, GCLinear) or isinstance(layer, GCLayerNorm)]
-        else:
-            raise ValueError("Invalid setting now. Choose from 'Linear', 'Linear_LayerNorm', 'all_but_last_Linear', 'all_but_last_Linear_and_LayerNorm'.")
-
         attributor = GCIFAttributorKFAC(
             model=model,
-            layer_name=trainable_layers,
-            profile = args.profile,
+            layer_name=find_GClayers(model, args.setting),
+            profile=args.profile,
             device=device,
         )
 
@@ -732,6 +682,84 @@ def main():
             score, profile = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
         else:
             score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
+
+        torch.cuda.synchronize(device)
+        end = time.time()
+
+        peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
+    elif args.tda_method == "IF-LoGra":
+        from LoGra.utils import construct_model
+        from _logix.huggingface import LogIXArguments, patch_trainer
+
+        assert args.setting == "Linear", "LoGra only supports Linear setting now."
+
+        # prepare model & data loader for LoGra
+        model, tokenizer = construct_model(resume=True)
+        model.eval()
+        LogIXTrainer = patch_trainer(transformers.Trainer)
+
+        torch.cuda.reset_peak_memory_stats(device)
+
+        torch.cuda.synchronize(device)
+        start = time.time()
+
+        # 1. Computing EK-FAC factors for training data
+        logix_args_train = LogIXArguments(
+            project="GPT2",
+            config="./LoGra/config.yaml",
+            lora=True,
+            hessian="raw",
+            save="grad",
+            train_data=True,
+            label_key="input_ids",
+            log_num_workers=4,
+        )
+        training_args = transformers.TrainingArguments(
+            output_dir="./LoGra/output",
+            num_train_epochs=1,
+            per_device_train_batch_size=train_batch_size,
+            report_to="none",
+        )
+        trainer = LogIXTrainer(
+            model=model,
+            tokenizer=tokenizer,
+            train_dataset=train_dataset,
+            data_collator=default_data_collator,
+            args=training_args,
+            logix_args=logix_args_train,
+        )
+
+        trainer.extract_log()
+
+        # 2. Computing influence scores for test data
+        logix_args_test = LogIXArguments(
+            project="GPT2",
+            config="./LoGra/config.yaml",
+            lora=True,
+            hessian="raw",
+            save="grad",
+            train_data=False,
+            label_key="input_ids",
+            initialize_from_log=True,
+            log_batch_size=args.batch_size,
+        )
+        training_args = transformers.TrainingArguments(
+            output_dir="./LoGra/output",
+            num_train_epochs=1,
+            per_device_train_batch_size=test_batch_size,
+            report_to="none",
+            gradient_accumulation_steps=1,
+        )
+        trainer = LogIXTrainer(
+            model=model,
+            tokenizer=tokenizer,
+            train_dataset=train_dataset,
+            data_collator=default_data_collator,
+            args=training_args,
+            logix_args=logix_args_test,
+        )
+        result = trainer.influence()
+        score = result["influence"].T
 
         torch.cuda.synchronize(device)
         end = time.time()
@@ -831,17 +859,6 @@ def main():
                 device=device,
                 layer_name=param_names,  # Pass the grouped names
             )
-        # for name, _ in model.named_parameters():
-        #     print(name)
-        #     attributor = TracInAttributor(
-        #         task=task,
-        #         weight_list=torch.ones(1) * 1e-3,
-        #         normalized_grad=False, # For Grad-Dot, True if Grad-Cos
-        #         projector_kwargs=projector_kwargs,
-        #         device=device,
-        #         layer_name=[name],
-        #         # layer_name=[name for name, _ in model.named_parameters() if 'ln' not in name.lower()],  # Consider only Linear layers (exclude LayerNorm).
-        #     )
 
             torch.cuda.reset_peak_memory_stats(device)
 
@@ -855,48 +872,26 @@ def main():
             end = time.time()
 
             peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
+    else:
+        raise ValueError("Invalid TDA method. Choose from 'GD-GC', 'IF-GC', 'IF-LoGra', 'GD-dattr'.")
 
-            # print(score)
+    logger.info("***** Attribution finished *****")
 
     logger.info(f"Time taken: {end - start} seconds")
     logger.info(f"Peak memory usage: {peak_memory} MB")
 
-    # Build the filename components
-    filename_parts = []
+    lds_score, _, _ = lds(score, training_setting)
 
-    if args.proj is not None:
-        if args.tda_method == "GD" or args.tda_method == "IF":
-            if args.proj_dim_dist == "non-uniform":
-                filename_parts.append(f"{proj_method}-{proj_dim}(NU)")
-            elif args.proj_dim_dist == "uniform":
-                filename_parts.append(f"{proj_method}-{proj_dim}(U)")
-            else:
-                raise ValueError("Invalid projection dimension distribution. Choose from 'uniform' or 'non-uniform'.")
-        else:
-            filename_parts.append(f"{proj_method}-{proj_dim}")
-
-
-    filename_parts.append(f"thrd-{args.threshold}")
-    filename_parts.append(f"randrop-{args.random_drop}")
-
-    training_setting = args.output_dir.split("/")[-1]
-    # Join parts and save the file
-    if args.debug:
-        filename = f"./results/{training_setting}/debug/{args.tda_method}/{args.setting}/{'_'.join(filename_parts)}.pt"
-    else:
-        filename = f"./results/{training_setting}/{args.tda_method}/{args.setting}/{'_'.join(filename_parts)}.pt"
-
-    from lds import calculate_one
-    lds_score, _, _ = calculate_one(score, training_setting)
     # create a dict to save the results
     result = {
         "score": score,
         "lds": lds_score,
         "profile": profile if args.profile else None,
     }
-    torch.save(result, filename)
     print(result)
 
+    if not args.debug: # only save the results when not in debug mode
+        torch.save(result, result_filename)
 
 if __name__ == "__main__":
     main()
