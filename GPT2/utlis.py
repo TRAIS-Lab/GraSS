@@ -54,31 +54,63 @@ def lds(score, training_setting):
         print(f"Error: {e}")
         return None, None, None
 
-def projection_parsing(proj_str):
-    proj_method, proj_dim = None, None
-    if proj_str is not None:
-        proj_method, proj_dim = proj_str.split("-")
-        proj_dim = int(proj_dim)
+def setup_projector(args, device):
+    if args.proj is None or args.proj_dim is None:
+        return None
 
-    return proj_method, proj_dim
+    proj_dim, proj_dim_dist = args.proj_dim.split("(")
+    proj_dim_dist = proj_dim_dist[:-1] # Remove the last character ')'
+    proj_dim = int(proj_dim) # Convert to integer
 
-def batch_size(tda_method):
-    if tda_method == "GD-GC":
+    if proj_dim_dist not in ["U", "NU"]:
+        raise ValueError("Invalid projection dimension distribution. Choose from 'U' for uniform or 'NU' for non-uniform.")
+
+    projector_kwargs = {
+        "proj_dim": proj_dim,
+        "proj_dim_dist": proj_dim_dist,
+        "proj_max_batch_size": 32,
+        "proj_seed": args.seed,
+        "device": device,
+        "method": args.proj,
+        "use_half_precision": False,
+        "threshold": args.threshold,
+        "random_drop": args.random_drop,
+    }
+
+    return projector_kwargs
+
+def batch_size(tda):
+    if tda == "GD-GC":
         train_batch_size = 8
         test_batch_size = 8
-    elif tda_method == "IF-GC":
+    elif tda == "IF-GC":
         train_batch_size = 8
         test_batch_size = 8
-    elif tda_method == "IF-LoGra":
+    elif tda == "IF-LoGra":
         train_batch_size = 32
         test_batch_size = 32
-    elif tda_method =="TRAK-dattri":
+    elif tda =="TRAK-dattri":
         train_batch_size = 4
         test_batch_size = 4
-    elif tda_method =="GD-dattri":
+    elif tda =="GD-dattri":
         train_batch_size = 4
         test_batch_size = 4
     else:
         raise ValueError("Invalid method type. Choose from 'GD-GC', 'IF-GC', 'TRAK-dattri', or 'GD-dattri'.")
 
     return train_batch_size, test_batch_size
+
+def result_filename(args):
+    filename_parts = []
+
+    if args.proj is not None:
+        filename_parts.append(f"{args.proj}-{args.proj_dim}")
+
+    filename_parts.append(f"thrd-{args.threshold}")
+    filename_parts.append(f"rdp-{args.random_drop}")
+
+    training_setting = args.output_dir.split("/")[-1]
+    # Join parts and save the file
+    result_filename = f"./results/{training_setting}/{args.tda}/{args.layer}/{'_'.join(filename_parts)}.pt"
+
+    return result_filename

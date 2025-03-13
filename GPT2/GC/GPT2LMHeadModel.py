@@ -7,7 +7,7 @@ from transformers import GPT2LMHeadModel, GPT2Tokenizer
 from transformers.models.gpt2.modeling_gpt2 import Conv1D
 from _gradcomp.layers.linear import GCLinear, GCEmbedding
 from _gradcomp.layers.layer_norm import GCLayerNorm
-from utlis import transpose_Conv1D
+from GC.utlis import transpose_Conv1D
 import torch
 import torch.nn as nn
 import os
@@ -125,17 +125,20 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
             raise ValueError(f"Unsupported layer type for LayerNorm: {type(old_layer)}")
         return new_layer
 
-    def set_projectors(self, projector_kwargs):
+    def set_projectors(self, projector_kwargs, train_dataloader):
         """
         Set projectors for all GC layers in the model.
 
         Args:
-            projector_factory: A function that takes a layer as input and returns
-                            an appropriate projector function for that layer.
-                            If None, a default projector will be used.
+            projector_kwargs: Dictionary containing projector configuration.
+            train_dataloader: Dataloader for training data. Used to get the input shape for the first layer.
         """
         if projector_kwargs is None:
             return
+
+        for batch in train_dataloader:
+            self.forward(batch["input_ids"].cuda(self.device), attention_mask=batch["attention_mask"].cuda(self.device))
+            break
 
         proj_seed = projector_kwargs.get('proj_seed', 0)
         proj_dim = projector_kwargs.get("proj_dim", 32)
@@ -167,12 +170,12 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
                 layer_dim_1.append(0)
                 layer_dim_2.append(0)
 
-        if proj_dim_dist == "non-uniform":
+        if proj_dim_dist == "NU": # Non-uniform projection dimension
             total_dim_1 = sum(layer_dim_1)
             total_dim_2 = sum(layer_dim_2)
             proj_dim_1 = [int(proj_dim * dim / total_dim_1) for dim in layer_dim_1]
             proj_dim_2 = [int(proj_dim * dim / total_dim_2) for dim in layer_dim_2]
-        elif proj_dim_dist == "uniform":
+        elif proj_dim_dist == "U": # Uniform projection dimension
             proj_dim_1 = [proj_dim] * len(layer_dim_1)
             proj_dim_2 = [proj_dim] * len(layer_dim_2)
 

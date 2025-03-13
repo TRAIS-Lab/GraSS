@@ -12,19 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import sys
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(parent_dir)
+
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
 from transformers.trainer import *
-from transformers import default_data_collator
 
 from _logix import LogIX, LogIXScheduler
 from _logix.huggingface.arguments import LogIXArguments
 from _logix.huggingface.callback import LogIXCallback
 from _logix.utils import DataIDGenerator
 
+from _dattri.benchmark.utils import SubsetSampler
 
 def patch_trainer(TrainerClass):
     """
@@ -164,38 +169,6 @@ def patch_trainer(TrainerClass):
                 raise ValueError("No dataset provided.")
 
             if self.logix_data_train:
-                class SubsetSampler(torch.utils.data.Sampler):
-                    """Samples elements from a predefined list of indices.
-
-                    Note that for training, the built-in PyTorch
-                    SubsetRandomSampler should be used. This class is for
-                    attributting process.
-                    """
-
-                    def __init__(self, indices: List[int]) -> None:
-                        """Initialize the sampler.
-
-                        Args:
-                            indices (list): A list of indices to sample from.
-                        """
-                        self.indices = indices
-
-                    def __iter__(self):
-                        """Get an iterator for the sampler.
-
-                        Returns:
-                            An iterator for the sampler.
-                        """
-                        return iter(self.indices)
-
-                    def __len__(self) -> int:
-                        """Get the number of indices in the sampler.
-
-                        Returns:
-                            The number of indices in the sampler.
-                        """
-                        return len(self.indices)
-
                 train_sampler = SubsetSampler(range(len(self.train_dataset)))
                 train_dataloader = DataLoader(
                     self.train_dataset, collate_fn=self.data_collator, batch_size=self._train_batch_size, sampler=train_sampler

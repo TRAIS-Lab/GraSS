@@ -66,7 +66,7 @@ from transformers.utils.versions import require_version
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.46.0")
+# check_min_version("4.46.0")
 
 logger = get_logger(__name__)
 
@@ -253,24 +253,7 @@ def parse_args():
         help="The ratio used for model training.",
     )
 
-    parser.add_argument(
-        "--mode",
-        type=str,
-        default="GD-default",
-        help="Specify which mode we want to run the data attribution method. Available options: IF-{default,one_run,iterate} and GD-{default,one_run,iterate}.",
-    )
-    parser.add_argument(
-        "--proj",
-        type=str,
-        default=None,
-        help="The projection method to be used when attributing. Format: proj_method-proj_dim",
-    )
-    parser.add_argument(
-        "--proj_dim_dist",
-        type=str,
-        default="uniform",
-        help="The projection dimension distribution. Available options: uniform, non-uniform.",
-    )
+    # >>>>>>>>>>>>>>>>>>>>> Customize Argument begins here >>>>>>>>>>>>>>>>>>>>>
     parser.add_argument(
         "--device",
         type=int,
@@ -278,21 +261,21 @@ def parse_args():
         help="cuda device to be used",
     )
     parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.0,
-        help="Threshold to be used for projection when attributing.",
-    )
-    parser.add_argument(
-        "--random_drop",
-        type=float,
-        default=0.0,
-        help="Randomly drop the specified percentage of the projection input dimensions.",
-    )
-    parser.add_argument(
         "--profile",
         action="store_true",
         help="Record profiling results.",
+    )
+    parser.add_argument(
+        "--tda",
+        type=str,
+        default="IF-GC",
+        help="Specify which mode we want to run the data attribution method. Available options: IF-{GC,LoGra}, GD-{IF,dattri}, TRAK-{dattri}.",
+    )
+    parser.add_argument(
+        "--layer",
+        type=str,
+        default="Linear",
+        help="Layer used for attribution.",
     )
     parser.add_argument(
         "--reverse",
@@ -305,10 +288,28 @@ def parse_args():
         help="Debug mode.",
     )
     parser.add_argument(
-        "--setting",
+        "--proj",
         type=str,
-        default="Linear",
-        help="Ad-hoc directory name for the training setting to save the results.",
+        default=None,
+        help="The projection method to be used when attributing.",
+    )
+    parser.add_argument(
+        "--proj_dim",
+        type=str,
+        default=None,
+        help="The projection dimension to be used when attributing. Format: 'proj_dim(U)' for uniform, or 'proj_dim(NU)' for non-uniform.",
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=0.0,
+        help="Threshold to be used for projection when attributing.",
+    )
+    parser.add_argument(
+        "--random_drop",
+        type=float,
+        default=0.0,
+        help="Randomly drop the specified percentage of the projection input dimensions.",
     )
 
     args = parser.parse_args()
@@ -563,9 +564,9 @@ def main():
             desc=f"Grouping texts in chunks of {block_size}",
         )
 
-    # >>>>>>>>>>>>>>>>>>>>> dattri Code begins here >>>>>>>>>>>>>>>>>>>>>
+    # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
     from _dattri.benchmark.utils import SubsetSampler
-    from utlis import batch_size, projection_parsing, lds
+    from GPT2.utlis import batch_size, setup_projector, result_filename, lds
 
     device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
@@ -573,11 +574,11 @@ def main():
     # Dataset
     train_dataset = lm_datasets["train"]
     test_dataset = lm_datasets["validation"]
-    train_batch_size, test_batch_size = batch_size(args.tda_method)
+    train_batch_size, test_batch_size = batch_size(args.tda)
 
     if args.debug: # toy dataset
-        train_dataset = train_dataset.select(range(4))
-        test_dataset = test_dataset.select(range(4))
+        train_dataset = train_dataset.select(range(32))
+        test_dataset = test_dataset.select(range(32))
     train_sampler = SubsetSampler(range(len(train_dataset)))
     train_dataloader = DataLoader(
         train_dataset, collate_fn=default_data_collator, batch_size=train_batch_size, sampler=train_sampler
@@ -586,136 +587,88 @@ def main():
         test_dataset, collate_fn=default_data_collator, batch_size=test_batch_size, shuffle=False
     )
 
-    # Projector
-    proj_method, proj_dim = projection_parsing(args.proj)
-    projector_kwargs = None if proj_method is None else {
-        "proj_dim": proj_dim,
-        "proj_dim_dist": args.proj_dim_dist,
-        "proj_max_batch_size": 32,
-        "proj_seed": args.seed,
-        "device": device,
-        "method": proj_method,
-        "use_half_precision": False,
-        "threshold": args.threshold,
-        "random_drop": args.random_drop,
-    }
-
-    # Build the filename components
-    filename_parts = []
-
-    if args.proj is not None:
-        if args.tda_method in ["GD-GC", "IF-GC", "IF-LoGra", "GD-dattri"]:
-            if args.proj_dim_dist == "non-uniform":
-                filename_parts.append(f"{proj_method}-{proj_dim}(NU)")
-            elif args.proj_dim_dist == "uniform":
-                filename_parts.append(f"{proj_method}-{proj_dim}(U)")
-            else:
-                raise ValueError("Invalid projection dimension distribution. Choose from 'uniform' or 'non-uniform'.")
-        else:
-            filename_parts.append(f"{proj_method}-{proj_dim}")
-
-    filename_parts.append(f"thrd-{args.threshold}", f"randrop-{args.random_drop}")
-
-    training_setting = args.output_dir.split("/")[-1]
-    # Join parts and save the file
-    result_filename = f"./results/{training_setting}/{args.tda_method}/{args.setting}/{'_'.join(filename_parts)}.pt"
+    projector_kwargs = setup_projector(args, device)
 
     # Logging setting
     logger.info(f"The training dataset length: {len(train_dataset)}.")
     logger.info(f"The eval dataset length: {len(test_dataset)}.")
-    logger.info(f"TDA Method: {args.tda_method}")
+    logger.info(f"TDA Method: {args.tda}")
     logger.info(f"The training batch size: {train_batch_size}")
     logger.info(f"The eval batch size: {test_batch_size}")
     logger.info(f"Projector: {projector_kwargs}")
-    logger.info(f"Setting: {args.setting}")
-
+    logger.info(f"Layer: {args.layer}")
     logger.info("***** Running attribution *****")
 
     model_id = 0
     checkpoint = f"{args.output_dir}/{model_id}"
-    model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device) # reload the model with custom GC checkpoints
-    model.set_projectors(projector_kwargs)
 
-    if args.tda_method == "GD-GC":
+    if args.tda == "GD-GC":
+        check_min_version("4.46.0") # Gradient Component is built on top of 4.46.0
         from _gradcomp.GD import GCGradDotAttributor
         from GC.utlis import find_GClayers
 
+        model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
+        model.set_projectors(projector_kwargs, train_dataloader)
         model.eval()
 
         attributor = GCGradDotAttributor(
             model=model,
-            layer_name=find_GClayers(model, args.setting),
+            layer_name=find_GClayers(model, args.layer),
             lr=1e-3,
-            device=device,
-        )
-
-        torch.cuda.reset_peak_memory_stats(device)
-
-        torch.cuda.synchronize(device)
-        start = time.time()
-
-        score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
-
-        torch.cuda.synchronize(device)
-        end = time.time()
-
-        peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
-    elif args.tda_method == "IF-GC":
-        from _gradcomp.influence_function import GCIFAttributorKFAC
-        from GC.utlis import find_GClayers
-
-        model.eval()
-
-        attributor = GCIFAttributorKFAC(
-            model=model,
-            layer_name=find_GClayers(model, args.setting),
             profile=args.profile,
             device=device,
         )
 
-        torch.cuda.reset_peak_memory_stats(device)
+        if args.profile:
+            score, profile = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
+        else:
+            score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
 
-        torch.cuda.synchronize(device)
-        start = time.time()
+    elif args.tda == "IF-GC":
+        check_min_version("4.46.0") # Gradient Component is built on top of 4.46.0
+        from _gradcomp.influence_function import GCIFAttributorKFAC
+        from GC.utlis import find_GClayers
+
+        model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
+        model.set_projectors(projector_kwargs, train_dataloader)
+        model.eval()
+
+        attributor = GCIFAttributorKFAC(
+            model=model,
+            layer_name=find_GClayers(model, args.layer),
+            profile=args.profile,
+            device=device,
+        )
 
         if args.profile:
             score, profile = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
         else:
             score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
 
-        torch.cuda.synchronize(device)
-        end = time.time()
-
-        peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
-    elif args.tda_method == "IF-LoGra":
+    elif args.tda == "IF-LoGra":
+        #check_min_version("4.46.0") # LoGra is built on top of 4.40.0, ignore the checking
         from _logix.huggingface import LogIXArguments, patch_trainer
-        from LoGra.utils import construct_model
+        from LoGra.utils import LoGra_GPT2
 
-        assert args.setting == "Linear", "LoGra only supports Linear setting now."
+        assert args.layer == "Linear", "LoGra only supports Linear setting now."
 
-        # prepare model & data loader for LoGra
-        model, tokenizer = construct_model(resume=True)
+        model = LoGra_GPT2(checkpoint, config, resume=True)
         model.eval()
+
         LogIXTrainer = patch_trainer(transformers.Trainer)
-
-        torch.cuda.reset_peak_memory_stats(device)
-
-        torch.cuda.synchronize(device)
-        start = time.time()
 
         # 1. Computing EK-FAC factors for training data
         logix_args_train = LogIXArguments(
-            project="GPT2",
-            config="./LoGra/config.yaml",
+            project=f"./LoGra/project/{args.proj}-{args.proj_dim}",
+            config=f"./LoGra/config/{args.proj}-{args.proj_dim}.yaml",
             lora=True,
             hessian="raw",
             save="grad",
             train_data=True,
             label_key="input_ids",
-            log_num_workers=4,
         )
         training_args = transformers.TrainingArguments(
-            output_dir="./LoGra/output",
+            output_dir=f"./LoGra/output/{args.proj}-{args.proj_dim}/",
             num_train_epochs=1,
             per_device_train_batch_size=train_batch_size,
             report_to="none",
@@ -728,23 +681,24 @@ def main():
             args=training_args,
             logix_args=logix_args_train,
         )
-
         trainer.extract_log()
 
         # 2. Computing influence scores for test data
+        model = LoGra_GPT2(checkpoint, config, resume=True) # reinitialize the model
+        model.eval()
         logix_args_test = LogIXArguments(
-            project="GPT2",
-            config="./LoGra/config.yaml",
+            project=f"./LoGra/project/{args.proj}-{args.proj_dim}",
+            config=f"./LoGra/config/{args.proj}-{args.proj_dim}.yaml",
             lora=True,
             hessian="raw",
             save="grad",
             train_data=False,
             label_key="input_ids",
             initialize_from_log=True,
-            log_batch_size=args.batch_size,
+            log_batch_size=32,
         )
         training_args = transformers.TrainingArguments(
-            output_dir="./LoGra/output",
+            output_dir=f"./LoGra/output/{args.proj}-{args.proj_dim}/",
             num_train_epochs=1,
             per_device_train_batch_size=test_batch_size,
             report_to="none",
@@ -753,7 +707,7 @@ def main():
         trainer = LogIXTrainer(
             model=model,
             tokenizer=tokenizer,
-            train_dataset=train_dataset,
+            train_dataset=test_dataset,
             data_collator=default_data_collator,
             args=training_args,
             logix_args=logix_args_test,
@@ -761,11 +715,7 @@ def main():
         result = trainer.influence()
         score = result["influence"].T
 
-        torch.cuda.synchronize(device)
-        end = time.time()
-
-        peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
-    elif args.tda_method == "TRAK-dattri":
+    elif args.tda == "TRAK-dattri": #TODO: fix
         from _dattri.task import AttributionTask
         from _dattri.algorithm.trak import TRAKAttributor
 
@@ -804,21 +754,11 @@ def main():
             projector_kwargs=projector_kwargs,
         )
 
-        torch.cuda.reset_peak_memory_stats(device)
-
-        torch.cuda.synchronize(device)
-        start = time.time()
-
         attributor.cache(train_dataloader)
         with torch.no_grad():
             score = attributor.attribute(test_dataloader)
 
-        torch.cuda.synchronize(device)
-        end = time.time()
-
-        peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
-
-    elif args.tda_method == "GD-dattri":
+    elif args.tda == "GD-dattri": #TODO: fix
         from _dattri.task import AttributionTask
         from _dattri.algorithm.tracin import TracInAttributor
 
@@ -860,38 +800,26 @@ def main():
                 layer_name=param_names,  # Pass the grouped names
             )
 
-            torch.cuda.reset_peak_memory_stats(device)
-
-            torch.cuda.synchronize(device)
-            start = time.time()
-
             with torch.no_grad():
                 score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
-
-            torch.cuda.synchronize(device)
-            end = time.time()
-
-            peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
     else:
         raise ValueError("Invalid TDA method. Choose from 'GD-GC', 'IF-GC', 'IF-LoGra', 'GD-dattr'.")
 
-    logger.info("***** Attribution finished *****")
-
-    logger.info(f"Time taken: {end - start} seconds")
-    logger.info(f"Peak memory usage: {peak_memory} MB")
-
+    training_setting = args.output_dir.split("/")[-1]
     lds_score, _, _ = lds(score, training_setting)
 
     # create a dict to save the results
     result = {
         "score": score,
         "lds": lds_score,
-        "profile": profile if args.profile else None,
+        "profile": None if not args.profile else profile,
     }
-    print(result)
+
+    logger.info("***** Attribution finished *****")
+    logger.info(result)
 
     if not args.debug: # only save the results when not in debug mode
-        torch.save(result, result_filename)
+        torch.save(result, result_filename(args))
 
 if __name__ == "__main__":
     main()

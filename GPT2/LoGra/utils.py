@@ -4,7 +4,7 @@ parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(parent_dir)
 
 import torch.nn as nn
-from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GPT2LMHeadModel
+from transformers import AutoModelForCausalLM, GPT2LMHeadModel
 from transformers.pytorch_utils import Conv1D
 from GC.utlis import transpose_Conv1D
 
@@ -24,11 +24,7 @@ def replace_conv1d_modules(model):
             new_module.bias.data.copy_(module.bias.data)
             setattr(model, name, new_module)
 
-def construct_model(resume=False):
-    config = AutoConfig.from_pretrained(
-        "openai-community/gpt2",
-        trust_remote_code=True,
-    )
+def LoGra_GPT2(checkpoint, config, resume=False):
     model = AutoModelForCausalLM.from_pretrained(
         "openai-community/gpt2",
         from_tf=False,
@@ -37,14 +33,11 @@ def construct_model(resume=False):
         trust_remote_code=True,
     )
     replace_conv1d_modules(model)
-    tokenizer = AutoTokenizer.from_pretrained(
-        "openai-community/gpt2", use_fast=True, trust_remote_code=True
-    )
     if resume:
-        original_model = GPT2LMHeadModel.from_pretrained("../checkpoints/wd=0.0_lr=5e-5/0/")
+        original_model = GPT2LMHeadModel.from_pretrained(checkpoint) # due to the nested structure, we add '.' to have `../checkpoints/...`
         state_dict = transpose_Conv1D(original_model.state_dict())
         for key in list(state_dict.keys()):
             if "model." in key:
                 state_dict[key.replace("model.", "")] = state_dict.pop(key)
         model.load_state_dict(state_dict, strict=True)
-    return model, tokenizer
+    return model

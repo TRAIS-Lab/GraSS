@@ -17,35 +17,22 @@ class GCGradDotAttributor():
         model,
         layer_name: Optional[Union[str, List[str]]],
         lr: float = 1e-3,
+        profile: bool = False,
         device: str = 'cpu'
     ) -> None:
         """Ghost Inner Product Attributor for Gradient Dot.
 
         Args:
             model (_type_): _description_
-            lr (float, optional): _description_. Defaults to 1e-3.
             layer_name (Optional[Union[str, List[str]]], optional): _description_. Defaults to None.
-            projector_kwargs (Optional[Dict[str, Any]], optional): _description_. Defaults to None.
-            mode (str, optional): There are several mode of ghost inner product:
-
-                1. "default": first compute (if not cached) and store all the pre-activation gradient and input of the training set, then for the test set. Do the inner product at the end. This is much like the vanilla Grad-Dot, only differ in that we derive the gradient inner product from a different formula, so we require different terms.
-
-                The memory requirement is the same as vanilla Grad-Dot.
-
-                2. "one_run": Original Ghost Inner Product. Compute the gradient inner product of the training set and the test set in one run.
-
-                This requires a lot of memory to store be able to compute the gradient of the pre-activation and the input of the training+test set.
-
-                3. "iterate": Iterate through training batches and test batches and use "one_run" for each pair of batches.
-
-                This is the most memory efficient way to compute the inner product, but it is also the slowest due to the repetition of the computation.
-
-             Defaults to "default".
+            lr (float, optional): _description_. Defaults to 1e-3.
+            profile (bool, optional): Record time used in various parts of the algorithm run. Defaults to False.
             device (str, optional): _description_. Defaults to 'cpu'.
         """
         self.model = model
-        self.lr = lr
         self.layer_name = layer_name
+        self.lr = lr
+        self.profile = profile #TODO implement this
         self.device = device
         self.full_train_dataloader = None
 
