@@ -666,7 +666,7 @@ def main():
         # 1. Computing EK-FAC factors for training data
         logix_args_train = LogIXArguments(
             project=f"./LoGra/project/{args.proj}-{args.proj_dim}",
-            config=f"./LoGra/config/{args.proj}-{args.proj_dim}.yaml",
+            config=f"./LoGra/project/{args.proj}-{args.proj_dim}.yaml",
             lora=True,
             hessian=hessian,
             save="grad",
@@ -674,7 +674,7 @@ def main():
             label_key="input_ids",
         )
         training_args = transformers.TrainingArguments(
-            output_dir=f"./LoGra/output/{args.proj}-{args.proj_dim}/",
+            output_dir=f"./LoGra/",
             num_train_epochs=1,
             per_device_train_batch_size=train_batch_size,
             report_to="none",
@@ -694,7 +694,7 @@ def main():
         model.eval()
         logix_args_test = LogIXArguments(
             project=f"./LoGra/project/{args.proj}-{args.proj_dim}",
-            config=f"./LoGra/config/{args.proj}-{args.proj_dim}.yaml",
+            config=f"./LoGra/project/{args.proj}-{args.proj_dim}.yaml",
             lora=True,
             hessian=hessian,
             save="grad",
@@ -704,7 +704,7 @@ def main():
             log_batch_size=32,
         )
         training_args = transformers.TrainingArguments(
-            output_dir=f"./LoGra/output/{args.proj}-{args.proj_dim}/",
+            output_dir=f"./LoGra/",
             num_train_epochs=1,
             per_device_train_batch_size=test_batch_size,
             report_to="none",
