@@ -565,7 +565,7 @@ def main():
 
     # >>>>>>>>>>>>>>>>>>>>> dattri Code begins here >>>>>>>>>>>>>>>>>>>>>
     from _dattri.benchmark.utils import SubsetSampler
-    from .utlis import batch_size, projection_parsing, lds
+    from utlis import batch_size, projection_parsing, lds
 
     device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
@@ -637,7 +637,7 @@ def main():
     model.set_projectors(projector_kwargs)
 
     if args.tda_method == "GD-GC":
-        from grad_comp.GD import GCGradDotAttributor
+        from _gradcomp.GD import GCGradDotAttributor
         from GC.utlis import find_GClayers
 
         model.eval()
@@ -661,7 +661,7 @@ def main():
 
         peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
     elif args.tda_method == "IF-GC":
-        from grad_comp.influence_function import GCIFAttributorKFAC
+        from _gradcomp.influence_function import GCIFAttributorKFAC
         from GC.utlis import find_GClayers
 
         model.eval()
@@ -688,8 +688,8 @@ def main():
 
         peak_memory = torch.cuda.max_memory_allocated(device) / 1e6  # Convert to MB
     elif args.tda_method == "IF-LoGra":
-        from LoGra.utils import construct_model
         from _logix.huggingface import LogIXArguments, patch_trainer
+        from LoGra.utils import construct_model
 
         assert args.setting == "Linear", "LoGra only supports Linear setting now."
 

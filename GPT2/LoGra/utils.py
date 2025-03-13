@@ -6,7 +6,7 @@ sys.path.append(parent_dir)
 import torch.nn as nn
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, GPT2LMHeadModel
 from transformers.pytorch_utils import Conv1D
-from GPT2.GC.utlis import transpose_Conv1D
+from GC.utlis import transpose_Conv1D
 
 def replace_conv1d_modules(model):
     # GPT-2 is defined in terms of Conv1D. However, this does not work for EK-FAC.
