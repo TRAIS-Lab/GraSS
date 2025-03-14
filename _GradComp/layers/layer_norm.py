@@ -53,6 +53,7 @@ class GCLayerNorm(nn.LayerNorm):
                 dumb_grad_comp_1,
                 dumb_grad_comp_1.shape[0],
                 proj_seed=base_seed,
+                pre_compute=proj_factorize,
                 **projector_kwargs,
             )
 
@@ -61,6 +62,7 @@ class GCLayerNorm(nn.LayerNorm):
                 dumb_grad_comp_2,
                 dumb_grad_comp_2.shape[0],
                 proj_seed=base_seed + 1,
+                pre_compute=proj_factorize,
                 **projector_kwargs,
             )
             self.projector_grad_comp = (projector_grad_comp_1, projector_grad_comp_2)
@@ -70,6 +72,7 @@ class GCLayerNorm(nn.LayerNorm):
                 dumb_grad_comp,
                 dumb_grad_comp.shape[0],
                 proj_seed=base_seed,
+                pre_compute=proj_factorize,
                 **projector_kwargs,
             )
 
@@ -129,7 +132,7 @@ class GCLayerNorm(nn.LayerNorm):
         """
         grad = torch.cat((grad_weight, grad_bias), dim=1)
 
-        if self.projector_grad is not None:
+        if self.projector_grad != None:
             grad = self.projector_grad(grad)
         return grad
 

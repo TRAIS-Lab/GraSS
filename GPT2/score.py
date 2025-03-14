@@ -27,7 +27,7 @@ import json
 import logging
 import math
 import os
-# os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import random
 from itertools import chain
 from pathlib import Path

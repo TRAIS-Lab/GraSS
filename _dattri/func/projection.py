@@ -40,7 +40,7 @@ class ProjectionType(str, Enum):
 
     normal: str = "normal"
     rademacher: str = "rademacher"
-    kaiming: str = "kaiming"
+    # kaiming: str = "kaiming"
 
 
 class AbstractProjector(ABC):
@@ -125,6 +125,7 @@ class BasicProjector(AbstractProjector):
         method: str = "Gaussian",
         threshold: float = 1e-7,
         random_drop: float = 0.0,
+        pre_compute: bool = False,
     ) -> None:
         """Initializes hyperparameters for BasicProjector.
 
@@ -280,6 +281,7 @@ class CudaProjector(AbstractProjector):
         method: str,
         threshold: float = 1e-7,
         random_drop: float = 0.0,
+        pre_compute: bool = False,
     ) -> None:
         """Initializes hyperparameters for CudaProjector.
 
@@ -307,6 +309,8 @@ class CudaProjector(AbstractProjector):
 
         active_mask = torch.rand(feature_dim, device=device) > random_drop
         self.active_indices = torch.nonzero(active_mask).squeeze()
+
+        self.pre_compute = pre_compute
 
         if isinstance(device, str):
             device = torch.device(device)
@@ -338,42 +342,47 @@ class CudaProjector(AbstractProjector):
                 raise ModuleNotFoundError(msg) from None
         elif self.method == "SJLT":
             self.c = 2
-            blow_up = 1
-            torch.manual_seed(self.seed)
-            rand_indices = torch.randint(proj_dim * blow_up, (feature_dim, self.c), device=device)
-            rand_signs = torch.randint(0, 2, (feature_dim, self.c), device=device) * 2 - 1
-            self.rand_indices_and_signs = (rand_indices, rand_signs)
+            if self.pre_compute:
+                blow_up = 1
+                torch.manual_seed(self.seed)
+                rand_indices = torch.randint(proj_dim * blow_up, (feature_dim, self.c), device=device)
+                rand_signs = torch.randint(0, 2, (feature_dim, self.c), device=device) * 2 - 1
+                self.rand_indices_and_signs = (rand_indices, rand_signs)
         elif self.method == "SJLT_R":
             self.c = 2
-            self.backward_indices = backward_SJLT_indices(proj_dim, c=self.c, active_indices=self.active_indices, device=device, seed=self.seed)
+            if self.pre_compute:
+                self.backward_indices = backward_SJLT_indices(proj_dim, c=self.c, active_indices=self.active_indices, device=device, seed=self.seed)
         elif self.method == "Rademacher":
-            active_dim = self.active_indices.numel()
-            self.proj_matrix = torch.empty(
-                active_dim,
-                proj_dim,
-                device=device,
-            )
-            torch.manual_seed(self.seed)
-            self.proj_matrix.bernoulli_(p=0.5)
-            self.proj_matrix *= 2.0
-            self.proj_matrix -= 1.0
+            if self.pre_compute:
+                active_dim = self.active_indices.numel()
+                self.proj_matrix = torch.empty(
+                    active_dim,
+                    proj_dim,
+                    device=device,
+                )
+                torch.manual_seed(self.seed)
+                self.proj_matrix.bernoulli_(p=0.5)
+                self.proj_matrix *= 2.0
+                self.proj_matrix -= 1.0
         elif self.method == "Gaussian":
-            active_dim = self.active_indices.numel()
-            torch.manual_seed(self.seed)
-            self.proj_matrix = torch.randn(
-                active_dim,
-                proj_dim,
-                device=device,
-            )
-        elif self.method == "Kaiming":
-            active_dim = self.active_indices.numel()
-            torch.manual_seed(self.seed)
-            self.proj_matrix = torch.empty(
-                active_dim,
-                proj_dim,
-                device=device,
-            )
-            torch.nn.init.kaiming_uniform_(self.proj_matrix.T, a=math.sqrt(5))
+            if self.pre_compute:
+                active_dim = self.active_indices.numel()
+                torch.manual_seed(self.seed)
+                self.proj_matrix = torch.randn(
+                    active_dim,
+                    proj_dim,
+                    device=device,
+                )
+        # elif self.method == "Kaiming":
+        #     if self.pre_compute:
+        #         active_dim = self.active_indices.numel()
+        #         torch.manual_seed(self.seed)
+        #         self.proj_matrix = torch.empty(
+        #             active_dim,
+        #             proj_dim,
+        #             device=device,
+        #         )
+        #         torch.nn.init.kaiming_uniform_(self.proj_matrix.T, a=math.sqrt(5))
 
 
     def project(
@@ -443,11 +452,19 @@ class CudaProjector(AbstractProjector):
                 raise e from None
         elif self.method == "SJLT":
             batch_size, _ = features.size()
+            features = features[:, self.active_indices]
             device = features.device
 
             blow_up = 1
 
-            rand_indices, rand_signs = self.rand_indices_and_signs
+            if self.pre_compute:
+                rand_indices, rand_signs = self.rand_indices_and_signs
+            else:
+                torch.manual_seed(self.seed)
+                active_dim = self.active_indices.numel()
+                rand_indices = torch.randint(self.proj_dim * blow_up, (active_dim, self.c), device=device)
+                rand_signs = torch.randint(0, 2, (active_dim, self.c), device=device) * 2 - 1
+
             # Get indices of elements above threshold in a single pass
             batch_idx, input_idx = torch.nonzero(torch.abs(features) >= self.threshold, as_tuple=True)
             if input_idx.numel() == 0:
@@ -467,7 +484,6 @@ class CudaProjector(AbstractProjector):
 
             result = batch_vec_p / (self.c ** 0.5)
         elif self.method == "SJLT_R":
-            #TODO: fix for the batch size
             batch_size, _ = features.size()
 
             features = features[:, self.active_indices]
@@ -475,10 +491,13 @@ class CudaProjector(AbstractProjector):
 
             batch_vec_p = torch.zeros(batch_size, self.proj_dim, device=features.device)
 
-            pos_local_indices = self.backward_indices['pos_local_indices']
-            neg_local_indices = self.backward_indices['neg_local_indices']
-            pos_output_mapping = self.backward_indices['pos_output_mapping']
-            neg_output_mapping = self.backward_indices['neg_output_mapping']
+            if self.pre_compute:
+                pos_local_indices = self.backward_indices['pos_local_indices']
+                neg_local_indices = self.backward_indices['neg_local_indices']
+                pos_output_mapping = self.backward_indices['pos_output_mapping']
+                neg_output_mapping = self.backward_indices['neg_output_mapping']
+            else:
+                raise NotImplementedError
 
             if pos_local_indices.numel() > 0:
                 pos_values = features[:, pos_local_indices]
@@ -491,11 +510,46 @@ class CudaProjector(AbstractProjector):
                 batch_vec_p.scatter_add_(1, batch_neg_output_mapping, -neg_values)
 
             result = batch_vec_p / (self.c ** 0.5)
-        elif self.method in ["Rademacher", "Gaussian", "Kaiming"]:
+        elif self.method == "Rademacher":
+            if self.pre_compute:
+                proj_matrix = self.proj_matrix
+            else:
+                active_dim = self.active_indices.numel()
+                proj_matrix = torch.empty(
+                    active_dim,
+                    self.proj_dim,
+                    device=device,
+                )
+                torch.manual_seed(self.seed)
+                proj_matrix.bernoulli_(p=0.5)
+                proj_matrix *= 2.0
+                proj_matrix -= 1.0
+
             features = features[:, self.active_indices]
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
 
-            result = features @ self.proj_matrix / (self.proj_dim ** 0.5)
+            result = features @ proj_matrix / (self.proj_dim ** 0.5)
+        elif self.method == "Gaussian":
+            if self.pre_compute:
+                proj_matrix = self.proj_matrix
+            else:
+                active_dim = self.active_indices.numel()
+                torch.manual_seed(self.seed)
+                proj_matrix = torch.randn(
+                    active_dim,
+                    self.proj_dim,
+                    device=device,
+                )
+
+            features = features[:, self.active_indices]
+            features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
+
+            result = features @ proj_matrix / (self.proj_dim ** 0.5)
+        # elif self.method == "Kaiming":
+        #     features = features[:, self.active_indices]
+        #     features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
+
+        #     result = features @ self.proj_matrix
 
         return result
 
@@ -921,6 +975,7 @@ def make_random_projector(
     use_half_precision: bool = True,
     threshold: float = 1e-7,
     random_drop: float = 0.0,
+    pre_compute: bool = False,
 ) -> Tensor:
     """Initialize random projector by the info of feature about to be projected.
 
@@ -988,8 +1043,8 @@ def make_random_projector(
             proj_type = ProjectionType.rademacher
         elif method == "Gaussian":
             proj_type = ProjectionType.normal
-        elif method == "Kaiming":
-            proj_type = ProjectionType.kaiming
+        # elif method == "Kaiming":
+        #     proj_type = ProjectionType.kaiming
 
         projector = CudaProjector
         using_cuda_projector = True
@@ -1020,6 +1075,7 @@ def make_random_projector(
                     method=method,
                     threshold=threshold,
                     random_drop=random_drop,
+                    pre_compute=pre_compute,
                 )
                 for i, chunk_size in enumerate(param_chunk_sizes)
             ]
@@ -1044,6 +1100,7 @@ def make_random_projector(
             method=method,
             threshold=threshold,
             random_drop=random_drop,
+            pre_compute=pre_compute,
         )
     elif projector == BasicProjector:
         assigned_projector = projector(
@@ -1056,6 +1113,7 @@ def make_random_projector(
             method=method,
             threshold=threshold,
             random_drop=random_drop,
+            pre_compute=pre_compute,
         )
 
     return assigned_projector
@@ -1169,6 +1227,7 @@ def random_project(
     use_half_precision: bool = True,
     threshold: float = 1e-7,
     random_drop: float = 0.0,
+    pre_compute: bool = False,
 ) -> Callable:
     """Randomly projects the features to a smaller dimension.
 
@@ -1212,6 +1271,7 @@ def random_project(
         use_half_precision=use_half_precision,
         threshold=threshold,
         random_drop=random_drop,
+        pre_compute=pre_compute,
     )
 
     def _random_project_func(

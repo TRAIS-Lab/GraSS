@@ -81,10 +81,10 @@ class GCLinear(nn.Linear):
         batch_size = self.pre_activation.shape[0]
 
         dumb_grad_comp_1 = torch.zeros_like(self.pre_activation.view(-1, self.pre_activation.shape[-1]))
+        is_3d = self.layer_input.dim() == 3
 
+        input_features = self.layer_input
         if self.has_bias:
-            input_features = self.layer_input
-            is_3d = input_features.dim() == 3
             if is_3d:
                 batch_size, seq_length, hidden_size = input_features.shape
                 input_features = input_features.reshape(-1, hidden_size)
@@ -106,6 +106,7 @@ class GCLinear(nn.Linear):
                 dumb_grad_comp_1,
                 dumb_grad_comp_1.shape[0],
                 proj_seed=base_seed,
+                pre_compute=proj_factorize,
                 **projector_kwargs,
             )
 
@@ -113,20 +114,22 @@ class GCLinear(nn.Linear):
                 dumb_grad_comp_2,
                 dumb_grad_comp_2.shape[0],
                 proj_seed=base_seed + 1,
+                pre_compute=proj_factorize,
                 **projector_kwargs,
             )
 
             self.projector_grad_comp = (projector_grad_comp_1, projector_grad_comp_2)
         else:
             if is_3d:
-                dumb_grad = torch.einsum('ijk,ijl->ikl', self.pre_activation, self.layer_input).reshape(batch_size, -1)
+                dumb_grad = torch.einsum('ijk,ijl->ikl', self.pre_activation, input_features).reshape(batch_size, -1)
             else:
-                dumb_grad = torch.einsum('bi,bj->bij', self.pre_activation, self.layer_input).reshape(batch_size, -1)
+                dumb_grad = torch.einsum('bi,bj->bij', self.pre_activation, input_features).reshape(batch_size, -1)
 
             self.projector_grad = random_project(
                 dumb_grad,
                 dumb_grad.shape[0],
                 proj_seed=base_seed,
+                pre_compute=proj_factorize,
                 **projector_kwargs,
             )
 
@@ -206,7 +209,7 @@ class GCLinear(nn.Linear):
         else:
             grad = torch.einsum('bi,bj->bij', grad_pre_activation, input_features).reshape(batch_size, -1)
 
-        if self.projector_grad is not None:
+        if self.projector_grad != None:
             grad = self.projector_grad(grad)
         return grad
 
