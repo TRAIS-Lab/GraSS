@@ -34,7 +34,7 @@ def LoGra_GPT2(checkpoint, config, resume=False):
     )
     replace_conv1d_modules(model)
     if resume:
-        original_model = GPT2LMHeadModel.from_pretrained(checkpoint) # due to the nested structure, we add '.' to have `../checkpoints/...`
+        original_model = GPT2LMHeadModel.from_pretrained(checkpoint)
         state_dict = transpose_Conv1D(original_model.state_dict())
         for key in list(state_dict.keys()):
             if "model." in key:

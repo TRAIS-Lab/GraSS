@@ -529,7 +529,7 @@ def main():
         eval_dataset, collate_fn=default_data_collator, batch_size=1, shuffle=False
     )
 
-    from dattri.func.utils import flatten_func, flatten_params
+    from _dattri.func.utils import flatten_func, flatten_params
 
     checkpoints = [f"{args.output_dir}/{i}"
                     for i in range(50)]

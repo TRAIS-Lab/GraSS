@@ -357,6 +357,15 @@ class CudaProjector(AbstractProjector):
             self.proj_matrix.bernoulli_(p=0.5)
             self.proj_matrix *= 2.0
             self.proj_matrix -= 1.0
+        elif self.method == "Gaussian":
+            active_dim = self.active_indices.numel()
+            torch.manual_seed(self.seed)
+            self.proj_matrix = torch.randn(
+                active_dim,
+                proj_dim,
+                device=device,
+            )
+
 
     def project(
         self,
@@ -463,7 +472,12 @@ class CudaProjector(AbstractProjector):
             features = features[:, self.active_indices]
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
 
-            result = features @ self.proj_matrix
+            result = features @ self.proj_matrix / (self.proj_dim ** 0.5)
+        elif self.method == "Gaussian":
+            features = features[:, self.active_indices]
+            features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
+
+            result = features @ self.proj_matrix / (self.proj_dim ** 0.5)
 
         return result
 
@@ -929,7 +943,6 @@ def make_random_projector(
         # normal projection, rather than rademacher.
         proj_type = ProjectionType.normal
     else:
-        proj_type = ProjectionType.rademacher
         if method == "FJLT":
             try:
                 import fast_jl
@@ -948,6 +961,15 @@ def make_random_projector(
             except (ImportError, RuntimeError, AttributeError):
                 projector = BasicProjector
                 raise
+            proj_type = ProjectionType.rademacher
+        elif method == "SJLT":
+            proj_type = ProjectionType.rademacher
+        elif method == "SJLT_R":
+            proj_type = ProjectionType.rademacher
+        elif method == "Rademacher":
+            proj_type = ProjectionType.rademacher
+        elif method == "Gaussian":
+            proj_type = ProjectionType.normal
 
         projector = CudaProjector
         using_cuda_projector = True
