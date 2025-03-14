@@ -341,11 +341,10 @@ class CudaProjector(AbstractProjector):
                 (the fast_jl library)."
                 raise ModuleNotFoundError(msg) from None
         elif self.method == "SJLT":
-            self.c = 2
+            self.c = 1
             if self.pre_compute:
-                blow_up = 1
                 torch.manual_seed(self.seed)
-                rand_indices = torch.randint(proj_dim * blow_up, (feature_dim, self.c), device=device)
+                rand_indices = torch.randint(proj_dim, (feature_dim, self.c), device=device)
                 rand_signs = torch.randint(0, 2, (feature_dim, self.c), device=device) * 2 - 1
                 self.rand_indices_and_signs = (rand_indices, rand_signs)
         elif self.method == "SJLT_R":
@@ -455,14 +454,12 @@ class CudaProjector(AbstractProjector):
             features = features[:, self.active_indices]
             device = features.device
 
-            blow_up = 1
-
             if self.pre_compute:
                 rand_indices, rand_signs = self.rand_indices_and_signs
             else:
                 torch.manual_seed(self.seed)
                 active_dim = self.active_indices.numel()
-                rand_indices = torch.randint(self.proj_dim * blow_up, (active_dim, self.c), device=device)
+                rand_indices = torch.randint(self.proj_dim, (active_dim, self.c), device=device)
                 rand_signs = torch.randint(0, 2, (active_dim, self.c), device=device) * 2 - 1
 
             # Get indices of elements above threshold in a single pass
@@ -473,14 +470,11 @@ class CudaProjector(AbstractProjector):
             values = features[batch_idx, input_idx]
 
             scaled_vals = values.repeat_interleave(self.c) * rand_signs[input_idx].flatten()
-            final_indices = batch_idx.repeat_interleave(self.c) * (self.proj_dim * blow_up) + rand_indices[input_idx].flatten()
+            final_indices = batch_idx.repeat_interleave(self.c) * (self.proj_dim) + rand_indices[input_idx].flatten()
 
             # Initialize and fill output tensor
-            batch_vec_p = torch.zeros(batch_size, self.proj_dim * blow_up, device=device)
+            batch_vec_p = torch.zeros(batch_size, self.proj_dim, device=device)
             batch_vec_p.view(-1).index_add_(0, final_indices, scaled_vals)
-
-            # Sum and normalize
-            batch_vec_p = batch_vec_p.view(batch_size, self.proj_dim, blow_up).sum(dim=2)
 
             result = batch_vec_p / (self.c ** 0.5)
         elif self.method == "SJLT_R":
@@ -1296,7 +1290,7 @@ def random_project(
 
     return _random_project_func
 
-def SJLT(vecs, proj_dim, threshold=0, rand_indices_and_signs=None, seed=0, batch_size=32, c=1, blow_up=5):
+def SJLT(vecs, proj_dim, threshold=0, rand_indices_and_signs=None, seed=0, batch_size=32, c=1, blow_up=1):
     """
     Batched SJLT implementation that processes input vectors in smaller batches
 
