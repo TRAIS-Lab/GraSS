@@ -56,8 +56,8 @@ class GCLinear(nn.Linear):
         self.layer_input = None
         self.has_bias = bias
 
-        self.projector_grad_comp_1 = None
-        self.projector_grad_comp_2 = None
+        self.projector_grad = None
+        self.projector_grad_comp = (None, None)
 
     def forward(self, input):
         self.layer_input = input
@@ -65,6 +65,70 @@ class GCLinear(nn.Linear):
         self.pre_activation = out
 
         return self.pre_activation
+
+    def set_projector(self, base_seed: int, projector_kwargs: dict, proj_factorize: bool = True):
+        """
+        Set the projection function for this layer.
+
+        Args:
+            base_seed (int): Base seed for the random projection
+            projector_kwargs (dict): Keyword arguments for the projection function
+            proj_factorize (bool): Whether to factorize the projection into two separate projectors
+        """
+        if self.pre_activation is None or self.layer_input is None:
+            raise ValueError("Layer input and pre-activation must be set before setting projectors.")
+
+        batch_size = self.pre_activation.shape[0]
+
+        dumb_grad_comp_1 = torch.zeros_like(self.pre_activation.view(-1, self.pre_activation.shape[-1]))
+
+        if self.has_bias:
+            input_features = self.layer_input
+            is_3d = input_features.dim() == 3
+            if is_3d:
+                batch_size, seq_length, hidden_size = input_features.shape
+                input_features = input_features.reshape(-1, hidden_size)
+            else:
+                batch_size = input_features.shape[0]
+
+            ones = torch.ones(input_features.size(0), 1, device=input_features.device, dtype=input_features.dtype)
+            input_features = torch.cat([input_features, ones], dim=1)
+
+            if is_3d:
+                input_features = input_features.reshape(batch_size, seq_length, -1)
+
+            dumb_grad_comp_2 = torch.zeros_like(input_features.view(-1, input_features.shape[-1]))
+        else:
+            dumb_grad_comp_2 = torch.zeros_like(self.layer_input.view(-1, self.layer_input.shape[-1]))
+
+        if proj_factorize:
+            projector_grad_comp_1 = random_project(
+                dumb_grad_comp_1,
+                dumb_grad_comp_1.shape[0],
+                proj_seed=base_seed,
+                **projector_kwargs,
+            )
+
+            projector_grad_comp_2 = random_project(
+                dumb_grad_comp_2,
+                dumb_grad_comp_2.shape[0],
+                proj_seed=base_seed + 1,
+                **projector_kwargs,
+            )
+
+            self.projector_grad_comp = (projector_grad_comp_1, projector_grad_comp_2)
+        else:
+            if is_3d:
+                dumb_grad = torch.einsum('ijk,ijl->ikl', self.pre_activation, self.layer_input).reshape(batch_size, -1)
+            else:
+                dumb_grad = torch.einsum('bi,bj->bij', self.pre_activation, self.layer_input).reshape(batch_size, -1)
+
+            self.projector_grad = random_project(
+                dumb_grad,
+                dumb_grad.shape[0],
+                proj_seed=base_seed,
+                **projector_kwargs,
+            )
 
     def grad_comp(self, grad_pre_activation: Tensor, per_sample: bool = True) -> Tuple[Tensor, Tensor]:
         """
@@ -107,78 +171,22 @@ class GCLinear(nn.Linear):
             input_features = input_features.reshape(batch_size, seq_length, -1)
             grad_pre_activation = grad_pre_activation.reshape(batch_size, seq_length, -1)
 
-        if self.projector_grad_comp_1 is not None:
+        if self.projector_grad_comp != (None, None):
+            projector_grad_comp_1, projector_grad_comp_2 = self.projector_grad_comp
+
             grad_pre_activation_flatten = grad_pre_activation.view(-1, grad_pre_activation.shape[-1])
-
-            if is_3d:
-                grad_pre_activation = self.projector_grad_comp_1(grad_pre_activation_flatten).view(grad_pre_activation.shape[0], grad_pre_activation.shape[1], -1)
-            else:
-                grad_pre_activation = self.projector_grad_comp_1(grad_pre_activation_flatten)
-
-        if self.projector_grad_comp_2 is not None:
             input_features_flatten = input_features.view(-1, input_features.shape[-1])
 
             if is_3d:
-                input_features = self.projector_grad_comp_2(input_features_flatten).view(input_features.shape[0], input_features.shape[1], -1)
+                grad_pre_activation = projector_grad_comp_1(grad_pre_activation_flatten).view(grad_pre_activation.shape[0], grad_pre_activation.shape[1], -1)
+                input_features = projector_grad_comp_2(input_features_flatten).view(input_features.shape[0], input_features.shape[1], -1)
             else:
-                input_features = self.projector_grad_comp_2(input_features_flatten)
+                grad_pre_activation = projector_grad_comp_1(grad_pre_activation_flatten)
+                input_features = projector_grad_comp_2(input_features_flatten)
 
         return grad_pre_activation, input_features
 
-    def set_projector(self, base_seed: int, proj_dim_1: int, proj_dim_2: int, projector_kwargs_1: dict, projector_kwargs_2: dict):
-        """
-        Set the projection function for this layer.
-
-        Args:
-            base_seed (int): Base seed for the random projection
-            proj_dim_1 (int): Dimension of the projection for the weight
-            proj_dim_2 (int): Dimension of the projection for the bias
-            projector_kwargs_1 (dict): Keyword arguments for the projection function for the weight
-            projector_kwargs_2 (dict): Keyword arguments for the projection function for the bias
-        """
-        if self.pre_activation is None or self.layer_input is None:
-            raise ValueError("Layer input and pre-activation must be set before setting projectors.")
-
-        dumb_grad_comp_1 = torch.zeros_like(self.pre_activation.view(-1, self.pre_activation.shape[-1]))
-        self.projector_grad_comp_1 = random_project(
-            dumb_grad_comp_1,
-            dumb_grad_comp_1.shape[0],
-            proj_seed=base_seed,
-            proj_dim=proj_dim_1,
-            **projector_kwargs_1,
-        )
-
-        #TODO: clean up this part
-        if self.has_bias:
-            input_features = self.layer_input
-            is_3d = input_features.dim() == 3
-            if is_3d:
-                batch_size, seq_length, hidden_size = input_features.shape
-                input_features = input_features.reshape(-1, hidden_size)
-            else:
-                batch_size = input_features.shape[0]
-
-            if self.has_bias:
-                ones = torch.ones(input_features.size(0), 1,
-                                device=input_features.device,
-                                dtype=input_features.dtype)
-                input_features = torch.cat([input_features, ones], dim=1)
-            if is_3d:
-                input_features = input_features.reshape(batch_size, seq_length, -1)
-
-            dumb_grad_comp_2 = torch.zeros_like(input_features.view(-1, input_features.shape[-1]))
-        else:
-            dumb_grad_comp_2 = torch.zeros_like(self.layer_input.view(-1, self.layer_input.shape[-1]))
-        self.projector_grad_comp_2 = random_project(
-            dumb_grad_comp_2,
-            dumb_grad_comp_2.shape[0],
-            proj_seed=base_seed + 1,
-            proj_dim=proj_dim_2,
-            **projector_kwargs_2,
-        )
-
-    @staticmethod
-    def grad_from_grad_comp(grad_pre_activation: Tensor, input_features: Tensor) -> Tensor:
+    def grad_from_grad_comp(self, grad_pre_activation: Tensor, input_features: Tensor) -> Tensor:
         """
         Construct gradient from the gradient components.
 
@@ -192,7 +200,14 @@ class GCLinear(nn.Linear):
             Tensor: Gradient of loss w.r.t. all parameters of the layer
         """
         batch_size = grad_pre_activation.shape[0]
-        grad = torch.einsum('ijk,ijl->ikl', grad_pre_activation, input_features).reshape(batch_size, -1)
+        is_3d = input_features.dim() == 3
+        if is_3d:
+            grad = torch.einsum('ijk,ijl->ikl', grad_pre_activation, input_features).reshape(batch_size, -1)
+        else:
+            grad = torch.einsum('bi,bj->bij', grad_pre_activation, input_features).reshape(batch_size, -1)
+
+        if self.projector_grad is not None:
+            grad = self.projector_grad(grad)
         return grad
 
     @staticmethod
@@ -249,15 +264,13 @@ class GCEmbedding(nn.Embedding):
         # Simply call the parent class's constructor
         super().__init__(*args, **kwargs)
 
-    def set_projector(self, base_seed: int, proj_dim_1: int, proj_dim_2: int, projector_kwargs_1: dict, projector_kwargs_2: dict):
+    def set_projector(self, base_seed: int, projector_kwargs: dict, proj_factorize: bool = True):
         """
         Set the projection function for this layer.
 
         Args:
             base_seed (int): Base seed for the random projection
-            proj_dim_1 (int): Dimension of the projection for the weight
-            proj_dim_2 (int): Dimension of the projection for the bias
-            projector_kwargs_1 (dict): Keyword arguments for the projection function for the weight
-            projector_kwargs_2 (dict): Keyword arguments for the projection function for the bias
+            projector_kwargs (dict): Keyword arguments for the projection function
+            proj_factorize (bool): Whether to factorize the projection into two separate projectors
         """
         pass

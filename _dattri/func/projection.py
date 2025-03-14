@@ -40,6 +40,7 @@ class ProjectionType(str, Enum):
 
     normal: str = "normal"
     rademacher: str = "rademacher"
+    kaiming: str = "kaiming"
 
 
 class AbstractProjector(ABC):
@@ -336,9 +337,8 @@ class CudaProjector(AbstractProjector):
                 (the fast_jl library)."
                 raise ModuleNotFoundError(msg) from None
         elif self.method == "SJLT":
-            #TODO: fix due to the update
             self.c = 2
-            blow_up = 5
+            blow_up = 1
             torch.manual_seed(self.seed)
             rand_indices = torch.randint(proj_dim * blow_up, (feature_dim, self.c), device=device)
             rand_signs = torch.randint(0, 2, (feature_dim, self.c), device=device) * 2 - 1
@@ -365,6 +365,15 @@ class CudaProjector(AbstractProjector):
                 proj_dim,
                 device=device,
             )
+        elif self.method == "Kaiming":
+            active_dim = self.active_indices.numel()
+            torch.manual_seed(self.seed)
+            self.proj_matrix = torch.empty(
+                active_dim,
+                proj_dim,
+                device=device,
+            )
+            torch.nn.init.kaiming_uniform_(self.proj_matrix.T, a=math.sqrt(5))
 
 
     def project(
@@ -433,18 +442,32 @@ class CudaProjector(AbstractProjector):
                     raise RuntimeError(msg) from e
                 raise e from None
         elif self.method == "SJLT":
-            #TODO: fix due to the update
-            result = SJLT(
-                features,
-                self.proj_dim,
-                self.threshold,
-                self.rand_indices_and_signs,
-                seed=self.seed + int(1e4) * ensemble_id,
-                batch_size=effective_batch_size,
-                c=self.c,
-                blow_up=1,
-            )
+            batch_size, _ = features.size()
+            device = features.device
+
+            blow_up = 1
+
+            rand_indices, rand_signs = self.rand_indices_and_signs
+            # Get indices of elements above threshold in a single pass
+            batch_idx, input_idx = torch.nonzero(torch.abs(features) >= self.threshold, as_tuple=True)
+            if input_idx.numel() == 0:
+                return torch.zeros(batch_size, self.proj_dim, device=device)
+
+            values = features[batch_idx, input_idx]
+
+            scaled_vals = values.repeat_interleave(self.c) * rand_signs[input_idx].flatten()
+            final_indices = batch_idx.repeat_interleave(self.c) * (self.proj_dim * blow_up) + rand_indices[input_idx].flatten()
+
+            # Initialize and fill output tensor
+            batch_vec_p = torch.zeros(batch_size, self.proj_dim * blow_up, device=device)
+            batch_vec_p.view(-1).index_add_(0, final_indices, scaled_vals)
+
+            # Sum and normalize
+            batch_vec_p = batch_vec_p.view(batch_size, self.proj_dim, blow_up).sum(dim=2)
+
+            result = batch_vec_p / (self.c ** 0.5)
         elif self.method == "SJLT_R":
+            #TODO: fix for the batch size
             batch_size, _ = features.size()
 
             features = features[:, self.active_indices]
@@ -468,12 +491,7 @@ class CudaProjector(AbstractProjector):
                 batch_vec_p.scatter_add_(1, batch_neg_output_mapping, -neg_values)
 
             result = batch_vec_p / (self.c ** 0.5)
-        elif self.method == "Rademacher":
-            features = features[:, self.active_indices]
-            features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
-
-            result = features @ self.proj_matrix / (self.proj_dim ** 0.5)
-        elif self.method == "Gaussian":
+        elif self.method in ["Rademacher", "Gaussian", "Kaiming"]:
             features = features[:, self.active_indices]
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
 
@@ -970,6 +988,8 @@ def make_random_projector(
             proj_type = ProjectionType.rademacher
         elif method == "Gaussian":
             proj_type = ProjectionType.normal
+        elif method == "Kaiming":
+            proj_type = ProjectionType.kaiming
 
         projector = CudaProjector
         using_cuda_projector = True

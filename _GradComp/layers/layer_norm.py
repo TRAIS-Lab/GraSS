@@ -23,6 +23,9 @@ class GCLayerNorm(nn.LayerNorm):
         self.normalized = None
         self.pre_activation = None
 
+        self.projector_grad = None
+        self.projector_grad_comp = (None, None)
+
     def forward(self, x):
         mean = x.mean(dim=-1, keepdim=True)
         var = x.var(dim=-1, keepdim=True, unbiased=False)
@@ -34,6 +37,41 @@ class GCLayerNorm(nn.LayerNorm):
             self.pre_activation = self.normalized
 
         return self.pre_activation
+
+    def set_projector(self, base_seed: int, projector_kwargs: dict, proj_factorize: bool = True):
+        """
+        Set the projection function for this layer.
+
+        Args:
+            base_seed (int): Base seed for the random projection
+            projector_kwargs (dict): Keyword arguments for the projection function
+            proj_factorize (bool): Whether to factorize the projection into two separate projectors (it makes no difference for LayerNorm)
+        """
+        if proj_factorize:
+            dumb_grad_comp_1 = torch.zeros((self.normalized.shape[0], self.normalized.shape[-1]))
+            projector_grad_comp_1 = random_project(
+                dumb_grad_comp_1,
+                dumb_grad_comp_1.shape[0],
+                proj_seed=base_seed,
+                **projector_kwargs,
+            )
+
+            dumb_grad_comp_2 = torch.zeros((self.normalized.shape[0], self.normalized.shape[-1]))
+            projector_grad_comp_2 = random_project(
+                dumb_grad_comp_2,
+                dumb_grad_comp_2.shape[0],
+                proj_seed=base_seed + 1,
+                **projector_kwargs,
+            )
+            self.projector_grad_comp = (projector_grad_comp_1, projector_grad_comp_2)
+        else:
+            dumb_grad_comp = torch.zeros((self.normalized.shape[0], self.normalized.shape[-1] * 2))
+            self.projector_grad = random_project(
+                dumb_grad_comp,
+                dumb_grad_comp.shape[0],
+                proj_seed=base_seed,
+                **projector_kwargs,
+            )
 
     def grad_comp(self, grad_pre_activation: Tensor, per_sample: bool = True) -> Tuple[Tensor, Tensor]:
         """
@@ -70,44 +108,14 @@ class GCLayerNorm(nn.LayerNorm):
                 grad_weight = torch.sum(grad_pre_activation * normalized, dim=0)
                 grad_bias = torch.sum(grad_pre_activation, dim=0)
 
-        if self.projector_grad_comp_1 is not None:
-            grad_weight = self.projector_grad_comp_1(grad_weight)
-        if self.projector_grad_comp_2 is not None:
-            grad_bias = self.projector_grad_comp_2(grad_bias)
+        if self.projector_grad_comp != (None, None):
+            projector_grad_comp_1, projector_grad_comp_2 = self.projector_grad_comp
+            grad_weight = projector_grad_comp_1(grad_weight)
+            grad_bias = projector_grad_comp_2(grad_bias)
 
         return grad_weight, grad_bias
 
-    def set_projector(self, base_seed: int, proj_dim_1: int, proj_dim_2: int, projector_kwargs_1: dict, projector_kwargs_2: dict):
-        """
-        Set the projection function for this layer.
-
-        Args:
-            base_seed (int): Base seed for the random projection
-            proj_dim_1 (int): Dimension of the projection for the weight
-            proj_dim_2 (int): Dimension of the projection for the bias
-            projector_kwargs_1 (dict): Keyword arguments for the projection function for the weight
-            projector_kwargs_2 (dict): Keyword arguments for the projection function for the bias
-        """
-        dumb_grad_comp_1 = torch.zeros((self.normalized.shape[0], self.normalized.shape[-1]))
-        self.projector_grad_comp_1 = random_project(
-            dumb_grad_comp_1,
-            dumb_grad_comp_1.shape[0],
-            proj_seed=base_seed,
-            proj_dim=proj_dim_1,
-            **projector_kwargs_1,
-        )
-
-        dumb_grad_comp_2 = torch.zeros((self.normalized.shape[0], self.normalized.shape[-1]))
-        self.projector_grad_comp_2 = random_project(
-            dumb_grad_comp_2,
-            dumb_grad_comp_2.shape[0],
-            proj_seed=base_seed + 1,
-            proj_dim=proj_dim_2,
-            **projector_kwargs_2,
-        )
-
-    @staticmethod
-    def grad_from_grad_comp(grad_weight: Tensor, grad_bias: Tensor) -> Tensor:
+    def grad_from_grad_comp(self, grad_weight: Tensor, grad_bias: Tensor) -> Tensor:
         """
         Construct gradient from the gradient components.
         For LayerNorm, components are gradient of weight and bias.
@@ -120,6 +128,9 @@ class GCLayerNorm(nn.LayerNorm):
             Tensor: Gradient of loss w.r.t. all parameters of the layer
         """
         grad = torch.cat((grad_weight, grad_bias), dim=1)
+
+        if self.projector_grad is not None:
+            grad = self.projector_grad(grad)
         return grad
 
     @staticmethod

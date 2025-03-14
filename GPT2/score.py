@@ -294,16 +294,15 @@ def parse_args():
         help="Debug mode.",
     )
     parser.add_argument(
-        "--proj",
+        "--projection",
         type=str,
         default=None,
-        help="The projection method to be used when attributing.",
+        help="The projection method to be used when attributing. Basic format: 'proj_method-proj_dim'.",
     )
     parser.add_argument(
-        "--proj_dim",
-        type=str,
-        default=None,
-        help="The projection dimension to be used when attributing. Format: 'proj_dim(U)' for uniform, or 'proj_dim(NU)' for non-uniform.",
+        "--proj_factorize",
+        action="store_true",
+        help="If passed, will use factorized projection, i.e., the projection will be applied on the gradient components rather on the gradients.",
     )
     parser.add_argument(
         "--threshold",
@@ -572,7 +571,7 @@ def main():
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
     from _dattri.benchmark.utils import SubsetSampler
-    from GPT2.utlis import batch_size, setup_projector, result_filename, lds
+    from GPT2.utlis import batch_size, setup_projection_kwargs, result_filename, lds
 
     device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
@@ -593,7 +592,7 @@ def main():
         test_dataset, collate_fn=default_data_collator, batch_size=test_batch_size, shuffle=False
     )
 
-    projector_kwargs = setup_projector(args, device)
+    projector_kwargs = setup_projection_kwargs(args, device)
 
     # Logging setting
     logger.info(f"The training dataset length: {len(train_dataset)}.")
@@ -657,6 +656,7 @@ def main():
         hessian = args.tda.split("-")[1].lower()
         assert hessian in ["raw", "kfac", "ekfac"], "Invalid Hessian type."
         assert args.layer == "Linear", "LoGra only supports Linear setting now."
+        assert args.projection is not None, "LoGra requires projection method."
 
         model = LoGra_GPT2(checkpoint, config, resume=True)
         model.eval()
@@ -665,8 +665,8 @@ def main():
 
         # 1. Computing EK-FAC factors for training data
         logix_args_train = LogIXArguments(
-            project=f"./LoGra/project/{args.proj}-{args.proj_dim}",
-            config=f"./LoGra/project/{args.proj}-{args.proj_dim}.yaml",
+            project=f"./LoGra/project/{args.projection}",
+            config=f"./LoGra/project/{args.projection}.yaml",
             lora=True,
             hessian=hessian,
             save="grad",
@@ -693,8 +693,8 @@ def main():
         model = LoGra_GPT2(checkpoint, config, resume=True) # reinitialize the model
         model.eval()
         logix_args_test = LogIXArguments(
-            project=f"./LoGra/project/{args.proj}-{args.proj_dim}",
-            config=f"./LoGra/project/{args.proj}-{args.proj_dim}.yaml",
+            project=f"./LoGra/project/{args.projection}",
+            config=f"./LoGra/project/{args.projection}.yaml",
             lora=True,
             hessian=hessian,
             save="grad",

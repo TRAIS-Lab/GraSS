@@ -141,49 +141,16 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
             break
 
         proj_seed = projector_kwargs.get('proj_seed', 0)
-        proj_dim = projector_kwargs.get("proj_dim", 32)
-        proj_dim_dist = projector_kwargs.get("proj_dim_dist", "uniform")
+        proj_factorize = projector_kwargs.get("proj_factorize", True)
 
         projector_kwargs.pop("proj_seed")
-        projector_kwargs.pop("proj_dim")
-        projector_kwargs.pop("proj_dim_dist")
-
-        # Control the thresholding for different vals
-        projector_kwargs_1 = projector_kwargs.copy()
-        projector_kwargs_2 = projector_kwargs.copy()
-
-        # projector_kwargs_2["threshold"] = 0.0 #TODO threshold for gradient of pre-activation, which shouldn't be sparse so better set to 0
-
-        layer_dim_1 = []
-        layer_dim_2 = []
-        for layer_id, layer in enumerate(self.modules()):
-            if isinstance(layer, GCLinear):
-                layer_dim_1.append(layer.weight.shape[0])
-                layer_dim_2.append(layer.weight.shape[0] * layer.weight.shape[1])
-            elif isinstance(layer, GCEmbedding):
-                layer_dim_1.append(layer.embedding_dim)
-                layer_dim_2.append(layer.embedding_dim * layer.num_embeddings)
-            elif isinstance(layer, GCLayerNorm):
-                layer_dim_1.append(layer.normalized_shape[0])
-                layer_dim_2.append(layer.normalized_shape[0])
-            else:
-                layer_dim_1.append(0)
-                layer_dim_2.append(0)
-
-        if proj_dim_dist == "NU": # Non-uniform projection dimension
-            total_dim_1 = sum(layer_dim_1)
-            total_dim_2 = sum(layer_dim_2)
-            proj_dim_1 = [int(proj_dim * dim / total_dim_1) for dim in layer_dim_1]
-            proj_dim_2 = [int(proj_dim * dim / total_dim_2) for dim in layer_dim_2]
-        elif proj_dim_dist == "U": # Uniform projection dimension
-            proj_dim_1 = [proj_dim] * len(layer_dim_1)
-            proj_dim_2 = [proj_dim] * len(layer_dim_2)
+        projector_kwargs.pop("proj_factorize")
 
         # Apply projectors to all GC layers
         for module_id, module in enumerate(self.modules()):
             if isinstance(module, GCLinear) or isinstance(module, GCEmbedding) or isinstance(module, GCLayerNorm):
                 base_seed = proj_seed + int(1e4) * module_id
-                module.set_projector(base_seed, proj_dim_1[module_id], proj_dim_2[module_id], projector_kwargs_1, projector_kwargs_2)
+                module.set_projector(base_seed, projector_kwargs, proj_factorize)
 
 
     @classmethod

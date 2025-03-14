@@ -54,24 +54,31 @@ def lds(score, training_setting):
         print(f"Error: {e}")
         return None, None, None
 
-def setup_projector(args, device):
-    if args.proj is None or args.proj_dim is None:
+def setup_projection_kwargs(args, device):
+    if args.projection is None:
         return None
 
-    proj_dim, proj_dim_dist = args.proj_dim.split("(")
-    proj_dim_dist = proj_dim_dist[:-1] # Remove the last character ')'
-    proj_dim = int(proj_dim) # Convert to integer
+    proj_method, proj_dim = args.projection.split("-")
+    # proj_dim might be of the form 'proj_dim*proj_dim' for factorized projection, for simply 'proj_dim' for non-factorized projection
+    if "*" in proj_dim:
+        proj_factorize = True
+        proj_dim = proj_dim.split("*")
+        assert proj_dim[0] == proj_dim[1], "Projection dimension must be the same for factorized projection."
 
-    if proj_dim_dist not in ["U", "NU"]:
-        raise ValueError("Invalid projection dimension distribution. Choose from 'U' for uniform or 'NU' for non-uniform.")
+        proj_dim = int(proj_dim[0]) # Convert to integer
+        if proj_method == "SJLT":
+            assert int(proj_dim[0]) > 512, "Projection dimension must be greater than 512 for to project the entire gradient to avoid the slow down due to local collisions."
+    else:
+        proj_factorize = False
+        proj_dim = int(proj_dim) # Convert to integer
 
     projector_kwargs = {
         "proj_dim": proj_dim,
-        "proj_dim_dist": proj_dim_dist,
         "proj_max_batch_size": 32,
         "proj_seed": args.seed,
+        "proj_factorize": proj_factorize,
         "device": device,
-        "method": args.proj,
+        "method": proj_method,
         "use_half_precision": False,
         "threshold": args.threshold,
         "random_drop": args.random_drop,
@@ -103,8 +110,8 @@ def batch_size(baseline, tda):
 def result_filename(args):
     filename_parts = []
 
-    if args.proj is not None:
-        filename_parts.append(f"{args.proj}-{args.proj_dim}")
+    if args.projection is not None:
+        filename_parts.append("args.projection")
 
     filename_parts.append(f"thrd-{args.threshold}")
     filename_parts.append(f"rdp-{args.random_drop}")
