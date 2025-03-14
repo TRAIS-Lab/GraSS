@@ -80,7 +80,6 @@ class GCLinear(nn.Linear):
 
         batch_size = self.pre_activation.shape[0]
 
-        dumb_grad_comp_1 = torch.zeros_like(self.pre_activation.view(-1, self.pre_activation.shape[-1]))
         is_3d = self.layer_input.dim() == 3
 
         input_features = self.layer_input
@@ -97,11 +96,8 @@ class GCLinear(nn.Linear):
             if is_3d:
                 input_features = input_features.reshape(batch_size, seq_length, -1)
 
-            dumb_grad_comp_2 = torch.zeros_like(input_features.view(-1, input_features.shape[-1]))
-        else:
-            dumb_grad_comp_2 = torch.zeros_like(self.layer_input.view(-1, self.layer_input.shape[-1]))
-
         if proj_factorize:
+            dumb_grad_comp_1 = torch.zeros_like(self.pre_activation.view(-1, self.pre_activation.shape[-1]))
             projector_grad_comp_1 = random_project(
                 dumb_grad_comp_1,
                 dumb_grad_comp_1.shape[0],
@@ -109,7 +105,7 @@ class GCLinear(nn.Linear):
                 pre_compute=proj_factorize,
                 **projector_kwargs,
             )
-
+            dumb_grad_comp_2 = torch.zeros_like(input_features.view(-1, input_features.shape[-1]))
             projector_grad_comp_2 = random_project(
                 dumb_grad_comp_2,
                 dumb_grad_comp_2.shape[0],
