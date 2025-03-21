@@ -16,12 +16,14 @@ import hashlib
 import logging as default_logging
 import sys
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+
+from _logix.tensor_log import TensorLog
 
 _logger = None
 
@@ -103,7 +105,16 @@ def get_rank(group=None) -> int:
         return 0
 
 
-def get_repr_dim(named_modules) -> Tuple[List[str], List[int]]:
+def get_repr_dim(named_modules) -> Tuple[List[Tuple[str, str]], List[int]]:
+    """
+    Get the representation dimensions and paths for all named modules.
+
+    Args:
+        named_modules: Dictionary mapping module objects to their names
+
+    Returns:
+        Tuple containing a list of paths and a list of dimensions
+    """
     repr_dims = []
     paths = []
     for k, v in named_modules.items():
@@ -156,6 +167,7 @@ def module_check(
     return True
 
 
+# Legacy function kept for backward compatibility
 def nested_dict():
     """
     Helper function to create a nested defaultdict.
@@ -163,62 +175,159 @@ def nested_dict():
     return defaultdict(nested_dict)
 
 
-def merge_log_dict(merged_log_dict, log_dict) -> None:
-    for key, value in log_dict.items():
-        if isinstance(value, dict):
-            merge_log_dict(merged_log_dict[key], value)
-        else:
-            if key not in merged_log_dict:
-                merged_log_dict[key] = value
-            else:
-                merged_log_dict[key] = torch.cat([merged_log_dict[key], value], dim=0)
+def flatten_tensor_log(tensor_log: TensorLog, paths: List[Tuple[str, str]]) -> torch.Tensor:
+    """
+    Flatten a TensorLog into a single tensor based on the given paths.
+
+    Args:
+        tensor_log (TensorLog): The tensor log to flatten
+        paths (List[Tuple[str, str]]): List of (module_name, log_type) paths
+
+    Returns:
+        torch.Tensor: Flattened tensor
+    """
+    flat_tensors = []
+    # Extract batch size from the first tensor
+    first_tensor = tensor_log.get(paths[0][0], paths[0][1])
+    if first_tensor is None:
+        raise ValueError(f"Path {paths[0]} not found in tensor log")
+    bsz = first_tensor.shape[0]
+
+    # Collect and flatten all tensors
+    for module_name, log_type in paths:
+        tensor = tensor_log.get(module_name, log_type)
+        if tensor is None:
+            raise ValueError(f"Path ({module_name}, {log_type}) not found in tensor log")
+        flat_tensors.append(tensor.reshape(bsz, -1))
+
+    # Concatenate along the second dimension
+    return torch.cat(flat_tensors, dim=1)
 
 
-def merge_logs(log_list):
-    merged_data_id = []
-    merged_log_dict = nested_dict()
+def synchronize_tensors(tensors: List[torch.Tensor], device: Optional[torch.device] = None) -> List[torch.Tensor]:
+    """
+    Move a list of tensors to the specified device.
 
-    for data_id, log_dict in log_list:
-        merged_data_id.extend(data_id)
-        merge_log_dict(merged_log_dict, log_dict)
-    return merged_data_id, merged_log_dict
+    Args:
+        tensors (List[torch.Tensor]): List of tensors to synchronize
+        device (Optional[torch.device]): Target device. If None, uses the device of the first tensor.
+
+    Returns:
+        List[torch.Tensor]: List of tensors on the target device
+    """
+    if not tensors:
+        return []
+
+    target_device = device if device is not None else tensors[0].device
+    return [tensor.to(device=target_device) for tensor in tensors]
 
 
+def synchronize_tensor_log(tensor_log: TensorLog, device: Optional[torch.device] = None) -> TensorLog:
+    """
+    Move all tensors in a TensorLog to the specified device.
+
+    Args:
+        tensor_log (TensorLog): The tensor log to synchronize
+        device (Optional[torch.device]): Target device. If None, uses the device of the first tensor.
+
+    Returns:
+        TensorLog: The synchronized tensor log
+    """
+    # Return a new TensorLog with all tensors moved to the target device
+    return tensor_log.to(device)
+
+
+def cat_tensor_logs(logs: List[TensorLog], dim: int = 0) -> TensorLog:
+    """
+    Concatenate multiple TensorLogs along the specified dimension.
+
+    Args:
+        logs (List[TensorLog]): List of TensorLogs to concatenate
+        dim (int): Dimension along which to concatenate
+
+    Returns:
+        TensorLog: Concatenated TensorLog
+    """
+    if not logs:
+        return TensorLog()
+
+    result = logs[0].clone()
+    for log in logs[1:]:
+        result.cat(log, dim=dim)
+
+    return result
+
+
+# For backward compatibility with existing code
 def flatten_log(log, path) -> torch.Tensor:
-    flat_log_list = []
-    for module, log_type in path:
-        log_module = log[module][log_type]
-        bsz = log_module.shape[0]
-        flat_log_list.append(log_module.reshape(bsz, -1))
-    flat_log = torch.cat(flat_log_list, dim=1)
+    """
+    Legacy function to flatten nested dictionary logs. Now converts to TensorLog first.
 
-    return flat_log
+    Args:
+        log: The old-style nested dictionary log
+        path: List of paths to flatten
+
+    Returns:
+        torch.Tensor: Flattened tensor
+    """
+    # Convert the old-style log to TensorLog if it's not already
+    if not isinstance(log, TensorLog):
+        tensor_log = TensorLog.from_dict(log)
+    else:
+        tensor_log = log
+
+    return flatten_tensor_log(tensor_log, path)
 
 
-def unflatten_log(log, path):
-    raise NotImplementedError
-
-
+# For backward compatibility with existing code
 def synchronize_device(
     src: Dict[str, Dict[str, torch.Tensor]],
     tgt: Dict[str, Dict[str, torch.Tensor]],
     device: Optional[torch.device] = None,
 ) -> None:
     """
-    Synchronize the device of two tensor dicts.
+    Legacy function to synchronize device of two tensor dicts.
 
     Args:
         src (Dict[str, Dict[str, torch.Tensor]]): Source tensors
         tgt (Dict[str, Dict[str, torch.Tensor]]): Target tensors
         device (Optional[torch.device]): Device to synchronize to
     """
-
     for module_name, module_dict in tgt.items():
         for log in module_dict.keys():
-            if device is None:
+            if device is None and module_name in src and log in src[module_name]:
                 device = src[module_name][log].device
             tgt[module_name][log] = tgt[module_name][log].to(device=device)
 
+def merge_logs(log_list):
+    """
+    Legacy function for merging multiple logs.
+
+    Args:
+        log_list: List of (data_id, log_dict) tuples
+
+    Returns:
+        Tuple: (merged_data_id, merged_log_dict)
+    """
+    from _logix.tensor_log import TensorLog
+
+    merged_data_ids = []
+    merged_tensor_log = TensorLog()
+
+    for data_id, log_dict in log_list:
+        merged_data_ids.extend(data_id)
+
+        # Convert to TensorLog if needed
+        if not isinstance(log_dict, TensorLog):
+            log = TensorLog.from_dict(log_dict)
+        else:
+            log = log_dict
+
+        # Merge with accumulated log
+        merged_tensor_log.cat(log)
+
+    # For backward compatibility, convert back to nested dict
+    return merged_data_ids, merged_tensor_log.to_dict()
 
 class DataIDGenerator:
     """

@@ -34,10 +34,22 @@ class Log:
         cpu_offload: Optional[bool] = False,
     ):
         """
-        Put log into `binfo`
+        Add log tensor to BatchInfo's tensor log.
+
+        Args:
+            state: LogIXState object
+            binfo: BatchInfo object to update
+            module: The module being logged
+            module_name: The name of the module
+            log_type: The type of log (forward, backward, grad)
+            data: Optional tensor data to log
+            cpu_offload: Whether to offload tensors to CPU
         """
-        module_log = binfo.log[module_name]
-        if log_type not in module_log:
-            module_log[log_type] = data
-        else:
-            module_log[log_type] += data
+        # If data is provided, add it directly to the tensor log
+        if data is not None:
+            # Move to CPU if requested
+            if cpu_offload:
+                data = data.detach().cpu()
+
+            # Add data to the tensor log
+            binfo.log.add(module_name, log_type, data)

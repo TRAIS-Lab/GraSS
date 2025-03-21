@@ -149,13 +149,13 @@ class GCIFAttributorKFAC():
                     if self.profile:
                         torch.cuda.synchronize()
                         start_time = time.time()
+
                     grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_full, per_sample=True)
+                    grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
 
                     if self.profile:
                         torch.cuda.synchronize()
                         self.profiling_stats['projection'] += time.time() - start_time
-
-                    grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
 
                     if train_grad[layer_id] is None:
                         train_grad[layer_id] = torch.zeros((num_samples, *grad.shape[1:]), device=self.device)
@@ -311,12 +311,12 @@ class GCIFAttributorKFAC():
                         start_time = time.time()
 
                     grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_test, per_sample=True)
+                    test_grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
 
                     if self.profile:
                         torch.cuda.synchronize()
                         self.profiling_stats['projection'] += time.time() - start_time
 
-                    test_grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
 
                     col_st = test_batch_idx * test_dataloader.batch_size
                     col_ed = min(

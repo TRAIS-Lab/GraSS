@@ -25,10 +25,11 @@ from _logix.batch_info import BatchInfo
 from _logix.config import Config, LoggingConfig, LoRAConfig, init_config_from_yaml
 from _logix.logging import HookLogger
 from _logix.logging.log_loader import LogDataset
-from _logix.logging.log_loader_utils import collate_nested_dicts
+from _logix.logging.log_loader_utils import collate_tensor_logs
 from _logix.lora import LoRAHandler
 from _logix.lora.utils import is_lora
 from _logix.state import LogIXState
+from _logix.tensor_log import TensorLog
 from _logix.utils import (
     get_logger,
     get_rank,
@@ -45,15 +46,6 @@ class LogIX:
     Using (PyTorch) hooks, it tracks, saves, and computes statistics for activations,
     gradients, and other tensors with its logger. Once logging is finished, it provides
     an interface for computing influence scores and other analysis.
-
-    Args:
-        project (str):
-            The name or identifier of the project. This is used for organizing
-            logs and analysis results.
-        config (str, optional):
-            The path to the YAML configuration file. This file contains settings
-            for logging, analysis, and other features. Defaults to an empty string,
-            which means default settings are used.
     """
 
     _SUPPORTED_MODULES = {nn.Linear, nn.Conv1d, nn.Conv2d}
@@ -64,6 +56,14 @@ class LogIX:
         config: Optional[str] = None,
         logging_config: Optional[LoggingConfig] = None,
     ) -> None:
+        """
+        Initialize a new LogIX instance.
+
+        Args:
+            project (str): Project name or identifier
+            config (Optional[str]): Path to YAML configuration file
+            logging_config (Optional[LoggingConfig]): Optional logging configuration object
+        """
         self.project: str = project
 
         self.model: Optional[nn.Module] = None
@@ -107,17 +107,12 @@ class LogIX:
         """
         Sets up modules in the model to be watched based on optional type and name filters.
         Hooks will be added to the watched modules to track their forward activations,
-        backward error signals, and gradient, and compute various statistics (e.g. mean,
-        variance, covariance) for each of these.
+        backward error signals, and gradient, and compute various statistics.
 
         Args:
-            model (nn.Module):
-                The neural network model to be watched.
-            type_filter (List[nn.Module], optional):
-                A list of module types to be watched. If None, all supported module types
-                are watched.
-            name_filter (List[str], optional):
-                A list of module names to be watched. If None, all modules are considered.
+            model (nn.Module): The neural network model to be watched
+            type_filter (Optional[List[nn.Module]]): Optional list of module types to watch
+            name_filter (Optional[List[str]]): Optional list of module name patterns to watch
         """
         self.model = model
         if get_world_size() > 1 and hasattr(self.model, "module"):
@@ -153,9 +148,7 @@ class LogIX:
         activations that are not directly associated with model modules.
 
         Args:
-            tensor_dict (Dict[str, torch.Tensor]):
-                A dictionary where keys are tensor names and values are the tensors
-                themselves.
+            tensor_dict (Dict[str, torch.Tensor]): Dictionary of tensor names to tensors
         """
         self.logger.register_all_tensor_hooks(tensor_dict)
 
@@ -169,30 +162,15 @@ class LogIX:
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         """
-        Adds an LoRA variant for gradient compression. Note that the added LoRA module
-        is different from the original LoRA module in that it consists of three parts:
-        encoder, bottleneck, and decoder. The encoder and decoder are initialized with
-        random weights, while the bottleneck is initialized to be zero. In doing so,
-        the encoder and decoder are repsectively used to compress forward and backward
-        signals, while the bottleneck is used to extract the compressed gradient.
-        Mathematically, this corresponds to random Kronecker product compression.
+        Adds an LoRA variant for gradient compression.
 
         Args:
-            model (Optional[nn.Module]):
-                The model to apply LoRA to. If None, the model already set with watch
-                is used.
-            watch (bool, optional):
-                Whether to watch the model after adding LoRA. Defaults to `True`.
-            clear (bool, optional):
-                Whether to clear the internal states after adding LoRA. Defaults to
-                `True`.
-            type_filter (Optional[List[nn.Module]], optional):
-                A list of module types to be watched.
-            name_filter (Optional[List[str]], optional):
-                A list of module names to be watched.
-            lora_path (Optional[str], optional):
-                The path to the LoRA state file. If None, the LoRA state is not loaded.
-            lora_config (Optional[LoRAConfig], optional): LoRA configuration.
+            watch (bool): Whether to watch the model after adding LoRA
+            clear (bool): Whether to clear internal states after adding LoRA
+            type_filter (Optional[List[nn.Module]]): Optional list of module types to apply LoRA to
+            name_filter (Optional[List[str]]): Optional list of module name patterns to apply LoRA to
+            lora_path (Optional[str]): Optional path to load LoRA weights from
+            lora_config (Optional[LoRAConfig]): Optional LoRA configuration
         """
         if lora_config is not None:
             self.set_lora_config(lora_config)
@@ -229,17 +207,18 @@ class LogIX:
         if watch:
             self.watch(self.model)
 
-    def log(self, data_id: Iterable[Any], mask: Optional[torch.Tensor] = None) -> None:
+    def log(self, data_id: Iterable[Any], mask: Optional[torch.Tensor] = None) -> TensorLog:
         """
-        Logs the data. This is an experimental feature for now.
+        Log data for the current batch.
 
         Args:
-            data_id (str):
-                A unique identifier associated with the data for the logging session.
-            mask (Optional[torch.Tensor], optional):
-                An optional attention mask used in Transformer models.
+            data_id: Unique identifier(s) for the data
+            mask (Optional[torch.Tensor]): Optional attention mask
+
+        Returns:
+            TensorLog: The logged tensor data
         """
-        self.logger.log(data_id=data_id, mask=mask)
+        return self.logger.log(data_id=data_id, mask=mask)
 
     def __call__(
         self,
@@ -248,12 +227,15 @@ class LogIX:
         save: bool = False,
     ):
         """
+        Context manager interface for logging.
+
         Args:
-            data_id: A unique identifier associated with the data for the logging session.
-            mask (torch.Tensor, optional): Mask for the data.
+            data_id: Unique identifier(s) for the data
+            mask (Optional[torch.Tensor]): Optional attention mask
+            save (bool): Whether to save logs to disk
 
         Returns:
-            self: Returns the instance of the LogIX object.
+            LogIX: Self for context manager usage
         """
         self.binfo.clear()
         self.binfo.data_id = data_id
@@ -265,10 +247,10 @@ class LogIX:
 
     def __enter__(self):
         """
-        Sets up the context manager.
+        Enter the context manager, setting up hooks.
 
-        This method is automatically called when the `with` statement is used with an `LogIX` object.
-        It sets up the logging environment based on the provided parameters.
+        Returns:
+            LogIX: Self for context manager usage
         """
         self.logger.clear(hook=True, module=False, buffer=False)
         self.logger.register_all_module_hooks()
@@ -277,10 +259,7 @@ class LogIX:
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         """
-        Clears the internal states and removes all the hooks.
-
-        This method is essential for ensuring that there are no lingering hooks that could
-        interfere with further operations on the model or with future logging sessions.
+        Exit the context manager, updating and optionally saving logs.
         """
         self.logger.update(save=self._save_batch or self._save)
 
@@ -288,13 +267,11 @@ class LogIX:
         self, data_id: Iterable[Any], mask: Optional[torch.Tensor] = None
     ) -> None:
         """
-        This is another programming interface for logging. Instead of using the context manager, we also
-        allow users to manually specify `start` and `end` points for logging. In the `start` point,
-        users should specify `data_id` and optionally `mask`.
+        Start logging manually (alternative to context manager).
 
         Args:
-            data_id: A unique identifier associated with the data for the logging session.
-            mask (torch.Tensor, optional): Mask for the data.
+            data_id: Unique identifier(s) for the data
+            mask (Optional[torch.Tensor]): Optional attention mask
         """
         # Set up batch information
         self.binfo.clear()
@@ -307,22 +284,22 @@ class LogIX:
 
     def end(self, save: bool = False) -> None:
         """
-        This is another programming interface for logging. Instead of using the context manager, we also
-        allow users to manually specify "start" and "end" points for logging.
+        End logging manually (alternative to context manager).
+
+        Args:
+            save (bool): Whether to save logs to disk
         """
         self.logger.update(save=save or self._save)
 
     def build_log_dataset(self, flatten: bool = False) -> torch.utils.data.Dataset:
         """
-        Constructs the log dataset from the stored logs. This dataset can then be used
-        for analysis or visualization.
+        Build a dataset from saved logs.
 
         Args:
-            flatten (bool, optional): Whether to flatten the nested dictionary structure. Defaults to False.
+            flatten (bool): Whether to flatten tensors
 
         Returns:
-            LogDataset:
-                An instance of LogDataset containing the logged data.
+            torch.utils.data.Dataset: Dataset of logged tensors
         """
         if self.log_dataset is None:
             self.log_dataset = LogDataset(log_dir=self.log_dir, flatten=flatten)
@@ -336,70 +313,74 @@ class LogIX:
         flatten: bool = False,
     ) -> torch.utils.data.DataLoader:
         """
-        Constructs a DataLoader for the log dataset. This is useful for batch processing
-        of logged data during analysis. It also follows PyTorch DataLoader conventions.
+        Build a DataLoader from saved logs.
 
         Args:
-            batch_size (int, optional): The batch size for the DataLoader. Defaults to 16.
-            num_workers (int, optional): The number of workers for the DataLoader. Defaults to 0.
-            pin_memory (bool, optional): Whether to pin memory for the DataLoader. Defaults to False.
-            flatten (bool, optional): Whether to flatten the nested dictionary structure. Defaults to False.
+            batch_size (int): Batch size for the DataLoader
+            num_workers (int): Number of workers for data loading
+            pin_memory (bool): Whether to pin memory for faster GPU transfer
+            flatten (bool): Whether to flatten tensors
 
-        Return:
-            DataLoader:
-                A DataLoader instance for the log dataset.
+        Returns:
+            torch.utils.data.DataLoader: DataLoader of logged tensors
         """
         if self.log_dataloader is None:
             log_dataset = self.build_log_dataset(flatten=flatten)
-            collate_fn = None if flatten else collate_nested_dicts
             self.log_dataloader = torch.utils.data.DataLoader(
                 log_dataset,
                 batch_size=batch_size,
                 num_workers=num_workers,
                 pin_memory=pin_memory,
                 shuffle=False,
-                collate_fn=collate_fn,
+                collate_fn=collate_tensor_logs,
             )
         return self.log_dataloader
 
     def get_log(
         self, copy: bool = False
-    ) -> Tuple[str, Dict[str, Dict[str, torch.Tensor]]]:
+    ) -> Tuple[Iterable[Any], TensorLog]:
         """
-        Returns the current log, including data identifiers and logged information.
+        Get the current log.
 
         Args:
-           copy (bool, optional): Whether to return a copy of the log. Defaults to False.
+            copy (bool): Whether to return a copy of the log
 
         Returns:
-            dict: The current log.
+            Tuple[Iterable[Any], TensorLog]: (data_ids, tensor_log)
         """
         log = (self.binfo.data_id, self.binfo.log)
-        return log if not copy else deepcopy(log)
+        if copy:
+            return (deepcopy(self.binfo.data_id), self.binfo.log.clone())
+        return log
 
     def compute_influence(
         self,
-        src_log: Tuple[str, Dict[str, Dict[str, torch.Tensor]]],
-        tgt_log: Tuple[str, Dict[str, Dict[str, torch.Tensor]]],
+        src_log: Optional[Tuple[Iterable[Any], Union[TensorLog, Dict, torch.Tensor]]] = None,
+        tgt_log: Optional[Tuple[Iterable[Any], Union[TensorLog, Dict, torch.Tensor]]] = None,
         mode: Optional[str] = "dot",
         precondition: Optional[bool] = True,
         hessian: Optional[str] = "auto",
         influence_groups: Optional[List[str]] = None,
         damping: Optional[float] = None,
-    ) -> Dict[str, Union[List[str], torch.Tensor, Dict[str, torch.Tensor]]]:
+    ) -> Dict[str, Any]:
         """
-        Front-end interface for computing influence scores. It calls the
-        `compute_influence` method of the `InfluenceFunction` class.
+        Compute influence scores between source and target logs.
 
         Args:
-            src_log (Tuple[str, Dict[str, Dict[str, torch.Tensor]]]): Log of source gradients
-            tgt_log (Tuple[str, Dict[str, Dict[str, torch.Tensor]]]): Log of target gradients
-            mode (str, optional): Influence function mode. Defaults to "dot".
-            precondition (bool, optional): Whether to precondition the gradients. Defaults to True.
-            hessian (str, optional): Hessian computation mode. Defaults to "auto".
-            influence_groups (List[str], optional): List of influence groups. Defaults to None.
-            damping (float, optional): Damping factor. Defaults to None.
+            src_log: Source log tuple (data_ids, tensor_log)
+            tgt_log: Target log tuple (data_ids, tensor_log)
+            mode (str): Influence mode ("dot", "l2", "cosine")
+            precondition (bool): Whether to precondition gradients
+            hessian (str): Hessian approximation type
+            influence_groups (Optional[List[str]]): Optional module groups to track
+            damping (Optional[float]): Optional damping factor
+
+        Returns:
+            Dict[str, Any]: Influence scores
         """
+        src_log = src_log if src_log is not None else self.get_log()
+        tgt_log = tgt_log if tgt_log is not None else self.get_log()
+
         result = self.influence.compute_influence(
             src_log=src_log,
             tgt_log=tgt_log,
@@ -413,26 +394,28 @@ class LogIX:
 
     def compute_influence_all(
         self,
-        src_log: Optional[Tuple[str, Dict[str, Dict[str, torch.Tensor]]]] = None,
+        src_log: Optional[Tuple[Iterable[Any], Union[TensorLog, Dict, torch.Tensor]]] = None,
         loader: Optional[torch.utils.data.DataLoader] = None,
         mode: Optional[str] = "dot",
         precondition: Optional[bool] = True,
         hessian: Optional[str] = "auto",
         influence_groups: Optional[List[str]] = None,
         damping: Optional[float] = None,
-    ) -> Dict[str, Union[List[str], torch.Tensor, Dict[str, torch.Tensor]]]:
+    ) -> Dict[str, Any]:
         """
-        Front-end interface for computing influence scores against all train data in the log.
-        It calls the `compute_influence_all` method of the `InfluenceFunction` class.
+        Compute influence scores against all training data in the log.
 
         Args:
-            src_log (Tuple[str, Dict[str, Dict[str, torch.Tensor]]]): Log of source gradients
-            loader (torch.utils.data.DataLoader): DataLoader of train data
-            mode (str, optional): Influence function mode. Defaults to "dot".
-            precondition (bool, optional): Whether to precondition the gradients. Defaults to True.
-            hessian (str, optional): Hessian computation mode. Defaults to "auto".
-            influence_groups (List[str], optional): List of influence groups. Defaults to None.
-            damping (float, optional): Damping factor. Defaults to None.
+            src_log: Source log tuple (data_ids, tensor_log)
+            loader: DataLoader of training data
+            mode (str): Influence mode
+            precondition (bool): Whether to precondition gradients
+            hessian (str): Hessian approximation type
+            influence_groups (Optional[List[str]]): Optional module groups to track
+            damping (Optional[float]): Optional damping factor
+
+        Returns:
+            Dict[str, Any]: Influence scores for all training data
         """
         src_log = src_log if src_log is not None else self.get_log()
         loader = loader if loader is not None else self.build_log_dataloader()
@@ -450,22 +433,24 @@ class LogIX:
 
     def compute_self_influence(
         self,
-        src_log: Optional[Tuple[str, Dict[str, Dict[str, torch.Tensor]]]] = None,
+        src_log: Optional[Tuple[Iterable[Any], Union[TensorLog, Dict, torch.Tensor]]] = None,
         precondition: Optional[bool] = True,
         hessian: Optional[str] = "auto",
         influence_groups: Optional[List[str]] = None,
         damping: Optional[float] = None,
-    ) -> Dict[str, Union[List[str], torch.Tensor, Dict[str, torch.Tensor]]]:
+    ) -> Dict[str, Any]:
         """
-        Front-end interface for computing self-influence scores. It calls the
-        `compute_self_influence` method of the `InfluenceFunction` class.
+        Compute self-influence scores for uncertainty estimation.
 
         Args:
-            src_log (Tuple[str, Dict[str, Dict[str, torch.Tensor]]]): Log of source gradients
-            precondition (bool, optional): Whether to precondition the gradients. Defaults to True.
-            heissian (str, optional): Hessian computation mode. Defaults to "auto".
-            influence_groups (List[str], optional): List of influence groups. Defaults to None.
-            damping (float, optional): Damping factor. Defaults to None.
+            src_log: Source log tuple (data_ids, tensor_log)
+            precondition (bool): Whether to precondition gradients
+            hessian (str): Hessian approximation type
+            influence_groups (Optional[List[str]]): Optional module groups to track
+            damping (Optional[float]): Optional damping factor
+
+        Returns:
+            Dict[str, Any]: Self-influence scores
         """
         src_log = src_log if src_log is not None else self.get_log()
         result = self.influence.compute_self_influence(
@@ -495,11 +480,11 @@ class LogIX:
         self, state_path: Optional[str] = None, lora_path: Optional[str] = None
     ) -> None:
         """
-        Load all states from disk.
+        Initialize from saved logs and states.
 
         Args:
-            state_path (str, optional): Path to the state file.
-            lora_path (str, optional): Path to the LoRA state file.
+            state_path (Optional[str]): Optional path to state files
+            lora_path (Optional[str]): Optional path to LoRA weights
         """
         assert os.path.exists(self.log_dir), f"{self.log_dir} does not exist!"
 
@@ -523,7 +508,7 @@ class LogIX:
         self,
     ) -> None:
         """
-        Finalizes the logging session.
+        Finalize logging and save state to disk.
         """
         # Finalizing `state` synchronizes the state across all processes
         self.state.finalize(log_dir=self.log_dir)
@@ -536,41 +521,68 @@ class LogIX:
 
     def setup(self, log_option_kwargs: Dict[str, Any]) -> None:
         """
-        Update logging configurations.
+        Set up logging options.
 
         Args:
-            log_option_kwargs: Logging configurations.
+            log_option_kwargs: Logging option parameters
         """
         self.logger.opt.setup(log_option_kwargs)
 
     def save(self, enable: bool = True) -> None:
         """
-        Turn on saving.
+        Enable or disable saving logs to disk.
+
+        Args:
+            enable (bool): Whether to enable saving
         """
         self._save = enable
 
     def eval(self) -> None:
         """
-        Set the state of LogIX for testing.
+        Set LogIX to evaluation mode (disables saving).
         """
         self.save(False)
 
     def clear(self) -> None:
         """
-        Clear everything in LogIX.
+        Clear all internal states and hooks.
         """
         self.state.clear()
         self.logger.clear()
 
     def set_logging_config(self, logging_config: LoggingConfig) -> None:
+        """
+        Set logging configuration.
+
+        Args:
+            logging_config: Logging configuration object
+        """
         logging_config.log_dir = self.config.log_dir
         self.config.logging = logging_config
 
     def set_lora_config(self, lora_config: LoRAConfig) -> None:
+        """
+        Set LoRA configuration.
+
+        Args:
+            lora_config: LoRA configuration object
+        """
         self.config.lora = lora_config
 
     def get_logging_config(self) -> LoggingConfig:
+        """
+        Get current logging configuration.
+
+        Returns:
+            LoggingConfig: Logging configuration
+        """
         return self.config.logging
 
     def get_lora_config(self) -> LoRAConfig:
+        """
+        Get current LoRA configuration.
+
+        Returns:
+            LoRAConfig: LoRA configuration
+        """
         return self.config.lora

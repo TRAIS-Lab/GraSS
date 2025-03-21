@@ -452,20 +452,19 @@ class CudaProjector(AbstractProjector):
         elif self.method == "SJLT":
             batch_size, _ = features.size()
             features = features[:, self.active_indices]
-            device = features.device
 
             if self.pre_compute:
                 rand_indices, rand_signs = self.rand_indices_and_signs
             else:
                 torch.manual_seed(self.seed)
                 active_dim = self.active_indices.numel()
-                rand_indices = torch.randint(self.proj_dim, (active_dim, self.c), device=device)
-                rand_signs = torch.randint(0, 2, (active_dim, self.c), device=device) * 2 - 1
+                rand_indices = torch.randint(self.proj_dim, (active_dim, self.c), device=self.device)
+                rand_signs = torch.randint(0, 2, (active_dim, self.c), device=self.device) * 2 - 1
 
             # Get indices of elements above threshold in a single pass
             batch_idx, input_idx = torch.nonzero(torch.abs(features) >= self.threshold, as_tuple=True)
             if input_idx.numel() == 0:
-                return torch.zeros(batch_size, self.proj_dim, device=device)
+                return torch.zeros(batch_size, self.proj_dim, device=self.device)
 
             values = features[batch_idx, input_idx]
 
@@ -473,7 +472,7 @@ class CudaProjector(AbstractProjector):
             final_indices = batch_idx.repeat_interleave(self.c) * (self.proj_dim) + rand_indices[input_idx].flatten()
 
             # Initialize and fill output tensor
-            batch_vec_p = torch.zeros(batch_size, self.proj_dim, device=device)
+            batch_vec_p = torch.zeros(batch_size, self.proj_dim, device=self.device)
             batch_vec_p.view(-1).index_add_(0, final_indices, scaled_vals)
 
             result = batch_vec_p / (self.c ** 0.5)
@@ -483,7 +482,7 @@ class CudaProjector(AbstractProjector):
             features = features[:, self.active_indices]
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
 
-            batch_vec_p = torch.zeros(batch_size, self.proj_dim, device=features.device)
+            batch_vec_p = torch.zeros(batch_size, self.proj_dim, device=self.device)
 
             if self.pre_compute:
                 pos_local_indices = self.backward_indices['pos_local_indices']
@@ -512,7 +511,7 @@ class CudaProjector(AbstractProjector):
                 proj_matrix = torch.empty(
                     active_dim,
                     self.proj_dim,
-                    device=device,
+                    device=self.device,
                 )
                 torch.manual_seed(self.seed)
                 proj_matrix.bernoulli_(p=0.5)
@@ -532,7 +531,7 @@ class CudaProjector(AbstractProjector):
                 proj_matrix = torch.randn(
                     active_dim,
                     self.proj_dim,
-                    device=device,
+                    device=self.device,
                 )
 
             features = features[:, self.active_indices]

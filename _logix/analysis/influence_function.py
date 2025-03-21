@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any, Union
 
 import torch
 from einops import reduce
@@ -25,11 +25,22 @@ from _logix.analysis.influence_function_utils import (
     precondition_raw,
 )
 from _logix.state import LogIXState
-from _logix.utils import flatten_log, get_logger, synchronize_device, unflatten_log
+from _logix.tensor_log import TensorLog
+from _logix.utils import get_logger, synchronize_tensor_log, flatten_tensor_log
 
 
 class InfluenceFunction:
+    """
+    Computes influence functions to determine which training examples
+    most affect model predictions on specific test examples.
+    """
     def __init__(self, state: LogIXState):
+        """
+        Initialize the InfluenceFunction with a state.
+
+        Args:
+            state: LogIXState containing model statistics
+        """
         # state
         self._state = state
 
@@ -37,107 +48,171 @@ class InfluenceFunction:
         self.self_influence_scores = {}
 
     def get_influence_scores(self):
+        """
+        Get computed influence scores.
+
+        Returns:
+            Dict: Influence scores
+        """
         return self.influence_scores
 
     def get_self_influence_scores(self):
+        """
+        Get computed self-influence scores.
+
+        Returns:
+            Dict: Self-influence scores
+        """
         return self.self_influence_scores
 
     @torch.no_grad()
     def precondition(
         self,
-        src_log: Dict[str, Dict[str, torch.Tensor]],
+        src_log: Tuple[List[str], Union[TensorLog, Dict, torch.Tensor]],
         damping: Optional[float] = None,
         hessian: Optional[str] = "auto",
-    ) -> Tuple[List[str], Dict[str, Dict[str, torch.Tensor]]]:
+    ) -> Tuple[List[str], Union[TensorLog, torch.Tensor]]:
         """
         Precondition gradients using the Hessian.
 
         Args:
-            src_log (Dict[str, Dict[str, torch.Tensor]]): Log of source gradients
-            damping (Optional[float], optional): Damping parameter for preconditioning. Defaults to None.
+            src_log: Tuple of (src_ids, log)
+            damping: Damping parameter for preconditioning
+            hessian: Type of Hessian approximation ("auto", "kfac", "raw")
+
+        Returns:
+            Tuple: (src_ids, preconditioned_gradients)
         """
         assert hessian in ["auto", "kfac", "raw"], f"Invalid hessian {hessian}"
 
         src_ids, src = src_log
-        cov_state = self._state.get_covariance_state()
-        if len(set(src.keys()) - set(cov_state.keys())) != 0:
+
+        # Handle non-TensorLog inputs
+        if not isinstance(src, TensorLog):
+            if isinstance(src, dict):
+                src = TensorLog.from_dict(src)
+            elif isinstance(src, torch.Tensor):
+                return src_log
+
+        # Check if we have covariance statistics
+        covariance_state = self._state.get_covariance_state()
+        if not covariance_state:
             get_logger().warning(
-                "Not all covariances have been computed. No preconditioning applied.\n"
+                "Covariance state is empty. No preconditioning applied.\n"
             )
             return src_log
 
+        # Check that we have covariance for all modules in src
+        modules_missing_cov = []
+        for module_name in src.get_all_modules():
+            key = (module_name, "forward")
+            if key not in covariance_state:
+                modules_missing_cov.append(module_name)
+
+        if modules_missing_cov:
+            get_logger().warning(
+                f"Covariance missing for modules: {modules_missing_cov}. No preconditioning applied.\n"
+            )
+            return src_log
+
+        # Choose the appropriate preconditioning function
         precondition_fn = precondition_kfac
         if hessian == "raw" or (
-            hessian == "auto" and "grad" in cov_state[list(src.keys())[0]]
+            hessian == "auto" and all((module_name, "grad") in covariance_state
+                                   for module_name in src.get_all_modules())
         ):
             precondition_fn = precondition_raw
+
+        # Apply preconditioning
         preconditioned_grad = precondition_fn(
-            src=src, state=self._state, damping=damping
+            src=(src_ids, src), state=self._state, damping=damping
         )
 
-        return (src_ids, preconditioned_grad)
+        return preconditioned_grad
 
     @torch.no_grad()
     def compute_influence(
         self,
-        src_log: Tuple[str, Dict[str, Dict[str, torch.Tensor]]],
-        tgt_log: Tuple[str, Dict[str, Dict[str, torch.Tensor]]],
+        src_log: Tuple[List[str], Union[TensorLog, Dict, torch.Tensor]],
+        tgt_log: Tuple[List[str], Union[TensorLog, Dict, torch.Tensor]],
         mode: Optional[str] = "dot",
         precondition: Optional[bool] = True,
         hessian: Optional[str] = "auto",
         influence_groups: Optional[List[str]] = None,
         damping: Optional[float] = None,
-    ):
+    ) -> Dict[str, Any]:
         """
-        Compute influence scores between two gradient dictionaries.
+        Compute influence scores between two gradient logs.
 
         Args:
-            src_log (Dict[str, Dict[str, torch.Tensor]]): Log of source gradients
-            tgt_log (Dict[str, Dict[str, torch.Tensor]]): Log of target gradients
-            mode (Optional[str], optional): Influence function mode. Defaults to "dot".
-            precondition (Optional[bool], optional): Whether to precondition the gradients. Defaults to True.
-            damping (Optional[float], optional): Damping parameter for preconditioning. Defaults to None.
+            src_log: Tuple of (src_ids, source_gradients)
+            tgt_log: Tuple of (tgt_ids, target_gradients)
+            mode: Influence function mode ("dot", "l2", "cosine")
+            precondition: Whether to precondition the gradients
+            hessian: Type of Hessian approximation
+            influence_groups: Optional list of module groups to track separately
+            damping: Damping parameter for preconditioning
+
+        Returns:
+            Dict: Influence results
         """
         assert mode in ["dot", "l2", "cosine"], f"Invalid mode: {mode}"
 
         result = {}
-        if precondition:
-            src_log = self.precondition(
-                src_log=src_log, damping=damping, hessian=hessian
-            )
 
+        # Preprocess logs to ensure they're in TensorLog format
         src_ids, src = src_log
         tgt_ids, tgt = tgt_log
+
+        if not isinstance(src, TensorLog) and isinstance(src, dict):
+            src = TensorLog.from_dict(src)
+
+        if not isinstance(tgt, TensorLog) and isinstance(tgt, dict):
+            tgt = TensorLog.from_dict(tgt)
+
+        # Apply preconditioning if requested
+        if precondition:
+            _, src = self.precondition(
+                src_log=(src_ids, src), damping=damping, hessian=hessian
+            )
 
         # Initialize influence scores
         total_influence = {"total": 0}
         for influence_group in influence_groups or []:
             total_influence[influence_group] = 0
 
-        # Compute influence scores. By default, we should compute the basic influence
-        # scores, which is essentially the inner product between the source and target
-        # gradients. If mode is cosine, we should normalize the influence score by the
-        # L2 norm of the target gardients. If mode is l2, we should subtract the L2
-        # norm of the target gradients.
-        if not isinstance(tgt, dict):
-            assert isinstance(tgt, torch.Tensor)
-            src = flatten_log(
-                log=src, path=self._state.get_state("model_module")["path"]
-            )
-            tgt = tgt.to(device=src.device)
-            total_influence["total"] += cross_dot_product(src, tgt)
+        # Handle special case where target is a tensor
+        if not isinstance(tgt, TensorLog) and isinstance(tgt, torch.Tensor):
+            model_path = self._state.get_state("model_module")["path"]
+            if isinstance(src, TensorLog):
+                src_flat = flatten_tensor_log(src, model_path)
+            else:
+                src_flat = src
+
+            tgt = tgt.to(device=src_flat.device)
+            total_influence["total"] += cross_dot_product(src_flat, tgt)
         else:
-            synchronize_device(src, tgt)
-            for module_name in src.keys():
-                module_influence = cross_dot_product(
-                    src[module_name]["grad"], tgt[module_name]["grad"]
-                )
+            # Ensure src and tgt are on the same device
+            synchronize_tensor_log(tgt, src.get_all_modules()[0])
+
+            # Compute influence for each module
+            for module_name in src.get_all_modules():
+                src_grad = src.get(module_name, "grad")
+                tgt_grad = tgt.get(module_name, "grad")
+
+                if src_grad is None or tgt_grad is None:
+                    continue
+
+                module_influence = cross_dot_product(src_grad, tgt_grad)
                 total_influence["total"] += module_influence
+
+                # Group-specific influence
                 if influence_groups is not None:
                     groups = [g for g in influence_groups if g in module_name]
                     for group in groups:
                         total_influence[group] += module_influence
 
+        # Normalize influence scores based on mode
         if mode == "cosine":
             tgt_norm = self.compute_self_influence(
                 tgt_log,
@@ -146,6 +221,7 @@ class InfluenceFunction:
                 influence_groups=influence_groups,
                 damping=damping,
             ).pop("influence")
+
             for key in total_influence.keys():
                 tgt_norm_key = tgt_norm if influence_groups is None else tgt_norm[key]
                 total_influence[key] /= torch.sqrt(tgt_norm_key.unsqueeze(0))
@@ -157,6 +233,7 @@ class InfluenceFunction:
                 influence_groups=influence_groups,
                 damping=damping,
             ).pop("influence")
+
             for key in total_influence.keys():
                 tgt_norm_key = tgt_norm if influence_groups is None else tgt_norm[key]
                 total_influence[key] -= 0.5 * tgt_norm_key.unsqueeze(0)
@@ -180,46 +257,67 @@ class InfluenceFunction:
     @torch.no_grad()
     def compute_self_influence(
         self,
-        src_log: Tuple[str, Dict[str, Dict[str, torch.Tensor]]],
+        src_log: Tuple[List[str], Union[TensorLog, Dict, torch.Tensor]],
         precondition: Optional[bool] = True,
         hessian: Optional[str] = "auto",
         influence_groups: Optional[List[str]] = None,
         damping: Optional[float] = None,
-    ):
+    ) -> Dict[str, Any]:
         """
         Compute self-influence scores. This can be used for uncertainty estimation.
 
         Args:
-            src_log (Dict[str, Dict[str, torch.Tensor]]): Log of source gradients
-            precondition (Optional[bool], optional): Whether to precondition the gradients. Defaults to True.
-            damping (Optional[float], optional): Damping parameter for preconditioning. Defaults to None.
+            src_log: Tuple of (src_ids, source_gradients)
+            precondition: Whether to precondition the gradients
+            hessian: Type of Hessian approximation
+            influence_groups: Optional list of module groups to track separately
+            damping: Damping parameter for preconditioning
+
+        Returns:
+            Dict: Self-influence results
         """
         result = {}
 
         src_ids, src = src_log
-        if not isinstance(src, dict):
-            assert isinstance(src, torch.Tensor)
-            src = unflatten_log(
-                log=src, path=self._state.get_state("model_module")["path"]
-            )
 
+        # Preprocess logs to ensure they're in TensorLog format
+        if not isinstance(src, TensorLog) and isinstance(src, dict):
+            src = TensorLog.from_dict(src)
+        elif not isinstance(src, TensorLog) and isinstance(src, torch.Tensor):
+            model_path = self._state.get_state("model_module")["path"]
+            temp_log = TensorLog()
+            for i, (module_name, log_type) in enumerate(model_path):
+                temp_log.add(module_name, log_type, src)
+            src = temp_log
+
+        # Apply preconditioning if requested
         tgt = src
         if precondition:
-            tgt = self.precondition(src_log, hessian=hessian, damping=damping)[1]
+            _, tgt = self.precondition(
+                src_log=(src_ids, src), hessian=hessian, damping=damping
+            )
 
         # Initialize influence scores
         total_influence = {"total": 0}
         for influence_group in influence_groups or []:
             total_influence[influence_group] = 0
 
-        # Compute self-influence scores
-        for module_name in src.keys():
-            src_module = src[module_name]["grad"]
-            tgt_module = tgt[module_name]["grad"] if tgt is not None else src_module
+        # Compute self-influence scores for each module
+        for module_name in src.get_all_modules():
+            src_grad = src.get(module_name, "grad")
+            tgt_grad = tgt.get(module_name, "grad") if tgt is not src else src_grad
+
+            if src_grad is None or tgt_grad is None:
+                continue
+
+            # Element-wise multiplication and sum for self-influence
             module_influence = reduce(
-                src_module * tgt_module, "n a b -> n", "sum"
+                src_grad * tgt_grad, "n a b -> n", "sum"
             ).reshape(-1)
+
             total_influence["total"] += module_influence
+
+            # Group-specific influence
             if influence_groups is not None:
                 groups = [g for g in influence_groups if g in module_name]
                 for group in groups:
@@ -241,25 +339,30 @@ class InfluenceFunction:
 
     def compute_influence_all(
         self,
-        src_log: Tuple[str, Dict[str, Dict[str, torch.Tensor]]],
-        loader: torch.utils.data.DataLoader,
+        src_log: Optional[Tuple[List[str], Union[TensorLog, Dict, torch.Tensor]]] = None,
+        loader: Optional[torch.utils.data.DataLoader] = None,
         mode: Optional[str] = "dot",
         precondition: Optional[bool] = True,
         save: Optional[bool] = False,
         hessian: Optional[str] = "auto",
         influence_groups: Optional[List[str]] = None,
         damping: Optional[float] = None,
-    ):
+    ) -> Dict[str, Any]:
         """
-        Compute influence scores against all training data in the log. This can be used
-        for training data attribution.
+        Compute influence scores against all training data in the log.
 
         Args:
-            src_log (Dict[str, Dict[str, torch.Tensor]]): Log of source gradients
-            loader (torch.utils.data.DataLoader): DataLoader of train data
-            mode (Optional[str], optional): Influence function mode. Defaults to "dot".
-            precondition (Optional[bool], optional): Whether to precondition the gradients. Defaults to True.
-            damping (Optional[float], optional): Damping parameter for preconditioning. Defaults to None.
+            src_log: Tuple of (src_ids, source_gradients)
+            loader: DataLoader of training data
+            mode: Influence function mode
+            precondition: Whether to precondition the gradients
+            save: Whether to save results to the influence_scores attribute
+            hessian: Type of Hessian approximation
+            influence_groups: Optional list of module groups to track separately
+            damping: Damping parameter for preconditioning
+
+        Returns:
+            Dict: Influence results for all training data
         """
         if precondition:
             src_log = self.precondition(src_log, hessian=hessian, damping=damping)
@@ -270,7 +373,7 @@ class InfluenceFunction:
                 src_log=src_log,
                 tgt_log=tgt_log,
                 mode=mode,
-                precondition=False,
+                precondition=False,  # Already preconditioned above
                 hessian=hessian,
                 influence_groups=influence_groups,
                 damping=damping,

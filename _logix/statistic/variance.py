@@ -36,43 +36,50 @@ class Variance:
     ):
         """
         Update the variance state.
+
+        Args:
+            state: LogIXState object
+            binfo: BatchInfo object
+            module: The module being logged
+            module_name: The name of the module
+            log_type: The type of log (forward, backward, grad)
+            data: Optional tensor data
+            cpu_offload: Whether to offload tensors to CPU
         """
         variance_state = state.variance_state
         variance_counter = state.variance_counter
-        if data is None:
-            data = binfo.log[module_name][log_type]
 
-        # extract and reshape data to 2d tensor for variance computation
+        # Get data from BatchInfo if not provided
+        if data is None:
+            data = binfo.log.get(module_name, log_type)
+            if data is None:
+                return
+
+        # Extract and reshape data to 2d tensor for variance computation
         batch_size = data.size(0)
         data = make_2d(data, module, log_type).detach()
 
-        # initialize variance state if necessary
-        if log_type not in variance_state[module_name]:
+        # Create key for variance_state dictionary
+        key = (module_name, log_type)
+
+        # Initialize variance state if necessary
+        if key not in variance_state:
             device = data.device if not cpu_offload else "cpu"
             dtype = data.dtype
-            variance_state[module_name][log_type] = torch.zeros(
-                data.shape[-1], device=device, dtype=dtype
-            )
-            variance_counter[module_name][log_type] = 0
+            variance_state[key] = torch.zeros(data.shape[-1], device=device, dtype=dtype)
+            variance_counter[key] = 0
 
-        # update variance state
+        # Update variance state with squared sum
         if cpu_offload:
-            # By default, all states are stored on the CPU, and therefore
-            # computing updates for states on CPU is slow. For efficiency,
-            # we move states to the GPU if data is on the GPU, and then
-            # move it back to the CPU asynchrously.
-            variance_state_gpu = variance_state[module_name][log_type].to(
-                device=data.device
-            )
-            variance_state_gpu.add_(data.sum(dim=0))
-            variance_state[module_name][log_type] = variance_state_gpu.to(
-                device="cpu", non_blocking=True
-            )
+            # Move to GPU for efficient computation, then back to CPU
+            variance_state_gpu = variance_state[key].to(device=data.device)
+            variance_state_gpu.add_((data ** 2).sum(dim=0))
+            variance_state[key] = variance_state_gpu.to(device="cpu", non_blocking=True)
         else:
-            variance_state[module_name][log_type].add_(data.sum(dim=0))
+            variance_state[key].add_((data ** 2).sum(dim=0))
 
-        # update variance counter
+        # Update variance counter
         if binfo.mask is None or log_type == "grad":
-            variance_counter[module_name][log_type] += batch_size
+            variance_counter[key] += batch_size
         else:
-            variance_counter[module_name][log_type] += binfo.mask.sum().item()
+            variance_counter[key] += binfo.mask.sum().item()

@@ -36,43 +36,52 @@ class Covariance:
     ):
         """
         Update the covariance state.
+
+        Args:
+            state: LogIXState object
+            binfo: BatchInfo object
+            module: The module being logged
+            module_name: The name of the module
+            log_type: The type of log (forward, backward, grad)
+            data: Optional tensor data
+            cpu_offload: Whether to offload tensors to CPU
         """
         covariance_state = state.covariance_state
         covariance_counter = state.covariance_counter
-        if data is None:
-            data = binfo.log[module_name][log_type]
 
-        # extract and reshape data to 2d tensor for mean computation
+        # Get data from BatchInfo if not provided
+        if data is None:
+            data = binfo.log.get(module_name, log_type)
+            if data is None:
+                return
+
+        # Extract and reshape data to 2d tensor for covariance computation
         batch_size = data.size(0)
         data = make_2d(data, module, log_type).detach()
 
-        # initialize covariance state if necessary
-        if log_type not in covariance_state[module_name]:
+        # Create key for covariance_state dictionary
+        key = (module_name, log_type)
+
+        # Initialize covariance state if necessary
+        if key not in covariance_state:
             device = data.device if not cpu_offload else "cpu"
             dtype = data.dtype
-            covariance_state[module_name][log_type] = torch.zeros(
+            covariance_state[key] = torch.zeros(
                 data.shape[-1], data.shape[-1], device=device, dtype=dtype
             )
-            covariance_counter[module_name][log_type] = 0
+            covariance_counter[key] = 0
 
-        # update mean state
+        # Update covariance state
         if cpu_offload:
-            # By default, all states are stored on the CPU, and therefore
-            # computing updates for states on CPU is slow. For efficiency,
-            # we move states to the GPU if data is on the GPU, and then
-            # move it back to the CPU asynchrously.
-            covariance_state_gpu = covariance_state[module_name][log_type].to(
-                device=data.device
-            )
+            # Move to GPU for efficient computation, then back to CPU
+            covariance_state_gpu = covariance_state[key].to(device=data.device)
             covariance_state_gpu.addmm_(data.t(), data)
-            covariance_state[module_name][log_type] = covariance_state_gpu.to(
-                device="cpu", non_blocking=True
-            )
+            covariance_state[key] = covariance_state_gpu.to(device="cpu", non_blocking=True)
         else:
-            covariance_state[module_name][log_type].addmm_(data.t(), data)
+            covariance_state[key].addmm_(data.t(), data)
 
-        # update mean counter
+        # Update covariance counter
         if binfo.mask is None or log_type == "grad":
-            covariance_counter[module_name][log_type] += batch_size
+            covariance_counter[key] += batch_size
         else:
-            covariance_counter[module_name][log_type] += binfo.mask.sum().item()
+            covariance_counter[key] += binfo.mask.sum().item()

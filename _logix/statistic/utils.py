@@ -23,7 +23,6 @@ class InvalidModuleError(Exception):
     """
     Raised when the provided module is invalid.
     """
-
     pass
 
 
@@ -81,7 +80,7 @@ def make_forward_2d(
         )
         reshaped_data = reshaped_data.view(-1, reshaped_data.size(-1))
     else:
-        raise InvalidModuleError()
+        raise InvalidModuleError(f"Unsupported module type: {type(module)}")
     return reshaped_data
 
 
@@ -105,7 +104,7 @@ def make_backward_2d(
         reshaped_data = data.permute(0, 2, 3, 1)
         reshaped_data = reshaped_data.reshape(-1, reshaped_data.size(-1))
     else:
-        raise InvalidModuleError()
+        raise InvalidModuleError(f"Unsupported module type: {type(module)}")
     return reshaped_data
 
 
@@ -115,7 +114,7 @@ def make_2d(data: torch.Tensor, module: nn.Module, log_type: str) -> torch.Tenso
     Args:
         module (nn.Module):
             The module where the activations are applied.
-        mode (str):
+        log_type (str):
             Forward or backward.
         data (torch.Tensor):
             Activations corresponding to the module.
@@ -127,4 +126,4 @@ def make_2d(data: torch.Tensor, module: nn.Module, log_type: str) -> torch.Tenso
     elif log_type == "backward":
         return make_backward_2d(data, module)
     else:
-        raise ValueError(f"Invalid mode {log_type}")
+        raise ValueError(f"Invalid log type {log_type}")

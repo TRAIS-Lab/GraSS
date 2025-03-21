@@ -13,15 +13,27 @@
 # limitations under the License.
 
 from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Tuple, Any
 
 import torch
 
 from _logix.logging.mmap import MemoryMapHandler
-from _logix.utils import get_rank, nested_dict, to_numpy
+from _logix.tensor_log import TensorLog
+from _logix.utils import get_rank, to_numpy
 
 
 class LogSaver:
+    """
+    Efficient tensor-based log saver for storing logs to disk.
+    """
     def __init__(self, config, state):
+        """
+        Initialize the LogSaver.
+
+        Args:
+            config: Configuration object
+            state: LogIXState object
+        """
         self.log_dir = config.log_dir
         self.state = state
         self.model_module = self.state.get_state("model_module")
@@ -33,42 +45,61 @@ class LogSaver:
         self.flush_threshold = config.flush_threshold
         self.flush_count = 0
 
-        self.buffer = nested_dict()
+        # Initialize buffer as an empty dictionary mapping data_id to TensorLog
+        self.buffer: Dict[str, Dict[Tuple[str, str], torch.Tensor]] = {}
         self.buffer_size = 0
 
     def buffer_write(self, binfo):
         """
-        Add log state on exit.
+        Add log state to buffer.
+
+        Args:
+            binfo: BatchInfo object containing logs
         """
-        data_id = binfo.data_id
-        log = binfo.log
+        data_ids = binfo.data_id
+        tensor_log = binfo.log
 
-        def _add(log, buffer, idx):
-            for key, value in log.items():
-                if isinstance(value, torch.Tensor):
-                    numpy_value = to_numpy(value[idx])
-                    buffer[key] = numpy_value
-                    self.buffer_size += numpy_value.size
-                    continue
-                _add(value, buffer[key], idx)
+        # For each data_id in the batch, add its tensors to the buffer
+        for idx, data_id in enumerate(data_ids):
+            # Initialize a new tensor dictionary for this data_id if needed
+            if data_id not in self.buffer:
+                self.buffer[data_id] = {}
 
-        for idx, did in enumerate(data_id):
-            _add(log, self.buffer[did], idx)
+            # For each module and log type, extract the corresponding tensor
+            for (module_name, log_type), tensor in tensor_log.items():
+                # Get the tensor for this specific data point (by index)
+                single_tensor = tensor[idx:idx+1].detach().cpu()
+
+                # Add to buffer
+                self.buffer[data_id][(module_name, log_type)] = single_tensor
+                self.buffer_size += single_tensor.numel() * single_tensor.element_size()
 
     def _flush_unsafe(self, log_dir, buffer, flush_count) -> str:
         """
-        _flush_unsafe is thread unsafe flush of current buffer. No shared variable must be allowed.
+        Thread unsafe flush of current buffer. No shared variable must be allowed.
+
+        Args:
+            log_dir: Directory to save logs
+            buffer: Buffer to flush
+            flush_count: Current flush count
+
+        Returns:
+            str: Filename of the saved log
         """
         filename = self.file_prefix + f"{flush_count}.mmap"
-        buffer_list = [(k, v) for k, v in buffer]
-        MemoryMapHandler.write(
-            log_dir, filename, buffer_list, self.model_module["path"]
-        )
+        buffer_list = [(k, v) for k, v in buffer.items()]
+        MemoryMapHandler.write_tensor_log(log_dir, filename, buffer_list)
         return filename
 
     def _flush_safe(self, log_dir) -> str:
         """
-        _flush_safe is thread safe flush of current buffer.
+        Thread safe flush of current buffer.
+
+        Args:
+            log_dir: Directory to save logs
+
+        Returns:
+            str: Filename of the saved log
         """
         buffer_copy = self.buffer.copy()
         flush_count_copy = self.flush_count
@@ -82,16 +113,22 @@ class LogSaver:
 
     def _flush_serialized(self, log_dir) -> str:
         """
-        _flush_serialized executes the flushing of the buffers in serialized manner.
+        Execute the flushing of buffers in serialized manner.
+
+        Args:
+            log_dir: Directory to save logs
+
+        Returns:
+            str: Log directory
         """
         if len(self.buffer) == 0:
             return log_dir
+
         buffer_list = [(k, v) for k, v in self.buffer.items()]
-        MemoryMapHandler.write(
+        MemoryMapHandler.write_tensor_log(
             log_dir,
             self.file_prefix + f"{self.flush_count}.mmap",
             buffer_list,
-            self.model_module["path"],
             dtype="uint8",
         )
 
@@ -102,8 +139,7 @@ class LogSaver:
 
     def flush(self) -> None:
         """
-        For the DefaultHandler, there's no batch operation needed since each add operation writes to the file.
-        This can be a placeholder or used for any finalization operations.
+        Flush the buffer if it exceeds the threshold.
         """
         if 0 < self.flush_threshold < self.buffer_size:
             if self.allow_async:
@@ -119,7 +155,7 @@ class LogSaver:
 
     def buffer_clear(self):
         """
-        Clears the buffer.
+        Clear the buffer.
         """
         self.buffer.clear()
         self.buffer_size = 0

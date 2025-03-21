@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from functools import partial
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 import torch
 import torch.nn as nn
@@ -25,6 +25,7 @@ from _logix.logging.option import LogOption
 from _logix.logging.utils import compute_per_sample_gradient
 from _logix.state import LogIXState
 from _logix.statistic import Log
+from _logix.tensor_log import TensorLog
 
 
 class HookLogger:
@@ -35,7 +36,12 @@ class HookLogger:
         binfo: BatchInfo,
     ) -> None:
         """
-        Initializes the LoggingHandler with empty lists for hooks.
+        Initializes the HookLogger with the given configuration.
+
+        Args:
+            config: Logging configuration
+            state: LogIXState object
+            binfo: BatchInfo object for storing logs
         """
         self.state = state
         self.binfo = binfo
@@ -64,7 +70,10 @@ class HookLogger:
             data_id: The data ID associated with the current batch.
             mask (torch.Tensor): A mask to be applied to the activations.
         """
-        log = self.binfo.log.copy()
+        # Create a copy of the current log
+        log = self.binfo.log.clone()
+
+        # Clear binfo and set new data_id and mask
         self.binfo.clear()
         self.binfo.data_id = data_id
         self.binfo.mask = mask
@@ -74,23 +83,34 @@ class HookLogger:
         return log
 
     def save_log(self):
+        """
+        Save the current batch log to disk.
+        """
         # save log to disk
         self.log_saver.buffer_write(binfo=self.binfo)
         self.log_saver.flush()
 
     def update(self, save: bool = False):
-        # gradient plugin has to be excecuted after accumulating all gradients
-        for stat in self.opt.grad[1:]:
-            for module_name, _ in self.binfo.log.items():
-                stat.update(
-                    state=self.state,
-                    binfo=self.binfo,
-                    module=None,
-                    module_name=module_name,
-                    log_type="grad",
-                    data=None,
-                    cpu_offload=self.cpu_offload,
-                )
+        """
+        Update statistics and save logs if requested.
+
+        Args:
+            save: Whether to save logs to disk
+        """
+        # gradient plugin has to be executed after accumulating all gradients
+        if len(self.opt.grad) > 1:
+            for stat in self.opt.grad[1:]:
+                for module_name in self.binfo.log.get_all_modules():
+                    if self.binfo.log.get(module_name, "grad") is not None:
+                        stat.update(
+                            state=self.state,
+                            binfo=self.binfo,
+                            module=None,
+                            module_name=module_name,
+                            log_type="grad",
+                            data=None,
+                            cpu_offload=self.cpu_offload,
+                        )
 
         # Wait for all asynchronous CUDA operations to finish
         if torch.cuda.is_available():
@@ -180,7 +200,7 @@ class HookLogger:
         self,
         module: nn.Module,
         inputs: Tuple[torch.Tensor],
-        outputs: Tuple[torch.Tensor],
+        outputs: torch.Tensor,
         module_name: str,
     ) -> None:
         """
@@ -329,7 +349,7 @@ class HookLogger:
 
     def finalize(self):
         """
-        Dump everything in the buffer to a disk.
+        Dump everything in the buffer to disk.
         """
         self.log_saver.finalize()
 
@@ -342,6 +362,7 @@ class HookLogger:
         Args:
             hook (bool): Whether to clear the hooks.
             module (bool): Whether to clear the modules.
+            buffer (bool): Whether to clear the log buffer.
         """
         if hook:
             for hook in self.forward_hooks:
