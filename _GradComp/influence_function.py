@@ -128,6 +128,7 @@ class GCIFAttributorKFAC():
                 start_time = time.time()
 
             # Forward pass
+            #TODO: update to {k: v.to(self.device) for k, v in train_batch.items()}
             outputs = self.model(
                 input_ids=train_input_ids,
                 attention_mask=train_attention_masks,

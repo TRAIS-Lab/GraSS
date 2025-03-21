@@ -56,7 +56,9 @@ def lds(score, training_setting):
 
 def setup_projection_kwargs(args, device):
     if args.projection is None:
-        return None
+        proj_method = "Identity"
+        proj_factorize = False
+        proj_dim = -1
 
     proj_method, proj_dim = args.projection.split("-")
     # proj_dim might be of the form 'proj_dim*proj_dim' for factorized projection, for simply 'proj_dim' for non-factorized projection
@@ -95,6 +97,10 @@ def batch_size(baseline, tda):
             train_batch_size = 6
             test_batch_size = 6
     elif baseline == "LoGra":
+        if tda in ["IF-RAW", "IF-KFAC", "IF-EKFAC"]:
+            train_batch_size = 8
+            test_batch_size = 8
+    elif baseline == "LogIX":
         if tda in ["IF-RAW", "IF-KFAC", "IF-EKFAC"]:
             train_batch_size = 32
             test_batch_size = 32

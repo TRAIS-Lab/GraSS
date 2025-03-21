@@ -24,19 +24,19 @@ class LogIXScheduler:
         hessian: str = "none",
         save: str = "none",
     ):
-        self._logix = logix
+        self.logix = logix
 
         self._lora = lora
         self._hessian = hessian
         self._save = save
 
         self._epoch = -1
-        self._logix_state_schedule = []
+        self.logix_state_schedule = []
 
         self.sanity_check(lora, hessian)
         self.configure_schedule(lora, hessian, save)
 
-        self._schedule_iterator = iter(self._logix_state_schedule)
+        self._schedule_iterator = iter(self.logix_state_schedule)
 
     def sanity_check(self, lora: str, hessian: str):
         assert lora in ["none", "random", "pca"]
@@ -56,12 +56,12 @@ class LogIXScheduler:
 
     def configure_schedule(self, lora: str, hessian: str, save: str) -> None:
         if lora == "pca":
-            self._logix_state_schedule.append(
+            self.logix_state_schedule.append(
                 {"forward": [Covariance], "backward": [Covariance]}
             )
 
         if hessian == "ekfac":
-            self._logix_state_schedule.append(
+            self.logix_state_schedule.append(
                 {"forward": [Covariance], "backward": [Covariance]}
             )
 
@@ -79,7 +79,7 @@ class LogIXScheduler:
             if Log not in last_state["grad"]:
                 last_state["grad"].append(Log)
             last_state["grad"].append(Covariance)
-        self._logix_state_schedule.append(last_state)
+        self.logix_state_schedule.append(last_state)
 
     def __iter__(self):
         return self
@@ -90,15 +90,15 @@ class LogIXScheduler:
 
         # maybe add lora
         if self._epoch == self.get_lora_epoch(self._lora):
-            self._logix.add_lora()
+            self.logix.add_lora()
 
         # maybe setup save
         if self._epoch == self.get_save_epoch(self._save):
-            self._logix.save(True)
+            self.logix.save(True)
 
-        self._logix.setup(logix_state)
+        self.logix.setup(logix_state)
 
         return self._epoch
 
     def __len__(self) -> int:
-        return len(self._logix_state_schedule)
+        return len(self.logix_state_schedule)

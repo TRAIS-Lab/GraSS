@@ -40,6 +40,7 @@ class ProjectionType(str, Enum):
 
     normal: str = "normal"
     rademacher: str = "rademacher"
+    identity: str = "identity"
     # kaiming: str = "kaiming"
 
 
@@ -538,6 +539,11 @@ class CudaProjector(AbstractProjector):
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
 
             result = features @ proj_matrix / (self.proj_dim ** 0.5)
+        elif self.method == "Identity":
+            active_dim = self.active_indices.numel()
+            features = features[:, self.active_indices]
+            features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
+            result = features
         # elif self.method == "Kaiming":
         #     features = features[:, self.active_indices]
         #     features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
@@ -1036,6 +1042,8 @@ def make_random_projector(
             proj_type = ProjectionType.rademacher
         elif method == "Gaussian":
             proj_type = ProjectionType.normal
+        elif method == "Identity":
+            proj_type = ProjectionType.identity
         # elif method == "Kaiming":
         #     proj_type = ProjectionType.kaiming
 
