@@ -151,9 +151,13 @@ class GCIFAttributorKFAC():
                         torch.cuda.synchronize()
                         start_time = time.time()
 
+                    print("Processing module:", layer)
                     grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_full, per_sample=True)
                     grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
 
+                    print("Proj. input:", grad_comp_2.shape, grad_comp_2[:5])
+                    print("Proj. grad_pre_activation:", grad_comp_1.shape, grad_comp_1[:5])
+                    print("Proj. grad_tensor:", grad.shape, grad[:5])
                     if self.profile:
                         torch.cuda.synchronize()
                         self.profiling_stats['projection'] += time.time() - start_time
@@ -179,7 +183,7 @@ class GCIFAttributorKFAC():
                         torch.cuda.synchronize()
                         self.profiling_stats['hessian'] += time.time() - start_time
 
-
+            exit()
         # Time inverse Hessian calculation
         if self.profile:
             torch.cuda.synchronize()

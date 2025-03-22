@@ -540,10 +540,14 @@ class CudaProjector(AbstractProjector):
 
             result = features @ proj_matrix / (self.proj_dim ** 0.5)
         elif self.method == "Identity":
-            active_dim = self.active_indices.numel()
-            features = features[:, self.active_indices]
-            features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
-            result = features
+            # active_dim = self.active_indices.numel()
+            # features = features[:, self.active_indices]
+            # features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
+            # result = features
+
+            # use all-one projection matrix for debugging
+            proj_matrix = torch.ones(self.feature_dim, self.proj_dim, device=self.device)
+            result = features @ proj_matrix
         # elif self.method == "Kaiming":
         #     features = features[:, self.active_indices]
         #     features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))

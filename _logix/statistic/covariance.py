@@ -37,8 +37,6 @@ class Covariance:
         """
         Update the covariance state.
         """
-        print(log_type, data.shape)
-
         covariance_state = state.covariance_state
         covariance_counter = state.covariance_counter
         if data is None:
@@ -72,8 +70,6 @@ class Covariance:
             )
         else:
             covariance_state[module_name][log_type].addmm_(data.t(), data)
-
-        print("Cov: ", covariance_state[module_name][log_type].shape)
 
         # update mean counter
         if binfo.mask is None or log_type == "grad":

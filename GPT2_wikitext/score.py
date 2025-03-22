@@ -582,8 +582,8 @@ def main():
     train_batch_size, test_batch_size = batch_size(args.baseline, args.tda)
 
     if args.debug: # toy dataset
-        train_dataset = train_dataset.select(range(200))
-        test_dataset = test_dataset.select(range(100))
+        train_dataset = train_dataset.select(range(64))
+        test_dataset = test_dataset.select(range(64))
     train_sampler = SubsetSampler(range(len(train_dataset)))
     train_dataloader = DataLoader(
         train_dataset, collate_fn=default_data_collator, batch_size=train_batch_size, sampler=train_sampler
@@ -610,7 +610,7 @@ def main():
     profile = None
     if args.baseline == "GC":
         from GC.utlis import find_GClayers
-        check_min_version("4.46.0") # Gradient Component is built on top of 4.46.0
+        # check_min_version("4.46.0") # Gradient Component is built on top of 4.46.0
 
         model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
         model.set_projectors(projector_kwargs, train_dataloader)
@@ -648,7 +648,7 @@ def main():
             raise ValueError("Invalid TDA method for GC.")
 
     elif args.baseline == "LogIX":
-        #check_min_version("4.46.0") # LoGra is built on top of 4.40.0, ignore the checking
+        #check_min_version("4.46.0") # LogIX is built on top of 4.40.0, ignore the checking
         from _logix.huggingface import LogIXArguments, patch_trainer
         from LoGra.utils import LoGra_GPT2
 
@@ -656,7 +656,7 @@ def main():
         tda, hessian = args.tda.split("-")
         hessian = hessian.lower()
         assert tda == "IF", "LoGra only supports Influence Function now."
-        assert hessian in ["raw", "kfac", "ekfac"], "Invalid Hessian type."
+        assert hessian in ["none", "raw", "kfac", "ekfac"], "Invalid Hessian type."
         assert args.layer == "Linear", "LoGra only supports Linear setting now."
         assert args.projection is not None, "LoGra requires projection method."
 
@@ -724,6 +724,8 @@ def main():
         score = result["influence"].T
 
     elif args.baseline == "LoGra":
+        # check_min_version("4.46.0")
+
         from LoGra.utils import LoGra_GPT2
         from LoGra.influence_function import LoraInfluence
 
@@ -731,14 +733,14 @@ def main():
         tda, hessian = args.tda.split("-")
         hessian = hessian.lower()
         assert tda == "IF", "LoGra only supports Influence Function now."
-        assert hessian in ["raw", "kfac", "ekfac"], "Invalid Hessian type."
+        assert hessian in ["none", "raw", "kfac", "ekfac"], "Invalid Hessian type."
         assert args.layer == "Linear", "LoGra only supports Linear setting now."
         assert args.projection is not None, "LoGra requires projection method."
 
         init_method, rank = args.projection.split("-")
 
+        init_method = init_method.lower()
         if "*" in rank:
-            proj_factorize = True
             rank = rank.split("*")
             assert rank[0] == rank[1], "Projection dimension must be the same for factorized projection."
 
@@ -749,17 +751,15 @@ def main():
 
         influence_calc = LoraInfluence(
             model=model,
-            layer_type="Linear",
+            layer_type=args.layer,
             rank=rank,
             hessian=hessian,
             init_method=init_method,
-            project_name=f"./LoGra/project/{args.projection}",
-            save_dir="./influence_results",
             cpu_offload=True,
             label_key="input_ids"
         )
 
-        influence_calc.extract_training_data(train_dataloader=train_dataloader,compute_hessian=True)
+        influence_calc.extract_training_data(train_dataloader=train_dataloader)
 
         result = influence_calc.compute_influence(test_dataloader=test_dataloader, damping=1e-5)
         score = result["influence"]
@@ -853,8 +853,9 @@ def main():
                 score = attributor.attribute(test_dataloader)
 
     else:
-        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LoGra', and 'dattri'.")
+        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'LoGra', and 'dattri'.")
 
+    print(score)
     training_setting = args.output_dir.split("/")[-1]
     lds_score, _, _ = lds(score, training_setting)
 
