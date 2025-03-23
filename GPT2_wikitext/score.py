@@ -647,10 +647,50 @@ def main():
         else:
             raise ValueError("Invalid TDA method for GC.")
 
+    elif args.baseline == "LoGra":
+        check_min_version("4.46.0")
+        from _LoGra.influence_function import LoraInfluence
+        from LogIX.utils import LoGra_GPT2
+
+        # get which Hessian to use
+        tda, hessian = args.tda.split("-")
+        hessian = hessian.lower()
+        assert tda == "IF", "LoGra only supports Influence Function now."
+        assert hessian in ["none", "raw", "kfac", "ekfac"], "Invalid Hessian type."
+        assert args.layer == "Linear", "LoGra only supports Linear setting now."
+        assert args.projection is not None, "LoGra requires projection method."
+
+        init_method, rank = args.projection.split("-")
+
+        init_method = init_method.lower()
+        if "*" in rank:
+            rank = rank.split("*")
+            assert rank[0] == rank[1], "Projection dimension must be the same for factorized projection."
+
+            rank = int(rank[0]) # Convert to integer
+
+        model = LoGra_GPT2(checkpoint, config, resume=True).cuda(device)
+        model.eval()
+
+        influence_calc = LoraInfluence(
+            model=model,
+            layer_type=args.layer,
+            rank=rank,
+            hessian=hessian,
+            init_method=init_method,
+            cpu_offload=True,
+            label_key="input_ids"
+        )
+
+        influence_calc.extract_training_data(train_dataloader=train_dataloader)
+
+        result = influence_calc.compute_influence(test_dataloader=test_dataloader)
+        score = result["influence"]
+
     elif args.baseline == "LogIX":
         #check_min_version("4.46.0") # LogIX is built on top of 4.40.0, ignore the checking
         from _LogIX.huggingface import LogIXArguments, patch_trainer
-        from LoGra.utils import LoGra_GPT2
+        from LogIX.utils import LoGra_GPT2
 
         # get which Hessian to use
         tda, hessian = args.tda.split("-")
@@ -722,47 +762,6 @@ def main():
         )
         result = trainer.influence()
         score = result["influence"].T
-
-    elif args.baseline == "LoGra":
-        # check_min_version("4.46.0")
-
-        from LoGra.utils import LoGra_GPT2
-        from _logra.influence_function import LoraInfluence
-
-        # get which Hessian to use
-        tda, hessian = args.tda.split("-")
-        hessian = hessian.lower()
-        assert tda == "IF", "LoGra only supports Influence Function now."
-        assert hessian in ["none", "raw", "kfac", "ekfac"], "Invalid Hessian type."
-        assert args.layer == "Linear", "LoGra only supports Linear setting now."
-        assert args.projection is not None, "LoGra requires projection method."
-
-        init_method, rank = args.projection.split("-")
-
-        init_method = init_method.lower()
-        if "*" in rank:
-            rank = rank.split("*")
-            assert rank[0] == rank[1], "Projection dimension must be the same for factorized projection."
-
-            rank = int(rank[0]) # Convert to integer
-
-        model = LoGra_GPT2(checkpoint, config, resume=True).cuda(device)
-        model.eval()
-
-        influence_calc = LoraInfluence(
-            model=model,
-            layer_type=args.layer,
-            rank=rank,
-            hessian=hessian,
-            init_method=init_method,
-            cpu_offload=True,
-            label_key="input_ids"
-        )
-
-        influence_calc.extract_training_data(train_dataloader=train_dataloader)
-
-        result = influence_calc.compute_influence(test_dataloader=test_dataloader)
-        score = result["influence"]
 
     elif args.baseline == "dattri":
         if args.tda == "GD": #TODO: fix

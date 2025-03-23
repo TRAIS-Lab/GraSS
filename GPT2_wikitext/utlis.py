@@ -96,14 +96,14 @@ def batch_size(baseline, tda):
         elif tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
             train_batch_size = 6
             test_batch_size = 6
-    elif baseline == "LoGra":
-        if tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
-            train_batch_size = 8
-            test_batch_size = 8
     elif baseline == "LogIX":
         if tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
             train_batch_size = 32
             test_batch_size = 32
+    elif baseline == "LoGra":
+        if tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
+            train_batch_size = 8
+            test_batch_size = 8
     elif baseline == "dattri":
         if tda in ["TRAK", "GD"]:
             train_batch_size = 4
