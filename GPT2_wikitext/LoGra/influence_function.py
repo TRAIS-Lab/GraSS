@@ -43,20 +43,19 @@ class LoraModule(nn.Module):
             in_features = base_module.in_features
             out_features = base_module.out_features
 
-            self.has_bias = base_module.bias is not None #TODO: add lora_A with bias if True
-            # Create LoRA layers
-            self.lora_A = nn.Linear(in_features, rank, bias=False)  # Encoder
-            self.lora_B = nn.Linear(rank, rank, bias=False)         # Bottleneck
-            self.lora_C = nn.Linear(rank, out_features, bias=False) # Decoder
+            self.has_bias = base_module.bias is not None # Previously, there's a bug here: bias is not taken into account
 
-            # torch.manual_seed(0)
+            # Create LoRA layers
+            self.lora_A = nn.Linear(in_features, rank, bias=self.has_bias)  # Encoder
+            self.lora_B = nn.Linear(rank, rank, bias=False)                 # Bottleneck
+            self.lora_C = nn.Linear(rank, out_features, bias=False)         # Decoder
 
             # Initialize weights
             nn.init.kaiming_uniform_(self.lora_A.weight, a=math.sqrt(5))
-            # if self.has_bias:
-            #     fan_in = self.lora_A.weight.shape[1]  # Get fan_in
-            #     bound = 1 / math.sqrt(fan_in)
-            #     nn.init.uniform_(self.lora_A.bias, -bound, bound)
+            if self.has_bias:
+                fan_in = self.lora_A.weight.shape[1]  # Get fan_in
+                bound = 1 / math.sqrt(fan_in)
+                nn.init.uniform_(self.lora_A.bias, -bound, bound)
             nn.init.zeros_(self.lora_B.weight)
             nn.init.kaiming_uniform_(self.lora_C.weight, a=math.sqrt(5))
 
@@ -108,12 +107,8 @@ class LoraModule(nn.Module):
 
         # LoRA forward pass
         self.projected_input = self.lora_A(x)
-
-        # Bottleneck (zero-initialized, so doesn't affect output)
         self.lora_B_output = self.lora_B(self.projected_input)
         self.lora_B_output.retain_grad()
-
-        # Decoder
         lora_C_output = self.lora_C(self.lora_B_output)
 
         return base_output + lora_C_output
@@ -183,7 +178,7 @@ class LoraInfluence:
             model: PyTorch model
             layer_type: Type of layers to add LoRA to
             rank: Rank for LoRA projection
-            hessian: Method for Hessian approximation ("none", "kfac", "ekfac")
+            hessian: Method for Hessian approximation ("none", "raw", "kfac", "ekfac")
             init_method: Method for initializing LoRA weights
             cpu_offload: Whether to offload gradients to CPU
             label_key: Key for labels in batch data
@@ -278,6 +273,26 @@ class LoraInfluence:
             # Replace with LoRA module
             setattr(parent, child_name, lora_module)
             self.lora_modules[name] = lora_module
+    def _init_lora_from_pca(self, covariance=None):
+        """
+        Initialize LoRA modules using PCA from covariance.
+
+        Args:
+            covariance: Dict of covariance matrices
+        """
+        print("Initializing LoRA modules from PCA...")
+
+        if covariance is None:
+            covariance = self.covariance
+
+        if not covariance:
+            raise ValueError("No covariance data available for PCA initialization")
+
+        for name, cov_data in covariance.items():
+            if name not in self.lora_modules:
+                continue
+
+            self.lora_modules[name].init_pca(cov_data)
 
     def extract_training_data(self, train_dataloader):
         """
@@ -318,14 +333,13 @@ class LoraInfluence:
             # Forward pass
             outputs = self.model(**inputs) if isinstance(inputs, dict) else self.model(inputs)
 
-            # Compute loss
+            # Compute custom loss
             logp = -outputs.loss
             loss = logp - torch.log(1 - torch.exp(logp))
 
             # Backward pass
             loss.backward(retain_graph=True)
 
-            # Collect data for both covariance and gradients
             for name, module in self.lora_modules.items():
                 # Update and collect projected gradients
                 module.update_projected_grad()
@@ -342,15 +356,12 @@ class LoraInfluence:
                     per_module_forward[name].append(module.projected_input.detach())
                     per_module_backward[name].append(module.projected_grad_pre_activation.detach())
 
-            # Update sample count
-            batch_size = inputs[self.label_key].size(0) if isinstance(inputs, dict) else inputs.size(0)
-            n_samples += batch_size
+            n_samples += inputs[self.label_key].size(0) if isinstance(inputs, dict) else inputs.size(0)
 
         print(f"Processed {n_samples} training samples")
 
         # Compute covariance matrices if needed
         if self.hessian == "raw":
-            # Initialize gradient covariance accumulator
             grad_covariance = {}
 
             for name in self.lora_module_names:
@@ -389,7 +400,6 @@ class LoraInfluence:
                     "grad": cov
                 }
 
-            # Store gradient covariance
             self.covariance = grad_covariance
             print(f"Computed gradient covariance for {len(grad_covariance)} modules")
 
@@ -504,7 +514,7 @@ class LoraInfluence:
             self._compute_ekfac_eigenvalues_from_gradients()
 
         return {
-            "covariance": self.covariance if self.hessian in ["kfac", "ekfac"] else None,
+            "covariance": self.covariance if self.hessian in ["raw", "kfac", "ekfac"] else None,
             "gradients": self.train_gradients
         }
 
@@ -633,12 +643,12 @@ class LoraInfluence:
         # Initialize EK-FAC eigenvalues
         ekfac_eigenvalues = {}
 
-        for layer_idx, module_name in enumerate(self.lora_module_names):
+        for module_name in self.lora_module_names:
             if module_name not in self.eigenvectors:
                 continue
 
             # Get gradients for this layer
-            gradients = self.train_gradients[layer_idx]
+            gradients = self.train_gradients[self.lora_module_to_idx[module_name]]
 
             # Get eigenvectors
             fwd_eigvec = self.eigenvectors[module_name]['forward'].to(device=gradients.device)
@@ -677,26 +687,6 @@ class LoraInfluence:
 
         return ekfac_eigenvalues
 
-    def _init_lora_from_pca(self, covariance=None):
-        """
-        Initialize LoRA modules using PCA from covariance.
-
-        Args:
-            covariance: Dict of covariance matrices
-        """
-        print("Initializing LoRA modules from PCA...")
-
-        if covariance is None:
-            covariance = self.covariance
-
-        if not covariance:
-            raise ValueError("No covariance data available for PCA initialization")
-
-        for name, cov_data in covariance.items():
-            if name not in self.lora_modules:
-                continue
-
-            self.lora_modules[name].init_pca(cov_data)
 
     def collect_gradients(self, dataloader, dataset_type="train"):
         """
@@ -830,7 +820,7 @@ class LoraInfluence:
         Returns:
             Preconditioned gradients
         """
-        # Ensure eigendecomposition is already computed
+             # Ensure eigendecomposition is already computed
         if not hasattr(self, 'eigenvectors') or not self.eigenvectors:
             raise ValueError("Eigendecomposition must be computed before using K-FAC")
 
@@ -848,13 +838,29 @@ class LoraInfluence:
             damping = 0.1 * torch.mean(full_eigval)
         full_eigval += damping
 
-        # original_shape = gradients.shape
-        precond_grads = []
-        rotated_grad = einsum(bwd_eigvec.t(), gradients, fwd_eigvec, "a b, batch b c, c d -> batch a d")
-        prec_rotated_grad = rotated_grad / full_eigval
-        precond_grads.append(einsum(bwd_eigvec, prec_rotated_grad, fwd_eigvec.t(), "a b, batch b c, c d -> batch a d"))
+        original_shape = gradients.shape
+        # Reshape gradients to matrix form
+        gradients_2d = gradients.reshape(original_shape[0], -1)
 
-        return torch.stack(precond_grads)
+        # Precondition gradients
+        precond_grads = []
+        for grad in gradients_2d:
+            # Reshape to match the layer dimensions
+            grad_matrix = grad.reshape(len(bwd_eigvec), -1)
+
+            # Rotate gradients
+            rotated_grad = torch.matmul(torch.matmul(bwd_eigvec.t(), grad_matrix), fwd_eigvec)
+
+            # Precondition with inverse eigenvalues
+            precond_rotated = rotated_grad / full_eigval
+
+            # Rotate back
+            precond_grad = torch.matmul(torch.matmul(bwd_eigvec, precond_rotated), fwd_eigvec.t())
+
+            precond_grads.append(precond_grad.flatten())
+
+        # Stack and reshape back to original shape
+        return torch.stack(precond_grads).reshape(original_shape)
 
     def _precondition_gradients_ekfac(self, gradients, module_name, damping=1e-5):
         """
@@ -939,7 +945,8 @@ class LoraInfluence:
 
         # Compute influence scores based on hessian approximation
         if self.hessian == "none":
-            for layer_idx in range(test_gradients.shape[0]):
+            for module_name in self.lora_module_names:
+                layer_idx = self.lora_module_to_idx[module_name]
                 test_layer_grads = test_gradients[layer_idx]
                 train_layer_grads = self.train_gradients[layer_idx]
                 layer_influence = torch.matmul(train_layer_grads, test_layer_grads.t())
@@ -949,8 +956,8 @@ class LoraInfluence:
             if not hasattr(self, 'covariance_inverse'):
                 self._compute_grad_covariance_inverse(damping)
 
-            for layer_idx in range(test_gradients.shape[0]):
-                module_name = self.lora_module_names[layer_idx]
+            for module_name in self.lora_module_names:
+                layer_idx = self.lora_module_to_idx[module_name]
 
                 # Skip if we don't have covariance for this module
                 if module_name not in self.covariance_inverse:
@@ -958,7 +965,6 @@ class LoraInfluence:
 
                 test_layer_grads = test_gradients[layer_idx]
                 train_layer_grads = self.train_gradients[layer_idx]
-
                 precond_train_grads = self._precondition_gradients_raw(
                     train_layer_grads,
                     module_name,
@@ -978,8 +984,8 @@ class LoraInfluence:
                 self._compute_eigendecomposition()
 
             # Process each layer separately with K-FAC preconditioning
-            for layer_idx in range(test_gradients.shape[0]):
-                module_name = self.lora_module_names[layer_idx]
+            for module_name in self.lora_module_names:
+                layer_idx = self.lora_module_to_idx[module_name]
 
                 # Skip if we don't have eigendecomposition for this module
                 if module_name not in self.eigenvectors:
@@ -1012,8 +1018,8 @@ class LoraInfluence:
                 raise ValueError("EK-FAC eigenvalues must be computed before using EK-FAC. Run _compute_ekfac_eigenvalues first.")
 
             # Process each layer separately with EK-FAC preconditioning
-            for layer_idx in range(test_gradients.shape[0]):
-                module_name = self.lora_module_names[layer_idx]
+            for module_name in self.lora_module_names:
+                layer_idx = self.lora_module_to_idx[module_name]
 
                 # Skip if we don't have EK-FAC data for this module
                 if module_name not in self.ekfac_eigenvalues:
