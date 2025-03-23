@@ -631,9 +631,9 @@ def main():
             else:
                 score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
 
-        elif args.tda == "IF-KFAC":
-            from _GradComp.influence_function import GCIFAttributorKFAC
-            attributor = GCIFAttributorKFAC(
+        elif args.tda == "IF-RAW":
+            from _GradComp.influence_function import GCIFAttributorRAW
+            attributor = GCIFAttributorRAW(
                 model=model,
                 layer_name=find_GClayers(model, args.layer),
                 profile=args.profile,

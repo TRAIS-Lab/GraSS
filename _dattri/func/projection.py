@@ -1048,8 +1048,6 @@ def make_random_projector(
             proj_type = ProjectionType.normal
         elif method == "Identity":
             proj_type = ProjectionType.identity
-        # elif method == "Kaiming":
-        #     proj_type = ProjectionType.kaiming
 
         projector = CudaProjector
         using_cuda_projector = True

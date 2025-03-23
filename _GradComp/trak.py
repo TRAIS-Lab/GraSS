@@ -51,7 +51,7 @@ def eigen_stable_inverse(matrix: torch.Tensor, damping: float = 1e-5, eigen_thre
 
     return inverse
 
-class GCIFAttributorKFAC():
+class GCIFAttributorRAW():
     def __init__(
         self,
         model,
