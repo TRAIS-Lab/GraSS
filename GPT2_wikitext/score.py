@@ -649,16 +649,16 @@ def main():
 
     elif args.baseline == "LogIX":
         #check_min_version("4.46.0") # LogIX is built on top of 4.40.0, ignore the checking
-        from _logix.huggingface import LogIXArguments, patch_trainer
+        from _LogIX.huggingface import LogIXArguments, patch_trainer
         from LoGra.utils import LoGra_GPT2
 
         # get which Hessian to use
         tda, hessian = args.tda.split("-")
         hessian = hessian.lower()
-        assert tda == "IF", "LoGra only supports Influence Function now."
+        assert tda == "IF", "LogIX only supports Influence Function now."
         assert hessian in ["none", "raw", "kfac", "ekfac"], "Invalid Hessian type."
-        assert args.layer == "Linear", "LoGra only supports Linear setting now."
-        assert args.projection is not None, "LoGra requires projection method."
+        assert args.layer == "Linear", "LogIX only supports Linear setting now."
+        assert args.projection is not None, "LogIX requires projection method."
 
         model = LoGra_GPT2(checkpoint, config, resume=True)
         model.eval()
@@ -667,8 +667,8 @@ def main():
 
         # 1. Computing EK-FAC factors for training data
         logix_args_train = LogIXArguments(
-            project=f"./LoGra/project/{args.projection}",
-            config=f"./LoGra/project/{args.projection}.yaml",
+            project=f"./LogIX/project/{args.projection}",
+            config=f"./LogIX/project/{args.projection}.yaml",
             lora=True,
             hessian=hessian,
             save="grad",
@@ -676,7 +676,7 @@ def main():
             label_key="input_ids",
         )
         training_args = transformers.TrainingArguments(
-            output_dir=f"./LoGra/",
+            output_dir=f"./LogIX/",
             num_train_epochs=1,
             per_device_train_batch_size=train_batch_size,
             report_to="none",
@@ -695,8 +695,8 @@ def main():
         model = LoGra_GPT2(checkpoint, config, resume=True) # reinitialize the model
         model.eval()
         logix_args_test = LogIXArguments(
-            project=f"./LoGra/project/{args.projection}",
-            config=f"./LoGra/project/{args.projection}.yaml",
+            project=f"./LogIX/project/{args.projection}",
+            config=f"./LogIX/project/{args.projection}.yaml",
             lora=True,
             hessian=hessian,
             save="grad",
@@ -706,7 +706,7 @@ def main():
             log_batch_size=32,
         )
         training_args = transformers.TrainingArguments(
-            output_dir=f"./LoGra/",
+            output_dir=f"./LogIX/",
             num_train_epochs=1,
             per_device_train_batch_size=test_batch_size,
             report_to="none",
@@ -727,7 +727,7 @@ def main():
         # check_min_version("4.46.0")
 
         from LoGra.utils import LoGra_GPT2
-        from LoGra.influence_function import LoraInfluence
+        from _logra.influence_function import LoraInfluence
 
         # get which Hessian to use
         tda, hessian = args.tda.split("-")

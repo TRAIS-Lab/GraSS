@@ -50,5 +50,6 @@ dist
 */result/*
 # all files in checkpoints folder
 **/checkpoints*/
+*.json
 
 visualization.ipynb
