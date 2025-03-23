@@ -293,24 +293,22 @@ class LoraInfluence:
         """
         print("Extracting information from training data...")
 
-        if self.hessian in ["raw", "kfac", "ekfac"]:
-            compute_hessian = True
-        else:
-            compute_hessian = False
-
         # Set model to eval mode
         self.model.eval()
 
         # Initialize accumulators for both covariance and gradients
-        forward_accs = {name: [] for name in self.lora_module_names}
-        backward_accs = {name: [] for name in self.lora_module_names}
         per_module_gradients = {name: [] for name in self.lora_module_names}
+        if self.hessian in ["kfac", "ekfac"]:
+            per_module_forward = {name: [] for name in self.lora_module_names}
+            per_module_backward = {name: [] for name in self.lora_module_names}
+
         n_samples = 0
 
         # Process each batch
         for batch_idx, batch in enumerate(tqdm(train_dataloader, desc="Processing training data")):
             # Zero gradients
             self.model.zero_grad()
+
             # Prepare inputs
             if isinstance(batch, dict):
                 inputs = {k: v.to(self.model.device) for k, v in batch.items()}
@@ -321,7 +319,6 @@ class LoraInfluence:
             outputs = self.model(**inputs) if isinstance(inputs, dict) else self.model(inputs)
 
             # Compute loss
-            assert hasattr(outputs, "loss")
             logp = -outputs.loss
             loss = logp - torch.log(1 - torch.exp(logp))
 
@@ -330,30 +327,21 @@ class LoraInfluence:
 
             # Collect data for both covariance and gradients
             for name, module in self.lora_modules.items():
-                # print(f"Processing module: {module}")
-                # For covariance computation
-                if module.projected_input is not None:
-                    # print("Proj. input:", module.projected_input.shape, module.projected_input[:5])
-                    if compute_hessian:
-                        # Store for covariance calculation
-                        forward_accs[name].append(module.projected_input.detach())
-
                 # Update and collect projected gradients
                 module.update_projected_grad()
 
-                if module.projected_grad_pre_activation is not None:
-                    # print("Proj. grad_pre_activation:", module.projected_grad_pre_activation.shape, module.projected_grad_pre_activation[:5])
-                    if compute_hessian:
-                        # Store for covariance calculation
-                        backward_accs[name].append(module.projected_grad_pre_activation.detach())
+                # Store gradients for influence computation
+                grad_tensor = module.projected_grad.detach()
+                if self.cpu_offload:
+                    grad_tensor = grad_tensor.cpu()
 
-                    # Store gradients for influence computation
-                    grad_tensor = module.projected_grad.detach()
-                    # print("Proj. grad_tensor:", grad_tensor.shape, grad_tensor[:5])
-                    if self.cpu_offload:
-                        grad_tensor = grad_tensor.cpu()
-                    per_module_gradients[name].append(grad_tensor)
-            # exit()
+                per_module_gradients[name].append(grad_tensor)
+
+                # For covariance computation
+                if self.hessian in ["kfac", "ekfac"]:
+                    per_module_forward[name].append(module.projected_input.detach())
+                    per_module_backward[name].append(module.projected_grad_pre_activation.detach())
+
             # Update sample count
             batch_size = inputs[self.label_key].size(0) if isinstance(inputs, dict) else inputs.size(0)
             n_samples += batch_size
@@ -361,16 +349,60 @@ class LoraInfluence:
         print(f"Processed {n_samples} training samples")
 
         # Compute covariance matrices if needed
-        if compute_hessian:
-            covariance = {}
+        if self.hessian == "raw":
+            # Initialize gradient covariance accumulator
+            grad_covariance = {}
 
             for name in self.lora_module_names:
-                if not forward_accs[name] or not backward_accs[name]:
+                if name not in per_module_gradients:
+                    continue
+
+                # Concatenate all gradient batches
+                all_grads = torch.cat(per_module_gradients[name], dim=0)
+                grad_dim = all_grads.shape[1]  # Feature dimension of gradients
+
+                # Initialize covariance matrix
+                device = "cpu" if self.cpu_offload else all_grads.device
+                cov = torch.zeros((grad_dim, grad_dim), device=device)
+
+                # Compute covariance incrementally to save memory
+                batch_size = 16  # Process in small batches to avoid OOM
+                num_samples = all_grads.shape[0]
+
+                for i in range(0, num_samples, batch_size):
+                    end_idx = min(i + batch_size, num_samples)
+                    batch = all_grads[i:end_idx]
+
+                    if self.cpu_offload:
+                        # Use GPU for computation, then move back to CPU
+                        cov_gpu = cov.to(device=batch.device)
+                        cov_gpu.addmm_(batch.t(), batch)
+                        cov = cov_gpu.to(device="cpu", non_blocking=True)
+                    else:
+                        cov.addmm_(batch.t(), batch)
+
+                # Normalize by number of samples
+                cov /= num_samples
+
+                # Store covariance
+                grad_covariance[name] = {
+                    "grad": cov
+                }
+
+            # Store gradient covariance
+            self.covariance = grad_covariance
+            print(f"Computed gradient covariance for {len(grad_covariance)} modules")
+
+        elif self.hessian in ["kfac", "ekfac"]:
+            fwd_bwd_covariance = {}
+
+            for name in self.lora_module_names:
+                if not per_module_forward[name] or not per_module_backward[name]:
                     continue
 
                 # Get first tensor to determine shape
-                sample_fwd = forward_accs[name][0]
-                sample_bwd = backward_accs[name][0]
+                sample_fwd = per_module_forward[name][0]
+                sample_bwd = per_module_backward[name][0]
 
                 # Initialize covariance matrices
                 fwd_dim = sample_fwd.shape[-1]  # Rank dimension
@@ -383,10 +415,10 @@ class LoraInfluence:
                 # Incrementally compute covariance
                 processed_samples = 0
 
-                for batch_idx in range(len(forward_accs[name])):
+                for batch_idx in range(len(per_module_forward[name])):
                     # Get batch data
-                    fwd_batch = forward_accs[name][batch_idx]
-                    bwd_batch = backward_accs[name][batch_idx]
+                    fwd_batch = per_module_forward[name][batch_idx]
+                    bwd_batch = per_module_backward[name][batch_idx]
 
                     # Flatten sequence dimension
                     fwd_flat = fwd_batch.view(-1, fwd_dim)
@@ -413,18 +445,18 @@ class LoraInfluence:
                 fwd_cov /= processed_samples
                 bwd_cov /= processed_samples
 
-                covariance[name] = {
+                fwd_bwd_covariance[name] = {
                     "forward": fwd_cov,
                     "backward": bwd_cov
                 }
 
             # Store covariance matrices
-            self.covariance = covariance
-            print(f"Computed covariance matrices for {len(covariance)} modules")
+            self.covariance = fwd_bwd_covariance
+            print(f"Computed forward/backward covariance matrices for {len(fwd_bwd_covariance)} modules")
 
             # Initialize LoRA weights using PCA if requested
             if self.init_method == "pca":
-                self._init_lora_from_pca(covariance) #TODO: this is not intended: we need to redo the forward/backward again to take into account the new weights
+                self._init_lora_from_pca(fwd_bwd_covariance) #TODO: this is not intended: we need to redo the forward/backward again to take into account the new weights
 
             # Compute eigendecomposition for Hessian approximation
             if self.hessian in ["kfac", "ekfac"]:
@@ -468,11 +500,11 @@ class LoraInfluence:
         self.train_gradients = gradients
 
         # Compute EK-FAC eigenvalues if needed
-        if compute_hessian and self.hessian == "ekfac":
+        if self.hessian == "ekfac":
             self._compute_ekfac_eigenvalues_from_gradients()
 
         return {
-            "covariance": self.covariance if compute_hessian else None,
+            "covariance": self.covariance if self.hessian in ["kfac", "ekfac"] else None,
             "gradients": self.train_gradients
         }
 
@@ -529,6 +561,60 @@ class LoraInfluence:
         self.eigenvectors = eigenvectors
 
         return eigenvalues, eigenvectors
+
+
+    def _compute_grad_covariance_inverse(self, damping=None):
+        """
+        Compute the inverse of gradient covariance for raw Hessian approximation.
+
+        Args:
+            damping: Damping parameter for numerical stability
+
+        Returns:
+            Dict of inverse covariance matrices
+        """
+        print("Computing gradient covariance inverse...")
+
+        if not hasattr(self, 'covariance') or not self.covariance:
+            raise ValueError("Gradient covariance must be computed before computing inverse")
+
+        # Initialize inverse covariance dict
+        covariance_inverse = {}
+
+        for name, cov_data in self.covariance.items():
+            # Get gradient covariance
+            grad_cov = cov_data.get("grad")
+
+            if grad_cov is None:
+                continue
+
+            # Add damping for numerical stability
+            if damping is None:
+                damping = 0.1 * torch.trace(grad_cov) / grad_cov.size(0)
+
+            # Add diagonal damping
+            damped_cov = grad_cov + damping * torch.eye(grad_cov.size(0), device=grad_cov.device)
+
+            # Compute inverse
+            try:
+                # Try Cholesky decomposition first (more stable)
+                L = torch.linalg.cholesky(damped_cov)
+                inverse = torch.cholesky_inverse(L)
+            except RuntimeError:
+                print(f"Falling back to direct inverse for {name} due to Cholesky failure")
+                # Fall back to direct inverse
+                inverse = torch.inverse(damped_cov)
+
+            covariance_inverse[name] = {
+                "grad": inverse
+            }
+
+        print(f"Computed gradient covariance inverse for {len(covariance_inverse)} modules")
+
+        # Store inverse covariance
+        self.covariance_inverse = covariance_inverse
+
+        return covariance_inverse
 
     def _compute_ekfac_eigenvalues_from_gradients(self):
         """
@@ -655,11 +741,10 @@ class LoraInfluence:
             # Collect projected gradients
             for name, module in self.lora_modules.items():
                 module.update_projected_grad()
-                if module.projected_grad is not None:
-                    grad_tensor = module.projected_grad.detach()
-                    if self.cpu_offload:
-                        grad_tensor = grad_tensor.cpu()
-                    per_module_gradients[name].append(grad_tensor)
+                grad_tensor = module.projected_grad.detach()
+                if self.cpu_offload:
+                    grad_tensor = grad_tensor.cpu()
+                per_module_gradients[name].append(grad_tensor)
 
             # Update total sample count
             if per_module_gradients[self.lora_module_names[0]]:  # Check if we have at least one gradient
@@ -697,11 +782,9 @@ class LoraInfluence:
                 module_idx = self.lora_module_to_idx[name]
                 gradients[module_idx] = tensor
 
-            print(f"Final gradient tensor shape: {gradients.shape}")
         else:
             # Gradient shapes differ, keep as dictionary with module indices
             gradients = {self.lora_module_to_idx[name]: tensor for name, tensor in concatenated_gradients.items()}
-            print(f"Created gradient dictionary with {len(gradients)} modules")
 
         # Store or return gradients based on dataset type
         if dataset_type == "train":
@@ -711,9 +794,9 @@ class LoraInfluence:
             self.test_gradients = gradients
             return self.test_gradients
 
-    def _precondition_gradients_raw(self, gradients, module_name, damping=1e-5):
+    def _precondition_gradients_raw(self, gradients, module_name, damping=None):
         """
-        Precondition gradients using the direct inverse of covariance (raw method).
+        Precondition gradients using raw Hessian (gradient covariance) approximation.
 
         Args:
             gradients: Gradient tensor
@@ -723,69 +806,17 @@ class LoraInfluence:
         Returns:
             Preconditioned gradients
         """
-        # Need to first compute the covariance matrix of the gradients
-        if not hasattr(self, 'covariance') or not self.covariance:
-            raise ValueError("Covariance matrices must be computed before using raw Hessian method")
-
-        # Reshape gradients to 2D
-        original_shape = gradients.shape
-        batch_size = original_shape[0]
-        gradients_2d = gradients.reshape(batch_size, -1)  # [batch_size, features]
-
-        # Get gradient dimensionality
-        feature_dim = gradients_2d.shape[1]
-
-        # Compute covariance inverse if not precomputed
+        # Ensure covariance inverse is computed
         if not hasattr(self, 'covariance_inverse'):
-            self.covariance_inverse = {}
+            self._compute_grad_covariance_inverse(damping)
 
-        if module_name not in self.covariance_inverse:
-            # Get the gradient covariance matrix
-            if 'grad' in self.covariance[module_name]:
-                # If we have the gradient covariance directly
-                grad_cov = self.covariance[module_name]['grad']
-            else:
-                # Otherwise compute it from forward and backward covariances
-                # For simplicity, we can create an approximation using the rank-reduced representation
-                print(f"Computing approximated gradient covariance for module {module_name}")
-                forward_cov = self.covariance[module_name]['forward']
-                backward_cov = self.covariance[module_name]['backward']
+        # Get inverse covariance
+        inverse_cov = self.covariance_inverse[module_name]["grad"]
 
-                # Kronecker product approximation
-                grad_cov = torch.kron(backward_cov, forward_cov)
+        # Precondition gradients: G * H^-1
+        precond_grads = torch.matmul(gradients, inverse_cov)
 
-            # Add damping
-            if damping is None:
-                damping = 0.1 * torch.trace(grad_cov) / grad_cov.size(0)
-
-            # Compute inverse with damping for stability
-            damped_cov = grad_cov + damping * torch.eye(
-                grad_cov.size(0),
-                device=grad_cov.device
-            )
-
-            # Compute inverse
-            try:
-                cov_inverse = torch.linalg.inv(damped_cov)
-            except RuntimeError:
-                # Fall back to pseudo-inverse for numerical stability
-                print(f"Using pseudo-inverse for module {module_name} due to inversion failure")
-                cov_inverse = torch.linalg.pinv(damped_cov)
-
-            # Store for reuse
-            self.covariance_inverse[module_name] = cov_inverse
-        else:
-            cov_inverse = self.covariance_inverse[module_name]
-
-        # Ensure the inverse is on the same device as gradients
-        cov_inverse = cov_inverse.to(gradients.device)
-
-        # Precondition gradients: g' = g * H^-1
-        # Using (batch_size, features) @ (features, features) = (batch_size, features)
-        preconditioned_gradients = torch.matmul(gradients_2d, cov_inverse)
-
-        # Reshape back to original shape
-        return preconditioned_gradients.reshape(original_shape)
+        return precond_grads
 
     def _precondition_gradients_kfac(self, gradients, module_name, damping=None):
         """
@@ -822,29 +853,8 @@ class LoraInfluence:
         rotated_grad = einsum(bwd_eigvec.t(), gradients, fwd_eigvec, "a b, batch b c, c d -> batch a d")
         prec_rotated_grad = rotated_grad / full_eigval
         precond_grads.append(einsum(bwd_eigvec, prec_rotated_grad, fwd_eigvec.t(), "a b, batch b c, c d -> batch a d"))
-        # # Reshape gradients to matrix form
-        # gradients_2d = gradients.reshape(original_shape[0], -1)
 
-
-        # # Precondition gradients
-        # precond_grads = []
-        # for grad in gradients_2d:
-        #     # Reshape to match the layer dimensions
-        #     grad_matrix = grad.reshape(len(bwd_eigvec), -1)
-
-        #     # Rotate gradients
-        #     rotated_grad = torch.matmul(torch.matmul(bwd_eigvec.t(), grad_matrix), fwd_eigvec)
-
-        #     # Precondition with inverse eigenvalues
-        #     precond_rotated = rotated_grad / full_eigval
-
-        #     # Rotate back
-        #     precond_grad = torch.matmul(torch.matmul(bwd_eigvec, precond_rotated), fwd_eigvec.t())
-
-        #     precond_grads.append(precond_grad.flatten())
-
-        # Stack and reshape back to original shape
-        return torch.stack(precond_grads)#.reshape(original_shape)
+        return torch.stack(precond_grads)
 
     def _precondition_gradients_ekfac(self, gradients, module_name, damping=1e-5):
         """
@@ -924,49 +934,36 @@ class LoraInfluence:
         num_train_samples = self.train_gradients.shape[1]
         num_test_samples = test_gradients.shape[1]
 
-        # Initialize influence matrix: [num_test_samples, num_train_samples]
+        # Initialize influence matrix
         influence_matrix = torch.zeros((num_train_samples, num_test_samples), device=self.train_gradients.device)
 
         # Compute influence scores based on hessian approximation
         if self.hessian == "none":
-            # For each layer
             for layer_idx in range(test_gradients.shape[0]):
-                # Get test gradients for this layer [num_test_samples, feature_dims]
-                test_layer_grads = test_gradients[layer_idx].reshape(num_test_samples, -1)
-
-                # Get train gradients for this layer [num_train_samples, feature_dims]
-                train_layer_grads = self.train_gradients[layer_idx].reshape(num_train_samples, -1)
-
-                # Compute influence via matrix multiplication: [num_test_samples, num_train_samples]
-                # test_grads @ train_grads.T gives the dot product between each pair
+                test_layer_grads = test_gradients[layer_idx]
+                train_layer_grads = self.train_gradients[layer_idx]
                 layer_influence = torch.matmul(train_layer_grads, test_layer_grads.t())
-
-                # Add to total influence
                 influence_matrix += layer_influence
 
         elif self.hessian == "raw":
-             # First ensure we have covariance matrices computed
-            if not hasattr(self, 'covariance') or not self.covariance:
-                raise ValueError("Covariance matrices must be computed before using raw Hessian (FIM)")
+            if not hasattr(self, 'covariance_inverse'):
+                self._compute_grad_covariance_inverse(damping)
 
-            # Process each layer separately with raw Hessian preconditioning
             for layer_idx in range(test_gradients.shape[0]):
                 module_name = self.lora_module_names[layer_idx]
 
                 # Skip if we don't have covariance for this module
-                if module_name not in self.covariance:
+                if module_name not in self.covariance_inverse:
                     continue
 
-                # Extract gradients for this layer
-                test_layer_grads = test_gradients[layer_idx].reshape(num_test_samples, -1)
-                train_layer_grads = self.train_gradients[layer_idx].reshape(num_train_samples, -1)
+                test_layer_grads = test_gradients[layer_idx]
+                train_layer_grads = self.train_gradients[layer_idx]
 
-                # Precondition the train gradients
                 precond_train_grads = self._precondition_gradients_raw(
-                    self.train_gradients[layer_idx],
+                    train_layer_grads,
                     module_name,
                     damping
-                ).reshape(num_train_samples, -1)
+                )
 
                 # Compute influence via matrix multiplication
                 layer_influence = torch.matmul(precond_train_grads, test_layer_grads.t())
