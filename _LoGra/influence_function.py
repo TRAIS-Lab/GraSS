@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from tqdm import tqdm
-
+import time
 from .lora.modules import LoraModule
 
 class LoraInfluence:
@@ -76,6 +76,14 @@ class LoraInfluence:
 
         print(f"Initialized LoraInfluence with {len(self.lora_modules)} {layer_name} layers at rank {self.rank}")
 
+        if self.profile:
+            self.profiling_stats = {
+                'projection': 0.0,
+                'forward': 0.0,
+                'backward': 0.0,
+                'precondition': 0.0,
+            }
+
     def _add_lora(self):
         """Add LoRA modules to the model."""
         target_type = self.type_map.get(self.layer_type)
@@ -132,6 +140,7 @@ class LoraInfluence:
             # Replace with LoRA module
             setattr(parent, child_name, lora_module)
             self.lora_modules[name] = lora_module
+
     def _init_lora_from_pca(self, covariance=None):
         """
         Initialize LoRA modules using PCA from covariance.
@@ -189,15 +198,33 @@ class LoraInfluence:
             else:
                 inputs = batch[0].to(self.model.device)
 
+            # Time forward pass
+            if self.profile:
+                torch.cuda.synchronize()
+                start_time = time.time()
+
             # Forward pass
             outputs = self.model(**inputs) if isinstance(inputs, dict) else self.model(inputs)
+
+            if self.profile:
+                torch.cuda.synchronize()
+                self.profiling_stats['forward'] += time.time() - start_time
 
             # Compute custom loss
             logp = -outputs.loss
             loss = logp - torch.log(1 - torch.exp(logp))
 
+            # Time backward pass
+            if self.profile:
+                torch.cuda.synchronize()
+                start_time = time.time()
+
             # Backward pass
             loss.backward(retain_graph=True)
+
+            if self.profile:
+                torch.cuda.synchronize()
+                self.profiling_stats['backward'] += time.time() - start_time
 
             for name, module in self.lora_modules.items():
                 # Update and collect projected gradients
@@ -214,6 +241,11 @@ class LoraInfluence:
                 if self.hessian in ["kfac", "ekfac"]:
                     per_module_forward[name].append(module.projected_input.detach())
                     per_module_backward[name].append(module.projected_grad_pre_activation.detach())
+
+        # Time hessian
+        if self.profile:
+            torch.cuda.synchronize()
+            start_time = time.time()
 
         # Compute covariance matrices if needed
         if self.hessian == "raw":
@@ -325,7 +357,15 @@ class LoraInfluence:
 
             # Compute eigendecomposition for Hessian approximation
             if self.hessian in ["kfac", "ekfac"]:
+                if self.profile:
+                    torch.cuda.synchronize()
+                    start_time = time.time()
+
                 self._compute_eigendecomposition()
+
+                if self.profile:
+                    torch.cuda.synchronize()
+                    self.profiling_stats['precondition'] += time.time() - start_time
 
         # Concatenate gradients for each module
         concatenated_gradients = {}
@@ -364,9 +404,17 @@ class LoraInfluence:
         # Store gradients
         self.train_gradients = gradients
 
-        # Compute EK-FAC eigenvalues if needed
         if self.hessian == "ekfac":
+            # Compute EK-FAC eigenvalues if needed
+            if self.profile:
+                torch.cuda.synchronize()
+                start_time = time.time()
+
             self._compute_ekfac_eigenvalues_from_gradients()
+
+            if self.profile:
+                torch.cuda.synchronize()
+                self.profiling_stats['precondition'] += time.time() - start_time
 
         return {
             "covariance": self.covariance if self.hessian in ["raw", "kfac", "ekfac"] else None,
@@ -574,14 +622,32 @@ class LoraInfluence:
             else:
                 inputs = batch[0].to(self.model.device)
 
+            # Time forward pass
+            if self.profile:
+                torch.cuda.synchronize()
+                start_time = time.time()
+
             # Forward pass
             outputs = self.model(**inputs) if isinstance(inputs, dict) else self.model(inputs)
+
+            if self.profile:
+                torch.cuda.synchronize()
+                self.profiling_stats['forward'] += time.time() - start_time
 
             logp = -outputs.loss
             loss = logp - torch.log(1 - torch.exp(logp))
 
+            # Time backward pass
+            if self.profile:
+                torch.cuda.synchronize()
+                start_time = time.time()
+
             # Backward pass
             loss.backward()
+
+            if self.profile:
+                torch.cuda.synchronize()
+                self.profiling_stats['backward'] += time.time() - start_time
 
             # Collect projected gradients
             for name, module in self.lora_modules.items():
@@ -675,7 +741,7 @@ class LoraInfluence:
         Returns:
             Preconditioned gradients
         """
-             # Ensure eigendecomposition is already computed
+        # Ensure eigendecomposition is already computed
         if not hasattr(self, 'eigenvectors') or not self.eigenvectors:
             raise ValueError("Eigendecomposition must be computed before using K-FAC")
 
@@ -717,7 +783,7 @@ class LoraInfluence:
         # Stack and reshape back to original shape
         return torch.stack(precond_grads).reshape(original_shape)
 
-    def _precondition_gradients_ekfac(self, gradients, module_name, damping=1e-5):
+    def _precondition_gradients_ekfac(self, gradients, module_name, damping=None):
         """
         Precondition gradients using EK-FAC approximation.
 
@@ -796,7 +862,7 @@ class LoraInfluence:
         num_test_samples = test_gradients.shape[1]
 
         # Initialize influence matrix
-        influence_matrix = torch.zeros((num_train_samples, num_test_samples), device=self.train_gradients.device)
+        IF_score = torch.zeros((num_train_samples, num_test_samples), device=self.train_gradients.device)
 
         # Compute influence scores based on hessian approximation
         if self.hessian == "none":
@@ -805,10 +871,15 @@ class LoraInfluence:
                 test_layer_grads = test_gradients[layer_idx]
                 train_layer_grads = self.train_gradients[layer_idx]
                 layer_influence = torch.matmul(train_layer_grads, test_layer_grads.t())
-                influence_matrix += layer_influence
+                IF_score += layer_influence
+
+        if self.profile:
+            torch.cuda.synchronize()
+            start_time = time.time()
 
         elif self.hessian == "raw":
             if not hasattr(self, 'covariance_inverse'):
+                print("Computing Fisher information matrix inverse...")
                 self._compute_grad_covariance_inverse(damping)
 
             for module_name in self.lora_module_names:
@@ -826,19 +897,14 @@ class LoraInfluence:
                     damping
                 )
 
-                # Compute influence via matrix multiplication
                 layer_influence = torch.matmul(precond_train_grads, test_layer_grads.t())
-
-                # Add to total influence
-                influence_matrix += layer_influence
+                IF_score += layer_influence
 
         elif self.hessian == "kfac":
-            # First ensure we have eigendecomposition computed
             if not hasattr(self, 'eigenvectors') or not self.eigenvectors:
                 print("Computing eigendecomposition for K-FAC...")
                 self._compute_eigendecomposition()
 
-            # Process each layer separately with K-FAC preconditioning
             for module_name in self.lora_module_names:
                 layer_idx = self.lora_module_to_idx[module_name]
 
@@ -850,21 +916,16 @@ class LoraInfluence:
                 test_layer_grads = test_gradients[layer_idx]
                 train_layer_grads = self.train_gradients[layer_idx].view(num_train_samples, self.rank, self.rank)
 
-                # Precondition the train gradients
                 precond_train_grads = self._precondition_gradients_kfac(
                     train_layer_grads,
                     module_name,
                     damping
                 ).reshape(num_train_samples, -1)
 
-                # Compute influence via matrix multiplication
                 layer_influence = torch.matmul(precond_train_grads, test_layer_grads.t())
-
-                # Add to total influence
-                influence_matrix += layer_influence
+                IF_score += layer_influence
 
         elif self.hessian == "ekfac":
-            # First ensure we have eigendecomposition and EK-FAC eigenvalues computed
             if not hasattr(self, 'eigenvectors') or not self.eigenvectors:
                 print("Computing eigendecomposition for EK-FAC...")
                 self._compute_eigendecomposition()
@@ -872,7 +933,6 @@ class LoraInfluence:
             if not hasattr(self, 'ekfac_eigenvalues') or not self.ekfac_eigenvalues:
                 raise ValueError("EK-FAC eigenvalues must be computed before using EK-FAC. Run _compute_ekfac_eigenvalues first.")
 
-            # Process each layer separately with EK-FAC preconditioning
             for module_name in self.lora_module_names:
                 layer_idx = self.lora_module_to_idx[module_name]
 
@@ -884,26 +944,20 @@ class LoraInfluence:
                 test_layer_grads = test_gradients[layer_idx].reshape(num_test_samples, -1)
                 train_layer_grads = self.train_gradients[layer_idx].reshape(num_train_samples, -1)
 
-                # Precondition the train gradients
                 precond_train_grads = self._precondition_gradients_ekfac(
                     self.train_gradients[layer_idx],
                     module_name,
                     damping
                 ).reshape(num_train_samples, -1)
 
-                # Compute influence via matrix multiplication
                 layer_influence = torch.matmul(precond_train_grads, test_layer_grads.t())
-
-                # Add to total influence
-                influence_matrix += layer_influence
+                IF_score += layer_influence
 
         else:
             raise ValueError(f"Unsupported hessian approximation: {self.hessian}")
 
-        # Create result dictionary
-        result = {
-            "influence": influence_matrix
-        }
+        if self.profile:
+            torch.cuda.synchronize()
+            self.profiling_stats['precondition'] += time.time() - start_time
 
-
-        return result
+        return (IF_score, self.profiling_stats) if self.profile else IF_score

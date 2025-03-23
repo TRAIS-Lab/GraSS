@@ -81,17 +81,17 @@ class GCIFAttributorRAW():
         if self.profile:
             self.profiling_stats = {
                 'projection': 0.0,
-                'gradient': 0.0,
-                'hessian': 0.0,
-                'inverse_hessian': 0.0
+                'forward': 0.0,
+                'backward': 0.0,
+                'precondition': 0.0,
             }
 
-    def _iHVP(
+    def _iFVP(
         self,
         train_dataloader: torch.utils.data.DataLoader,
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """
-        Compute K-FAC inverse Hessian vector product for each layer.
+        Compute FIM inverse Hessian vector product for each layer.
         Uses GCN approximation for the Hessian computation.
 
         Args:
@@ -99,7 +99,7 @@ class GCIFAttributorRAW():
             cached_grads: Whether gradients are cached
 
         Returns:
-            Tuple of lists containing the K-FAC factors for each layer
+            Tuple of lists containing the FIM factors for each layer
         """
         num_layers = len(self.layer_name)
 
@@ -110,11 +110,11 @@ class GCIFAttributorRAW():
 
         num_samples = len(train_dataloader.sampler)
 
-        # Compute K-FAC factors for each layer
+        # Compute FIM factors for each layer
         for train_batch_idx, train_batch in enumerate(
             tqdm(
                 train_dataloader,
-                desc="computing K-FAC factors for training set...",
+                desc="computing FIM factors for training set...",
                 leave=False,
             ),
         ):
@@ -122,7 +122,7 @@ class GCIFAttributorRAW():
             train_attention_masks = train_batch["attention_mask"].to(self.device)
             train_labels = train_batch["labels"].to(self.device)
 
-            # Time backward pass
+            # Time forward/backward pass
             if self.profile:
                 torch.cuda.synchronize()
                 start_time = time.time()
@@ -134,17 +134,26 @@ class GCIFAttributorRAW():
                 attention_mask=train_attention_masks,
                 labels=train_labels
             )
+
+            if self.profile:
+                torch.cuda.synchronize()
+                self.profiling_stats['forward'] += time.time() - start_time
+
             logp = -outputs.loss
             train_loss = logp - torch.log(1 - torch.exp(logp))
+
+            if self.profile:
+                torch.cuda.synchronize()
+                start_time = time.time()
 
             train_pre_acts = [layer.pre_activation for layer in self.layer_name]
             Z_grad_train = torch.autograd.grad(train_loss, train_pre_acts, retain_graph=True)
 
             if self.profile:
                 torch.cuda.synchronize()
-                self.profiling_stats['gradient'] += time.time() - start_time
+                self.profiling_stats['backward'] += time.time() - start_time
 
-            # Compute K-FAC factors for each layer
+            # Compute FIM factors for each layer
             with torch.no_grad():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
                     if self.profile:
@@ -177,7 +186,7 @@ class GCIFAttributorRAW():
 
                     if self.profile:
                         torch.cuda.synchronize()
-                        self.profiling_stats['hessian'] += time.time() - start_time
+                        self.profiling_stats['precondition'] += time.time() - start_time
 
         # Time inverse Hessian calculation
         if self.profile:
@@ -202,7 +211,7 @@ class GCIFAttributorRAW():
 
         if self.profile:
             torch.cuda.synchronize()
-            self.profiling_stats['inverse_hessian'] += time.time() - start_time
+            self.profiling_stats['precondition'] += time.time() - start_time
 
         return ihvp_train
 
@@ -212,7 +221,7 @@ class GCIFAttributorRAW():
     ) -> None:
         # This means we can afford full calculation.
         self.full_train_dataloader = full_train_dataloader
-        self.cached_ihvp_train = self._iHVP(full_train_dataloader)
+        self.cached_ihvp_train = self._iFVP(full_train_dataloader)
 
     def attribute(
         self,
@@ -254,7 +263,7 @@ class GCIFAttributorRAW():
         train_dataloader: Optional[torch.utils.data.DataLoader] = None,
     ) -> torch.Tensor:
         """
-        Compute influence scores using K-FAC approximation.
+        Compute influence scores using FIM approximation.
 
         Args:
             test_dataloader: DataLoader for test data
@@ -270,9 +279,9 @@ class GCIFAttributorRAW():
 
         IF_score = torch.zeros(num_train, len(test_dataloader.sampler), device=self.device)
 
-        # Compute K-FAC factors if not cached
+        # Compute FIM factors if not cached
         if train_dataloader is not None and self.full_train_dataloader is None:
-            ihvp_train = self._iHVP(train_dataloader)
+            ihvp_train = self._iFVP(train_dataloader)
         else:
             ihvp_train = self.cached_ihvp_train
 
@@ -284,7 +293,7 @@ class GCIFAttributorRAW():
             test_attention_masks = test_batch["attention_mask"].to(self.device)
             test_labels = test_batch["labels"].to(self.device)
 
-             # Time backward pass
+             # Time forward pass
             if self.profile:
                 torch.cuda.synchronize()
                 start_time = time.time()
@@ -294,15 +303,25 @@ class GCIFAttributorRAW():
                 attention_mask=test_attention_masks,
                 labels=test_labels
             )
+
+            if self.profile:
+                torch.cuda.synchronize()
+                self.profiling_stats['forward'] += time.time() - start_time
+
             logp = -outputs.loss
             test_loss = logp - torch.log(1 - torch.exp(logp))
+
+            # Time backward pass
+            if self.profile:
+                torch.cuda.synchronize()
+                start_time = time.time()
 
             test_pre_acts = [layer.pre_activation for layer in self.layer_name]
             Z_grad_test = torch.autograd.grad(test_loss, test_pre_acts, retain_graph=True)
 
             if self.profile:
                 torch.cuda.synchronize()
-                self.profiling_stats['gradient'] += time.time() - start_time
+                self.profiling_stats['backward'] += time.time() - start_time
 
             with torch.no_grad():
                 for layer_id, (layer, z_grad_test) in enumerate(zip(self.layer_name, Z_grad_test)):
