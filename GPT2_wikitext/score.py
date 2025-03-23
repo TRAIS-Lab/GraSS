@@ -660,15 +660,6 @@ def main():
         assert args.layer == "Linear", "LoGra only supports Linear setting now."
         assert args.projection is not None, "LoGra requires projection method."
 
-        init_method, rank = args.projection.split("-")
-
-        init_method = init_method.lower()
-        if "*" in rank:
-            rank = rank.split("*")
-            assert rank[0] == rank[1], "Projection dimension must be the same for factorized projection."
-
-            rank = int(rank[0]) # Convert to integer
-
         model = LoGra_GPT2(checkpoint, config, resume=True).cuda(device)
         model.eval()
 
