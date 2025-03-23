@@ -53,7 +53,7 @@ def precondition_kfac(
         # Precondition the gradient using eigenvectors and eigenvalues
         rotated_grad = einsum(
             bwd_eigvec.t(),
-            src_grad,
+            src_grad.view(src_grad.shape[0], bwd_eigvec.shape[0], fwd_eigvec.shape[0]),
             fwd_eigvec,
             "a b, batch b c, c d -> batch a d",
         )
@@ -63,7 +63,7 @@ def precondition_kfac(
             prec_rotated_grad,
             fwd_eigvec.t(),
             "a b, batch b c, c d -> batch a d",
-        )
+        ).reshape(src_grad.shape)
 
     return preconditioned
 
