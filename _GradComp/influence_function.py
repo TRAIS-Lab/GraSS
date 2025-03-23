@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 import time
 
-def eigen_stable_inverse(matrix: torch.Tensor, damping: float = 1e-5, eigen_threshold: float = 1e-6) -> torch.Tensor:
+def eigen_stable_inverse(matrix: torch.Tensor, damping: float = 1e-6, eigen_threshold: float = 1e-6) -> torch.Tensor:
     """
     Compute a numerically stable inverse of a matrix using eigendecomposition.
 
@@ -55,7 +55,7 @@ class GCIFAttributorRAW():
         self,
         model,
         layer_name: Optional[Union[str, List[str]]],
-        damping = 1e-4,
+        damping = 1e-6,
         profile: bool = False,
         device: str = 'cpu'
     ) -> None:

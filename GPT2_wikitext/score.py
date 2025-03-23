@@ -608,9 +608,9 @@ def main():
     checkpoint = f"{args.output_dir}/{model_id}"
 
     profile = None
-    if args.baseline == "GC":
+    if args.baseline == "GC":#TODO: merge GC with IF-RAW
+        check_min_version("4.46.0")
         from GC.utlis import find_GClayers
-        # check_min_version("4.46.0") # Gradient Component is built on top of 4.46.0
 
         model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
         model.set_projectors(projector_kwargs, train_dataloader)
@@ -674,12 +674,10 @@ def main():
 
         influence_calc = LoraInfluence(
             model=model,
-            layer_type=args.layer,
-            rank=rank,
+            layer_name=args.layer, #TODO: fix to match
             hessian=hessian,
-            init_method=init_method,
+            projector_kwargs=projector_kwargs,
             cpu_offload=True,
-            label_key="input_ids"
         )
 
         influence_calc.extract_training_data(train_dataloader=train_dataloader)
