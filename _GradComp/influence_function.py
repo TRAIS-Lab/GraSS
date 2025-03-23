@@ -86,7 +86,7 @@ class GCIFAttributorRAW():
                 'inverse_hessian': 0.0
             }
 
-    def KFAC_iHVP(
+    def _iHVP(
         self,
         train_dataloader: torch.utils.data.DataLoader,
     ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
@@ -212,7 +212,7 @@ class GCIFAttributorRAW():
     ) -> None:
         # This means we can afford full calculation.
         self.full_train_dataloader = full_train_dataloader
-        self.cached_ihvp_train = self.KFAC_iHVP(full_train_dataloader)
+        self.cached_ihvp_train = self._iHVP(full_train_dataloader)
 
     def attribute(
         self,
@@ -272,7 +272,7 @@ class GCIFAttributorRAW():
 
         # Compute K-FAC factors if not cached
         if train_dataloader is not None and self.full_train_dataloader is None:
-            ihvp_train = self.KFAC_iHVP(train_dataloader)
+            ihvp_train = self._iHVP(train_dataloader)
         else:
             ihvp_train = self.cached_ihvp_train
 
