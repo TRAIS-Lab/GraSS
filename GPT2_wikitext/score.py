@@ -582,8 +582,8 @@ def main():
     train_batch_size, test_batch_size = batch_size(args.baseline, args.tda)
 
     if args.debug: # toy dataset
-        train_dataset = train_dataset.select(range(64))
-        test_dataset = test_dataset.select(range(64))
+        train_dataset = train_dataset.select(range(8))
+        test_dataset = test_dataset.select(range(4))
     train_sampler = SubsetSampler(range(len(train_dataset)))
     train_dataloader = DataLoader(
         train_dataset, collate_fn=default_data_collator, batch_size=train_batch_size, sampler=train_sampler
@@ -761,7 +761,7 @@ def main():
 
         influence_calc.extract_training_data(train_dataloader=train_dataloader)
 
-        result = influence_calc.compute_influence(test_dataloader=test_dataloader, damping=1e-5)
+        result = influence_calc.compute_influence(test_dataloader=test_dataloader)
         score = result["influence"]
 
     elif args.baseline == "dattri":
@@ -855,7 +855,6 @@ def main():
     else:
         raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'LoGra', and 'dattri'.")
 
-    print(score)
     training_setting = args.output_dir.split("/")[-1]
     lds_score, _, _ = lds(score, training_setting)
 
