@@ -668,13 +668,16 @@ def main():
             layer_name=args.layer, #TODO: fix to match
             hessian=hessian,
             projector_kwargs=projector_kwargs,
+            profile=args.profile,
             cpu_offload=True,
         )
 
         influence_calc.extract_training_data(train_dataloader=train_dataloader)
 
-        result = influence_calc.compute_influence(test_dataloader=test_dataloader)
-        score = result["influence"]
+        if args.profile:
+            score, profile = influence_calc.compute_influence(test_dataloader=test_dataloader)
+        else:
+            score = influence_calc.compute_influence(test_dataloader=test_dataloader)
 
     elif args.baseline == "LogIX":
         #check_min_version("4.46.0") # LogIX is built on top of 4.40.0, ignore the checking

@@ -10,43 +10,32 @@ from tqdm import tqdm
 
 import time
 
-def eigen_stable_inverse(matrix: torch.Tensor, damping: float = 1e-6, eigen_threshold: float = 1e-6) -> torch.Tensor:
+def eigen_stable_inverse(matrix: torch.Tensor, damping: float = None) -> torch.Tensor:
     """
     Compute a numerically stable inverse of a matrix using eigendecomposition.
 
     Args:
         matrix: Input matrix to invert
         damping: Damping factor for numerical stability
-        eigen_threshold: Threshold for small eigenvalues
 
     Returns:
         Stable inverse of the input matrix
     """
     # Add damping to the diagonal
-    matrix = matrix + damping * torch.eye(matrix.shape[0], device=matrix.device)
+    if damping is None:
+        damping = 0.1 * torch.trace(matrix) / matrix.size(0)
 
-    # Compute eigendecomposition
+    damped_matrix = matrix + damping * torch.eye(matrix.size(0), device=matrix.device)
+
+    # Compute inverse
     try:
-        eigenvalues, eigenvectors = torch.linalg.eigh(matrix)
+        # Try Cholesky decomposition first (more stable)
+        L = torch.linalg.cholesky(damped_matrix)
+        inverse = torch.cholesky_inverse(L)
     except RuntimeError:
-        # If eigendecomposition fails, try with larger damping
-        matrix = matrix + 9 * damping * torch.eye(matrix.shape[0], device=matrix.device)
-        eigenvalues, eigenvectors = torch.linalg.eigh(matrix)
-
-    # Print the condition number of the matrix
-    print(f"Condition number: {eigenvalues[-1] / eigenvalues[0]}")
-
-    # Filter small eigenvalues
-    eigenvalues = torch.clamp(eigenvalues, min=eigen_threshold)
-
-    # Compute inverse using eigendecomposition
-    inverse = torch.matmul(
-        eigenvectors,
-        torch.matmul(
-            torch.diag(1.0 / eigenvalues),
-            eigenvectors.t()
-        )
-    )
+        print(f"Falling back to direct inverse due to Cholesky failure")
+        # Fall back to direct inverse
+        inverse = torch.inverse(damped_matrix)
 
     return inverse
 
@@ -55,7 +44,7 @@ class GCIFAttributorRAW():
         self,
         model,
         layer_name: Optional[Union[str, List[str]]],
-        damping = 1e-6,
+        damping = None,
         profile: bool = False,
         device: str = 'cpu'
     ) -> None:
@@ -193,21 +182,14 @@ class GCIFAttributorRAW():
             torch.cuda.synchronize()
             start_time = time.time()
 
+        print(f"Calculating iHVP...")
         # Add damping term and compute inverses
         for layer_id in range(num_layers):
-            print(f"Calculating iHVP of Layer {layer_id}:")
             # Compute inverses using Cholesky decomposition for stability
-            try:
-                ihvp_train[layer_id] = torch.matmul(
-                    eigen_stable_inverse(Hessian[layer_id], damping=self.damping),
-                    train_grad[layer_id].t()
-                ).t()
-            except RuntimeError as e:
-                print(f"Warning: Layer {layer_id} required increased damping for stability")
-                ihvp_train[layer_id] = torch.matmul(
-                    eigen_stable_inverse(Hessian[layer_id], damping=self.damping * 100),
-                    train_grad[layer_id].t()
-                ).t()
+            ihvp_train[layer_id] = torch.matmul(
+                eigen_stable_inverse(Hessian[layer_id], damping=self.damping),
+                train_grad[layer_id].t()
+            ).t()
 
         if self.profile:
             torch.cuda.synchronize()

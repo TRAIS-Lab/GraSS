@@ -864,6 +864,10 @@ class LoraInfluence:
         # Initialize influence matrix
         IF_score = torch.zeros((num_train_samples, num_test_samples), device=self.train_gradients.device)
 
+        if self.profile:
+            torch.cuda.synchronize()
+            start_time = time.time()
+
         # Compute influence scores based on hessian approximation
         if self.hessian == "none":
             for module_name in self.lora_module_names:
@@ -872,10 +876,6 @@ class LoraInfluence:
                 train_layer_grads = self.train_gradients[layer_idx]
                 layer_influence = torch.matmul(train_layer_grads, test_layer_grads.t())
                 IF_score += layer_influence
-
-        if self.profile:
-            torch.cuda.synchronize()
-            start_time = time.time()
 
         elif self.hessian == "raw":
             if not hasattr(self, 'covariance_inverse'):
