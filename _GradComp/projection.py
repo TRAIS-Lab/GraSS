@@ -565,7 +565,6 @@ class CudaProjector(AbstractProjector):
 
             result = features @ proj_matrix / (self.proj_dim ** 0.5)
         elif self.method == "Identity":
-            torch.cuda.synchronize()
             features = features[:, self.active_indices]
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
             result = features
