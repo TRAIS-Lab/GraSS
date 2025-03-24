@@ -27,9 +27,7 @@ from transformers.trainer import *
 from _LogIX import LogIX, LogIXScheduler
 from _LogIX.huggingface.arguments import LogIXArguments
 from _LogIX.huggingface.callback import LogIXCallback
-from _LogIX.utils import DataIDGenerator
-
-from _dattri.benchmark.utils import SubsetSampler
+from _LogIX.utils import DataIDGenerator,SubsetSampler
 
 def patch_trainer(TrainerClass):
     """

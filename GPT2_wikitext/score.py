@@ -570,8 +570,7 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from _dattri.benchmark.utils import SubsetSampler
-    from GPT2_wikitext.utlis import batch_size, setup_projection_kwargs, result_filename, lds
+    from GPT2_wikitext.utils import SubsetSampler, batch_size, setup_projection_kwargs, result_filename, lds
 
     device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
@@ -756,8 +755,8 @@ def main():
         score = result["influence"].T
 
     elif args.baseline == "dattri":
+        from _dattri.task import AttributionTask
         if args.tda == "GD": #TODO: fix
-            from _dattri.task import AttributionTask
             from _dattri.algorithm.tracin import TracInAttributor
 
             # need to ensure model is in eval before defining f
@@ -801,7 +800,6 @@ def main():
                 with torch.no_grad():
                     score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
         elif args.tda == "TRAK": #TODO: fix
-            from _dattri.task import AttributionTask
             from _dattri.algorithm.trak import TRAKAttributor
 
             # need to ensure model is in eval before defining f

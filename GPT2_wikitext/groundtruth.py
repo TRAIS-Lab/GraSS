@@ -32,10 +32,6 @@ from itertools import chain
 from pathlib import Path
 import csv
 
-import sys
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.append(parent_dir)
-
 import datasets
 import torch
 from accelerate import Accelerator, DistributedType
@@ -60,7 +56,7 @@ from transformers import (
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
-from dattri.benchmark.utils import SubsetSampler
+from .utils import SubsetSampler
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
