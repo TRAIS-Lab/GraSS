@@ -60,7 +60,7 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from GC.GPT2LMHeadModel import GCGPT2LMHeadModel
+from GradComp.GPT2LMHeadModel import GCGPT2LMHeadModel
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
@@ -297,12 +297,7 @@ def parse_args():
         "--projection",
         type=str,
         default=None,
-        help="The projection method to be used when attributing. Basic format: 'proj_method-proj_dim'.",
-    )
-    parser.add_argument(
-        "--proj_factorize",
-        action="store_true",
-        help="If passed, will use factorized projection, i.e., the projection will be applied on the gradient components rather on the gradients.",
+        help="The projection method to be used when attributing. Basic format: 'proj_method-proj_dim' for non-factorized gradient and 'proj_method-proj_dim*proj_dim' for factorized gradient.",
     )
     parser.add_argument(
         "--threshold",
@@ -315,6 +310,12 @@ def parse_args():
         type=float,
         default=0.0,
         help="Randomly drop the specified percentage of the projection input dimensions.",
+    )
+    parser.add_argument(
+        "--localize",
+        type=float,
+        default=0.0,
+        help="Percentage of localized parameters to be considered.",
     )
 
     args = parser.parse_args()
@@ -594,11 +595,11 @@ def main():
     projector_kwargs = setup_projection_kwargs(args, device)
 
     # Logging setting
-    logger.info(f"The training dataset length: {len(train_dataset)}.")
-    logger.info(f"The eval dataset length: {len(test_dataset)}.")
-    logger.info(f"TDA Method: {args.tda}")
-    logger.info(f"The training batch size: {train_batch_size}")
-    logger.info(f"The eval batch size: {test_batch_size}")
+    logger.info(f"The train dataset length: {len(train_dataset)}.")
+    logger.info(f"The test dataset length: {len(test_dataset)}.")
+    logger.info(f"The train batch size: {train_batch_size}")
+    logger.info(f"The test batch size: {test_batch_size}")
+    logger.info(f"TDA Method: {args.baseline}-{args.tda}")
     logger.info(f"Projector: {projector_kwargs}")
     logger.info(f"Layer: {args.layer}")
     logger.info("***** Running attribution *****")
@@ -607,9 +608,9 @@ def main():
     checkpoint = f"{args.output_dir}/{model_id}"
 
     profile = None
-    if args.baseline == "GC":#TODO: merge GC with IF-RAW
+    if args.baseline == "GC": #TODO: merge GC with IF-RAW
         check_min_version("4.46.0")
-        from GC.utlis import find_GClayers
+        from GPT2_wikitext.GradComp.utils import find_GClayers
 
         model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
         model.set_projectors(projector_kwargs, train_dataloader)

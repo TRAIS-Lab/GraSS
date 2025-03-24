@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 import time
 
-def eigen_stable_inverse(matrix: torch.Tensor, damping: float = None) -> torch.Tensor:
+def stable_inverse(matrix: torch.Tensor, damping: float = None) -> torch.Tensor:
     """
     Compute a numerically stable inverse of a matrix using eigendecomposition.
 
@@ -21,13 +21,20 @@ def eigen_stable_inverse(matrix: torch.Tensor, damping: float = None) -> torch.T
     Returns:
         Stable inverse of the input matrix
     """
+    # sometimes the matrix is a single number, so we need to check if it's a scalar
+    if len(matrix.shape) == 0:
+        if matrix == 0:
+            # return a 2d 0 tensor
+            return torch.tensor([[0.0]], device=matrix.device)
+        else:
+            return torch.tensor([[1.0 / (matrix * 1.1)]], device=matrix.device)
+
     # Add damping to the diagonal
     if damping is None:
         damping = 0.1 * torch.trace(matrix) / matrix.size(0)
 
     damped_matrix = matrix + damping * torch.eye(matrix.size(0), device=matrix.device)
 
-    # Compute inverse
     try:
         # Try Cholesky decomposition first (more stable)
         L = torch.linalg.cholesky(damped_matrix)
@@ -185,9 +192,8 @@ class GCIFAttributorRAW():
         print(f"Calculating iHVP...")
         # Add damping term and compute inverses
         for layer_id in range(num_layers):
-            # Compute inverses using Cholesky decomposition for stability
             ihvp_train[layer_id] = torch.matmul(
-                eigen_stable_inverse(Hessian[layer_id], damping=self.damping),
+                stable_inverse(Hessian[layer_id], damping=self.damping),
                 train_grad[layer_id].t()
             ).t()
 

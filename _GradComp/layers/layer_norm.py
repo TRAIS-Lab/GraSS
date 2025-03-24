@@ -10,7 +10,7 @@ import torch.nn as nn
 
 from torch import Tensor
 
-from _GradComp.projection import random_project
+from ..projection import random_project
 
 class GCLayerNorm(nn.LayerNorm):
     """

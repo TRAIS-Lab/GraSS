@@ -7,7 +7,7 @@ from transformers import GPT2LMHeadModel, GPT2Tokenizer
 from transformers.models.gpt2.modeling_gpt2 import Conv1D
 from _GradComp.layers.linear import GCLinear, GCEmbedding
 from _GradComp.layers.layer_norm import GCLayerNorm
-from GC.utlis import transpose_Conv1D
+from GPT2_wikitext.GradComp.utils import transpose_Conv1D
 import torch
 import torch.nn as nn
 import os
@@ -147,9 +147,12 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
         projector_kwargs.pop("proj_factorize")
 
         # Apply projectors to all GC layers
-        for module_id, module in enumerate(self.modules()):
+        for module_id, (module_name, module) in enumerate(self.named_modules()):
             if isinstance(module, GCLinear) or isinstance(module, GCEmbedding) or isinstance(module, GCLayerNorm):
                 base_seed = proj_seed + int(1e4) * module_id
+                print(f"Setting projector for {module_name}...")
+                # push module_name to projector_kwargs
+                projector_kwargs["module_name"] = module_name
                 module.set_projector(base_seed, projector_kwargs, proj_factorize)
 
 

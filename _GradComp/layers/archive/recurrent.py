@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.nn import Parameter
-from GC.layers.archive.base_layer import BasePGradLayer
+from .base_layer import BasePGradLayer
 
 
 class RNNModule(nn.RNN):

@@ -1,4 +1,13 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from typing import Iterator, List
+
 import torch
+from torch.utils.data import Sampler
+
 import numpy as np
 from scipy.stats import spearmanr
 import csv
@@ -92,20 +101,28 @@ def setup_projection_kwargs(args, device):
         proj_method = "Identity"
         proj_factorize = False
         proj_dim = -1
-
-    proj_method, proj_dim = args.projection.split("-")
-    # proj_dim might be of the form 'proj_dim*proj_dim' for factorized projection, for simply 'proj_dim' for non-factorized projection
-    if "*" in proj_dim:
-        proj_factorize = True
-        proj_dim = proj_dim.split("*")
-        assert proj_dim[0] == proj_dim[1], "Projection dimension must be the same for factorized projection."
-
-        proj_dim = int(proj_dim[0]) # Convert to integer
-        if proj_method == "SJLT":
-            assert int(proj_dim[0]) > 512, "Projection dimension must be greater than 512 for to project the entire gradient to avoid the slow down due to local collisions."
     else:
-        proj_factorize = False
-        proj_dim = int(proj_dim) # Convert to integer
+        proj_method, proj_dim = args.projection.split("-")
+
+        # proj_dim might be of the form 'proj_dim*proj_dim' for factorized projection, for simply 'proj_dim' for non-factorized projection
+        if "*" in proj_dim:
+            proj_factorize = True
+            proj_dim = proj_dim.split("*")
+            assert proj_dim[0] == proj_dim[1], "Projection dimension must be the same for factorized projection."
+
+            proj_dim = int(proj_dim[0]) # Convert to integer
+            if proj_method == "SJLT":
+                assert int(proj_dim[0]) > 512, "Projection dimension must be greater than 512 for to project the entire gradient to avoid the slow down due to local collisions."
+        else:
+            proj_factorize = False
+            proj_dim = int(proj_dim) # Convert to integer
+
+    # Compatibility checking
+    if args.localize != 0.0:
+        assert proj_method == "Identity", "Localize option can't be combined with projection."
+        assert proj_factorize == False, "Localize option can't be combined with factorized projection."
+        assert args.random_drop == 0.0, "Localize option can't be combined with random drop."
+        # assert args.threshold == 0.0, "Localize option can't be combined with threshold."
 
     projector_kwargs = {
         "proj_dim": proj_dim,
@@ -117,6 +134,7 @@ def setup_projection_kwargs(args, device):
         "use_half_precision": False,
         "threshold": args.threshold,
         "random_drop": args.random_drop,
+        "localize": args.localize,
     }
 
     return projector_kwargs
@@ -152,8 +170,11 @@ def result_filename(args):
     if args.projection is not None:
         filename_parts.append(args.projection)
 
-    filename_parts.append(f"thrd-{args.threshold}")
-    filename_parts.append(f"rdp-{args.random_drop}")
+    if args.localize != 0.0:
+        filename_parts.append(f"loc-{args.localize}")
+    else:
+        filename_parts.append(f"thrd-{args.threshold}")
+        filename_parts.append(f"rdp-{args.random_drop}")
 
     training_setting = args.output_dir.split("/")[-1]
     # Join parts and save the file

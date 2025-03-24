@@ -18,14 +18,20 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Dict, List, Union
 
-import warnings
+import os
+import sys
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(parent_dir)
 
 import numpy as np
+import random
 import torch
 from torch import Tensor
 
-from .utils import _vectorize as vectorize
-from .utils import get_parameter_chunk_sizes
+from _GradComp.utils import _vectorize as vectorize
+from _GradComp.utils import get_parameter_chunk_sizes
+
+from GPT2_wikitext.localize.utils import active_localize_indices
 
 
 class ProjectionType(str, Enum):
@@ -34,7 +40,6 @@ class ProjectionType(str, Enum):
     normal: str = "normal"
     rademacher: str = "rademacher"
     identity: str = "identity"
-    # kaiming: str = "kaiming"
 
 
 class AbstractProjector(ABC):
@@ -117,8 +122,10 @@ class BasicProjector(AbstractProjector):
         dtype: torch.dtype = torch.float32,
         ensemble_id: int = 0,
         method: str = "Gaussian",
+        module_name: str = "",
         threshold: float = 1e-7,
         random_drop: float = 0.0,
+        localize: float = 0.0,
         pre_compute: bool = False,
     ) -> None:
         """Initializes hyperparameters for BasicProjector.
@@ -273,8 +280,10 @@ class CudaProjector(AbstractProjector):
         device: str,
         max_batch_size: int,
         method: str,
+        module_name: str = "",
         threshold: float = 1e-7,
         random_drop: float = 0.0,
+        localize: float = 0.0,
         pre_compute: bool = False,
     ) -> None:
         """Initializes hyperparameters for CudaProjector.
@@ -292,6 +301,12 @@ class CudaProjector(AbstractProjector):
                 the CudaProjector is going to use for projection.
                 Set this if you get a 'The batch size of the CudaProjector is
                 too large for your GPU' error. Must be either 8, 16, or 32.
+            method (str): The method used for the projection.
+            module_name (str): The name of the module to be projected.
+            threshold (float): The threshold used before applying projection.
+            random_drop (float): The probability of dropping a feature.
+            localize (float): The localization sparsity.
+            pre_compute (bool): If True, the projection construction will be pre-computed
 
         Raises:
             ValueError: When attempting to use this on a non-CUDA device.
@@ -300,9 +315,28 @@ class CudaProjector(AbstractProjector):
         super().__init__(feature_dim, proj_dim, seed, proj_type, device)
         self.max_batch_size = max_batch_size
         self.threshold = threshold
+        self.module_name = module_name
 
-        active_mask = torch.rand(feature_dim, device=device) > random_drop
+        if localize > 0.0:
+            mask_path = f"../GPT2_wikitext/localize/{localize}/mask.pt" #TODO: fix this to be more general
+            model_name_or_path = "openai-community/gpt2" #TODO: fix this to be more general
+
+            # Get active indices from localization mask
+            active_indices = active_localize_indices(mask_path, module_name, model_name_or_path=model_name_or_path, device=device)
+            if active_indices is not None:
+                # Use the active indices to create a mask
+                active_mask = torch.zeros(feature_dim, device=device, dtype=torch.bool)
+                active_mask[active_indices] = True
+            else:
+                # Fallback if module not found in mask
+                active_mask = torch.ones(feature_dim, device=device, dtype=torch.bool)
+        else:
+            active_mask = torch.rand(feature_dim, device=device) > random_drop
+
         self.active_indices = torch.nonzero(active_mask).squeeze()
+        # if active_indices is a single element, then it will be a 0-dim tensor
+        if self.active_indices.dim() == 0:
+            self.active_indices = self.active_indices.unsqueeze(0)
 
         self.pre_compute = pre_compute
 
@@ -366,16 +400,14 @@ class CudaProjector(AbstractProjector):
                     proj_dim,
                     device=device,
                 )
-        # elif self.method == "Kaiming":
-        #     if self.pre_compute:
-        #         active_dim = self.active_indices.numel()
-        #         torch.manual_seed(self.seed)
-        #         self.proj_matrix = torch.empty(
-        #             active_dim,
-        #             proj_dim,
-        #             device=device,
-        #         )
-        #         torch.nn.init.kaiming_uniform_(self.proj_matrix.T, a=math.sqrt(5))
+        elif self.method == "Identity":
+            # Subsample self.active_indices if the total active indices is larger than proj_dim
+            active_dim = self.active_indices.numel()
+            if active_dim > proj_dim:
+                print(f"Reduced active indices from {active_dim} to {proj_dim} to avoid OOM.")
+                torch.manual_seed(self.seed)
+                indices = torch.randperm(active_dim)[:proj_dim]
+                self.active_indices = self.active_indices[indices]
 
 
     def project(
@@ -533,19 +565,10 @@ class CudaProjector(AbstractProjector):
 
             result = features @ proj_matrix / (self.proj_dim ** 0.5)
         elif self.method == "Identity":
-            # active_dim = self.active_indices.numel()
-            # features = features[:, self.active_indices]
-            # features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
-            # result = features
-
-            # use all-one projection matrix for debugging
-            proj_matrix = torch.ones(self.feature_dim, self.proj_dim, device=self.device)
-            result = features @ proj_matrix
-        # elif self.method == "Kaiming":
-        #     features = features[:, self.active_indices]
-        #     features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
-
-        #     result = features @ self.proj_matrix
+            torch.cuda.synchronize()
+            features = features[:, self.active_indices]
+            features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
+            result = features
 
         return result
 
@@ -738,8 +761,10 @@ def make_random_projector(
     method: str = "Gaussian",
     *,
     use_half_precision: bool = True,
+    module_name: str = "",
     threshold: float = 1e-7,
     random_drop: float = 0.0,
+    localize: float = 0.0,
     pre_compute: bool = False,
 ) -> Tensor:
     """Initialize random projector by the info of feature about to be projected.
@@ -758,8 +783,14 @@ def make_random_projector(
             batch size is 32 for A100 GPUs, 16 for V100 GPUs, 40 for H100 GPUs.
         device (str): "cuda" or "cpu".
         proj_seed (int): Random seed used by the projector. Defaults to 0.
+        method (str): The method used for the projection.
         use_half_precision (bool): If True, torch.float16 will be used for all
             computations and arrays will be stored in torch.float16.
+        module_name (str): The name of the module to be projected.
+        threshold (float): The threshold used before applying projection.
+        random_drop (float): The probability of dropping a feature.
+        localize (float): The localization sparsity.
+        pre_compute (bool): If True, the projection construction will be pre-computed
 
     Returns:
         The projected feature with shape [batch_size, proj_dim].
@@ -838,8 +869,10 @@ def make_random_projector(
                     max_batch_size=proj_max_batch_size,
                     device=device,
                     method=method,
+                    module_name=module_name,
                     threshold=threshold,
                     random_drop=random_drop,
+                    localize=localize,
                     pre_compute=pre_compute,
                 )
                 for i, chunk_size in enumerate(param_chunk_sizes)
@@ -863,8 +896,10 @@ def make_random_projector(
             max_batch_size=proj_max_batch_size,
             device=device,
             method=method,
+            module_name=module_name,
             threshold=threshold,
             random_drop=random_drop,
+            localize=localize,
             pre_compute=pre_compute,
         )
     elif projector == BasicProjector:
@@ -876,108 +911,14 @@ def make_random_projector(
             dtype=dtype,
             device=device,
             method=method,
+            module_name=module_name,
             threshold=threshold,
             random_drop=random_drop,
+            localize=localize,
             pre_compute=pre_compute,
         )
 
     return assigned_projector
-
-
-def arnoldi_project(
-    feature_dim: int,
-    func: Callable,
-    x: List,
-    argnums: int = 0,
-    proj_dim: int = 100,
-    max_iter: int = 100,
-    norm_constant: float = 1.0,
-    tol: float = 1e-7,
-    mode: str = "rev-fwd",
-    regularization: float = 0.0,
-    seed: int = 0,
-    device: torch.device = "cpu",
-) -> Callable:
-    """Apply Arnoldi algorithm to approximate iHVP.
-
-    Args:
-        feature_dim (int): Dimension of the features to be projected. Typically,
-            this equals the number of parameters in the model (dimension of the
-            gradient vectors).
-        func (Callable): A Python function that takes one or more arguments.
-            Must return a single-element Tensor. The Hessian will be calculated
-            on this function. The positional arguments to func must all be
-            Tensors.
-        x (List): List of arguments for `func`.
-        argnums (int): An integer defaulting to 0. Specifies which argument of
-            func to compute Hessian with respect to.
-        proj_dim (int): Dimension after the projection. This corresponds to the
-            number of top eigenvalues (top-k eigenvalues) to keep for the
-            Hessian approximation.
-        max_iter (int): An integer defaulting to 100. Specifies the maximum
-            iteration to calculate the ihvp through Arnoldi Iteration.
-        norm_constant (float): A float defaulting to 1.0. Specifies a constant
-            value for the norm of each projection. In some situations (e.g.
-            with a large number of parameters) it might be advisable to set
-            norm_constant > 1 to avoid dividing projection components by a
-            large normalization factor.
-        tol (float): A float defaulting to 1e-7. Specifies the break condition
-            that decides if the algorithm has converged. If the torch.norm of
-            the current basis vector is less than tol, then the algorithm is
-            truncated.
-        mode (str): The auto diff mode, which can have one of the following
-            values:
-            - rev-rev: calculate the Hessian with two reverse-mode auto-diff.
-              It has better compatibility while costing more memory.
-            - rev-fwd: calculate the Hessian with the composition of
-              reverse-mode and forward-mode. It's more memory-efficient but may
-              not be supported by some operators.
-        regularization (float): A float defaulting to 0.0. Specifies the
-            regularization term to be added to the Hessian vector product,
-            which is useful for the later inverse calculation if the Hessian
-            matrix is singular or ill-conditioned. Specifically, the
-            regularization term is `regularization * v`.
-        seed (int): Random seed used by the projector. Defaults to 0.
-        device (torch.device): "cuda" or "cpu". Defaults to "cpu".
-
-    Returns:
-        A function that applies Arnoldi algorithm on input feature.
-    """
-    # init arnoldi projector
-    projector = ArnoldiProjector(
-        feature_dim,
-        proj_dim,
-        func,
-        x,
-        argnums,
-        max_iter,
-        norm_constant,
-        tol,
-        mode,
-        regularization,
-        seed,
-        device,
-    )
-
-    def _arnoldi_project_func(
-        feature: Union[Dict[str, Tensor], Tensor],
-    ) -> Tensor:
-        """The projection function using constructed projector.
-
-        Args:
-            feature (Union[Dict[str, Tensor], Tensor]): The feature needs to be
-                projected. This can simple be a tensor with size [feature_batch_size,
-                feature_dim]. Or typically, if the this is gradient of some
-                torch.nn.Module models, it will have the structure similar to the
-                result of model.named_parameters().
-
-        Returns:
-            The projected result of feature, which is a tensor with size
-                [feature_batch_size, proj_dim].
-        """
-        return projector.project(feature)
-
-    return _arnoldi_project_func
 
 
 def random_project(
@@ -990,8 +931,10 @@ def random_project(
     method: str = "Gaussian",
     *,
     use_half_precision: bool = True,
+    module_name: str = "",
     threshold: float = 1e-7,
     random_drop: float = 0.0,
+    localize: float = 0.0,
     pre_compute: bool = False,
 ) -> Callable:
     """Randomly projects the features to a smaller dimension.
@@ -1011,8 +954,14 @@ def random_project(
             batch size is 32 for A100 GPUs, 16 for V100 GPUs, 40 for H100 GPUs.
         device (str): "cuda" or "cpu".
         proj_seed (int): Random seed used by the projector. Defaults to 0.
+        method (str): The method used for the projection.
         use_half_precision (bool): If True, torch.float16 will be used for all
             computations and arrays will be stored in torch.float16.
+        module_name (str): The name of the module to be projected.
+        threshold (float): The threshold used before applying projection.
+        random_drop (float): The probability of dropping a feature.
+        localize (float): The localization sparsity.
+        pre_compute (bool): If True, the projection construction will be pre-computed
 
     Returns:
         A function that takes projects feature to a smaller dimension.
@@ -1034,8 +983,10 @@ def random_project(
         proj_seed=proj_seed,
         method=method,
         use_half_precision=use_half_precision,
+        module_name=module_name,
         threshold=threshold,
         random_drop=random_drop,
+        localize=localize,
         pre_compute=pre_compute,
     )
 

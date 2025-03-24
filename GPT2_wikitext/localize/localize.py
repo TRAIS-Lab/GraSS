@@ -14,6 +14,7 @@ import torch.nn as nn
 import numpy as np
 from tqdm.auto import tqdm
 import copy
+import time
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -62,16 +63,27 @@ class Localizer(nn.Module):
         self.create_binary_masks()
 
     def _get_trainable_params(self):
-        """Get dictionary of trainable parameters from transformer blocks"""
+        """Get dictionary of trainable parameters including transformer blocks and ln_f"""
         params = {}
         for n, p in self.model.named_parameters():
-            # Only select parameters from transformer blocks (not embeddings or lm_head)
-            if 'transformer.h' in n:
+            # Include transformer blocks and final layer norm
+            if 'transformer.h' in n or 'transformer.ln_f' in n:
                 params[n] = p
+
+        # Handle lm_head (which may be tied to word embeddings)
+        # We need to specifically access it through the model's attributes
+        if hasattr(self.model, 'lm_head'):
+            # For models with explicit lm_head attribute
+            params['lm_head.weight'] = self.model.lm_head.weight
+        elif hasattr(self.model, 'transformer') and hasattr(self.model.transformer, 'wte'):
+            # For models with weight tying to embedding
+            # We'll create a reference to the embedding weights with a different name
+            params['lm_head.weight'] = self.model.transformer.wte.weight
+
         return params
 
     def create_binary_masks(self):
-        """Initialize mask parameters and task vectors"""
+        """Initialize mask parameters and task vectors with lm_head support"""
         self.trainable_name = []
         self.trainable_parameters = []
 
@@ -85,24 +97,40 @@ class Localizer(nn.Module):
 
         # Create task vectors (difference between finetuned and pretrained)
         self.task_vectors = []
-        for name in self.trainable_name:
-            pretensor = None
-            finetensor = None
 
-            for pre_n, pre_p in self.pretrained_model.named_parameters():
-                if pre_n == name:
-                    pretensor = pre_p.to(self.device)
+        for i, name in enumerate(self.trainable_name):
+            if name == 'lm_head.weight':
+                # Special handling for lm_head
+                if hasattr(self.pretrained_model, 'lm_head'):
+                    pretensor = self.pretrained_model.lm_head.weight.to(self.device)
+                else:
+                    pretensor = self.pretrained_model.transformer.wte.weight.to(self.device)
 
-            for fine_n, fine_p in self.finetuned_model.named_parameters():
-                if fine_n == name:
-                    finetensor = fine_p.to(self.device)
+                if hasattr(self.finetuned_model, 'lm_head'):
+                    finetensor = self.finetuned_model.lm_head.weight.to(self.device)
+                else:
+                    finetensor = self.finetuned_model.transformer.wte.weight.to(self.device)
 
-            if pretensor is not None and finetensor is not None:
                 self.task_vectors.append((finetensor - pretensor).detach())
             else:
-                # Handle case where parameter name doesn't match
-                logger.warning(f"Parameter {name} not found in both models")
-                self.task_vectors.append(torch.zeros_like(self.trainable_params[name]))
+                # Regular parameter handling
+                pretensor = None
+                finetensor = None
+
+                for pre_n, pre_p in self.pretrained_model.named_parameters():
+                    if pre_n == name:
+                        pretensor = pre_p.to(self.device)
+
+                for fine_n, fine_p in self.finetuned_model.named_parameters():
+                    if fine_n == name:
+                        finetensor = fine_p.to(self.device)
+
+                if pretensor is not None and finetensor is not None:
+                    self.task_vectors.append((finetensor - pretensor).detach())
+                else:
+                    # Handle case where parameter name doesn't match
+                    logger.warning(f"Parameter {name} not found in both models")
+                    self.task_vectors.append(torch.zeros_like(self.trainable_params[name]))
 
         # Initialize mask based on top parameter differences
         self._create_base_mask()
@@ -152,41 +180,81 @@ class Localizer(nn.Module):
                             p.copy_(pretensor)
 
     def apply_mask(self, return_mask=False, round_values=True):
-        """Apply binary mask to model parameters"""
+        """Apply binary mask to model parameters with lm_head support"""
         sigmoid = torch.nn.Sigmoid()
         n_masked_params = 0
         binary_mask = []
 
         for i, name in enumerate(self.trainable_name):
-            pretensor = None
-            finetensor = None
+            if name == 'lm_head.weight':
+                # Special handling for lm_head/embeddings
+                if hasattr(self.pretrained_model, 'lm_head'):
+                    pretensor = self.pretrained_model.lm_head.weight.to(self.device)
+                else:
+                    pretensor = self.pretrained_model.transformer.wte.weight.to(self.device)
 
-            for pre_n, pre_p in self.pretrained_model.named_parameters():
-                if pre_n == name:
-                    pretensor = pre_p.to(self.device)
+                if hasattr(self.finetuned_model, 'lm_head'):
+                    finetensor = self.finetuned_model.lm_head.weight.to(self.device)
+                else:
+                    finetensor = self.finetuned_model.transformer.wte.weight.to(self.device)
 
-            for fine_n, fine_p in self.finetuned_model.named_parameters():
-                if fine_n == name:
-                    finetensor = fine_p.to(self.device)
+                # Calculate mask values
+                mask_values = sigmoid(self.mask[i])
 
-            if pretensor is not None and finetensor is not None:
+                # Round to binary values if requested
+                if round_values:
+                    mask_values = torch.round(mask_values)
+                    binary_mask.append(mask_values)
+
+                # Count masked parameters
+                n_masked_params += torch.sum(mask_values > 0.5)
+
+                # Apply mask
                 with torch.no_grad():
-                    for n, p in self.model.named_parameters():
-                        if n == name:
-                            # Calculate mask values
-                            mask_values = sigmoid(self.mask[i])
+                    if hasattr(self.model, 'lm_head'):
+                        self.model.lm_head.weight.add_(mask_values * (finetensor - pretensor))
+                    else:
+                        # If using weight tying, we modify the embedding
+                        # NOTE: This will affect both embedding and output layer
+                        self.model.transformer.wte.weight.add_(mask_values * (finetensor - pretensor))
+            else:
+                # Regular parameter handling
+                pretensor = None
+                finetensor = None
 
-                            # Round to binary values if requested
-                            if round_values:
-                                mask_values = torch.round(mask_values)
-                                binary_mask.append(mask_values)
+                for pre_n, pre_p in self.pretrained_model.named_parameters():
+                    if pre_n == name:
+                        pretensor = pre_p.to(self.device)
 
-                            # Count masked parameters
-                            n_masked_params += torch.sum(mask_values > 0.5)
+                for fine_n, fine_p in self.finetuned_model.named_parameters():
+                    if fine_n == name:
+                        finetensor = fine_p.to(self.device)
 
-                            # Apply mask
-                            update = mask_values * (finetensor - pretensor)
-                            p.add_(update)
+                if pretensor is not None and finetensor is not None:
+                    with torch.no_grad():
+                        for n, p in self.model.named_parameters():
+                            if n == name:
+                                # Calculate mask values
+                                mask_values = sigmoid(self.mask[i])
+
+                                # Round to binary values if requested
+                                if round_values:
+                                    mask_values = torch.round(mask_values)
+                                    binary_mask.append(mask_values)
+
+                                # Count masked parameters
+                                n_masked_params += torch.sum(mask_values > 0.5)
+
+                                # Apply mask
+                                update = mask_values * (finetensor - pretensor)
+                                p.add_(update)
+
+        # Report percentage of parameters being modified
+        masked_percent = n_masked_params.item() / self.num_params
+        logger.info(f"Masked parameters: {masked_percent:.2%}")
+
+        if return_mask:
+            return binary_mask, masked_percent
 
         # Report percentage of parameters being modified
         masked_percent = n_masked_params.item() / self.num_params
@@ -279,7 +347,7 @@ def parse_args():
     parser.add_argument("--tokenizer_name", type=str, default=None)
     parser.add_argument("--block_size", type=int, default=512)
     parser.add_argument("--per_device_batch_size", type=int, default=8)
-    parser.add_argument("--output_dir", type=str, default="./localized_model")
+    parser.add_argument("--output_dir", type=str, default="./localize")
     parser.add_argument("--seed", type=int, default=42)
 
     # Localization-specific args
@@ -390,8 +458,6 @@ def localize_parameters():
     # Create output directory
     if accelerator.is_main_process:
         os.makedirs(args.output_dir, exist_ok=True)
-        mask_dir = os.path.join(args.output_dir, "masks")
-        os.makedirs(mask_dir, exist_ok=True)
 
     # Load tokenizer
     tokenizer_name = args.tokenizer_name if args.tokenizer_name else args.model_name_or_path
@@ -432,10 +498,15 @@ def localize_parameters():
         binary_mask, mask_percent = localizer.apply_mask(return_mask=True, round_values=True)
         loss_log = []
 
-    # Save the mask
+    # Save only the mask and configurations in a directory named by sparsity
     if accelerator.is_main_process:
-        mask_filename = f"mask_sparsity_{args.localize_sparsity:.3f}.pt"
-        mask_path = os.path.join(args.output_dir, "masks", mask_filename)
+        # Create a directory with exact sparsity value (no decimal formatting)
+        sparsity_str = str(args.localize_sparsity)  # e.g., "0.01" instead of "0.010"
+        sparsity_dir = os.path.join(args.output_dir, sparsity_str)
+        os.makedirs(sparsity_dir, exist_ok=True)
+
+        # Save mask with simple name
+        mask_path = os.path.join(sparsity_dir, "mask.pt")
 
         mask_dict = {
             "binary_mask": binary_mask,
@@ -449,27 +520,29 @@ def localize_parameters():
 
         # Save loss log if available
         if loss_log:
-            with open(os.path.join(args.output_dir, "masks", f"loss_log_{args.localize_sparsity:.3f}.json"), 'w') as f:
+            with open(os.path.join(sparsity_dir, "loss_log.json"), 'w') as f:
                 json.dump({"loss": loss_log}, f)
 
-    # Save the localized model
-    accelerator.wait_for_everyone()
-    unwrapped_model = accelerator.unwrap_model(model)
-    unwrapped_model.save_pretrained(args.output_dir)
-    tokenizer.save_pretrained(args.output_dir)
-
-    # Save configuration
-    if accelerator.is_main_process:
-        with open(os.path.join(args.output_dir, "localization_config.json"), "w") as f:
+        # Save configuration
+        with open(os.path.join(sparsity_dir, "config.json"), "w") as f:
             json.dump({
-                "localize_sparsity": args.localize_sparsity,
+                "pretrained_model": args.model_name_or_path,
+                "finetuned_model": args.finetuned_model_path,
+                "dataset": args.dataset_name,
+                "dataset_config": args.dataset_config_name,
+                "localize_epochs": args.localize_epochs,
                 "localize_lr": args.localize_lr,
                 "l1_strength": args.l1_strength,
                 "sigmoid_bias": args.sigmoid_bias,
-                "mask_percent": mask_percent,
+                "target_sparsity": args.localize_sparsity,
+                "actual_sparsity": mask_percent,
                 "total_params": localizer.num_params,
-                "masked_params": int(mask_percent * localizer.num_params)
+                "masked_params": int(mask_percent * localizer.num_params),
+                "use_gradient_training": args.use_gradient_training,
+                "creation_time": time.strftime("%Y-%m-%d %H:%M:%S")
             }, f, indent=2)
+
+    logger.info("Mask and configuration files saved successfully.")
 
     logger.info("Localization complete!")
 

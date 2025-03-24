@@ -11,7 +11,7 @@ import torch.nn.functional as F
 
 from torch import Tensor
 
-from _GradComp.projection import random_project
+from ..projection import random_project
 
 def chunked_matmul(A1: Tensor, A2: Tensor, chunk_size=128) -> Tensor:
     """Chuncked matrix multiplication for memory efficiency.
