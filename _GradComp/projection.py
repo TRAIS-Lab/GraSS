@@ -334,6 +334,7 @@ class CudaProjector(AbstractProjector):
             active_mask = torch.rand(feature_dim, device=device) > random_drop
 
         self.active_indices = torch.nonzero(active_mask).squeeze()
+
         # if active_indices is a single element, then it will be a 0-dim tensor
         if self.active_indices.dim() == 0:
             self.active_indices = self.active_indices.unsqueeze(0)

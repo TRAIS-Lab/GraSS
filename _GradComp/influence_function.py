@@ -27,7 +27,10 @@ def stable_inverse(matrix: torch.Tensor, damping: float = None) -> torch.Tensor:
             # return a 2d 0 tensor
             return torch.tensor([[0.0]], device=matrix.device)
         else:
-            return torch.tensor([[1.0 / (matrix * 1.1)]], device=matrix.device)
+            if damping is None:
+                return torch.tensor([[1.0 / (matrix * 1.1)]], device=matrix.device)
+            else:
+                return torch.tensor([[1.0 / (matrix * (1 + damping))]], device=matrix.device)
 
     # Add damping to the diagonal
     if damping is None:
