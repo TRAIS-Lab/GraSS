@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 import time
 
-class GCGradDotAttributor():
+class GradDotAttributor():
     def __init__(
         self,
         model,

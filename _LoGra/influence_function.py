@@ -1,10 +1,17 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, Dict
+
+if TYPE_CHECKING:
+    from typing import List, Optional, Union, Tuple
+
 import torch
 import torch.nn as nn
 from tqdm import tqdm
 import time
 from .lora.modules import LoraModule
 
-class LoraInfluence:
+class IFAttributor:
     """
     Influence function calculator that uses LoRA for gradient projection.
 
@@ -17,6 +24,7 @@ class LoraInfluence:
             model: nn.Module,
             layer_name: str = "Linear",
             hessian: str = "kfac",
+            damping: float = None,
             projector_kwargs: dict = None,
             profile: bool = False,
             cpu_offload: bool = False,
@@ -34,6 +42,7 @@ class LoraInfluence:
         self.model = model
         self.layer_type = layer_name
         self.hessian = hessian
+        self.damping = damping
         self.profile = profile
         self.cpu_offload = cpu_offload
 
@@ -162,7 +171,7 @@ class LoraInfluence:
 
             self.lora_modules[name].init_pca(cov_data)
 
-    def extract_training_data(self, train_dataloader):
+    def cache(self, train_dataloader):
         """
         Efficiently extract all necessary information from training data in a single pass.
         This method computes covariance matrices, collects gradients, and optionally sets
@@ -476,12 +485,9 @@ class LoraInfluence:
         return eigenvalues, eigenvectors
 
 
-    def _compute_grad_covariance_inverse(self, damping=None):
+    def _compute_grad_covariance_inverse(self):
         """
         Compute the inverse of gradient covariance for raw Hessian approximation.
-
-        Args:
-            damping: Damping parameter for numerical stability
 
         Returns:
             Dict of inverse covariance matrices
@@ -502,11 +508,11 @@ class LoraInfluence:
                 continue
 
             # Add damping for numerical stability
-            if damping is None:
-                damping = 0.1 * torch.trace(grad_cov) / grad_cov.size(0)
+            if self.damping is None:
+                self.damping = 0.1 * torch.trace(grad_cov) / grad_cov.size(0)
 
             # Add diagonal damping
-            damped_cov = grad_cov + damping * torch.eye(grad_cov.size(0), device=grad_cov.device)
+            damped_cov = grad_cov + self.damping * torch.eye(grad_cov.size(0), device=grad_cov.device)
 
             # Compute inverse
             try:
@@ -705,21 +711,20 @@ class LoraInfluence:
             self.test_gradients = gradients
             return self.test_gradients
 
-    def _precondition_gradients_raw(self, gradients, module_name, damping=None):
+    def _precondition_gradients_raw(self, gradients, module_name):
         """
         Precondition gradients using raw Hessian (gradient covariance) approximation.
 
         Args:
             gradients: Gradient tensor
             module_name: Name of the module
-            damping: Damping parameter
 
         Returns:
             Preconditioned gradients
         """
         # Ensure covariance inverse is computed
         if not hasattr(self, 'covariance_inverse'):
-            self._compute_grad_covariance_inverse(damping)
+            self._compute_grad_covariance_inverse()
 
         # Get inverse covariance
         inverse_cov = self.covariance_inverse[module_name]["grad"]
@@ -729,14 +734,13 @@ class LoraInfluence:
 
         return precond_grads
 
-    def _precondition_gradients_kfac(self, gradients, module_name, damping=None):
+    def _precondition_gradients_kfac(self, gradients, module_name):
         """
         Precondition gradients using K-FAC approximation.
 
         Args:
             gradients: Gradient tensor
             module_name: Name of the module
-            damping: Damping parameter
 
         Returns:
             Preconditioned gradients
@@ -755,9 +759,9 @@ class LoraInfluence:
         full_eigval = torch.outer(bwd_eigval, fwd_eigval)
 
         # Add damping
-        if damping is None:
-            damping = 0.1 * torch.mean(full_eigval)
-        full_eigval += damping
+        if self.damping is None:
+            self.damping = 0.1 * torch.mean(full_eigval)
+        full_eigval += self.damping
 
         original_shape = gradients.shape
         # Reshape gradients to matrix form
@@ -783,14 +787,13 @@ class LoraInfluence:
         # Stack and reshape back to original shape
         return torch.stack(precond_grads).reshape(original_shape)
 
-    def _precondition_gradients_ekfac(self, gradients, module_name, damping=None):
+    def _precondition_gradients_ekfac(self, gradients, module_name):
         """
         Precondition gradients using EK-FAC approximation.
 
         Args:
             gradients: Gradient tensor
             module_name: Name of the module
-            damping: Damping parameter
 
         Returns:
             Preconditioned gradients
@@ -805,7 +808,7 @@ class LoraInfluence:
         ekfac_eigval = self.ekfac_eigenvalues[module_name]
 
         # Add damping
-        ekfac_eigval_damped = ekfac_eigval + damping
+        ekfac_eigval_damped = ekfac_eigval + self.damping
 
         # Reshape gradients to matrix form
         original_shape = gradients.shape
@@ -831,29 +834,28 @@ class LoraInfluence:
         # Stack and reshape back to original shape
         return torch.stack(precond_grads).reshape(original_shape)
 
-    def compute_influence(self, test_gradients=None, test_dataloader=None, damping=None):
-        """
-        Compute influence scores between test and training examples efficiently using matrix operations.
+    def attribute(
+            self,
+            test_dataloader: torch.utils.data.DataLoader,
+            train_dataloader: Optional[torch.utils.data.DataLoader] = None
+        ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict]]:
+        """Attributing the test set with respect to the training set.
 
         Args:
-            test_gradients: Precomputed test gradients (in tensor format)
-            test_dataloader: DataLoader for test data
-            damping: Damping parameter
+            test_dataloader (torch.utils.data.DataLoader): _description_
+            train_dataloader (Optional[torch.utils.data.DataLoader], optional): _description_. Defaults to None.
 
         Returns:
-            Dict with influence scores
+            If profile=False:
+                torch.Tensor: The influence scores
+            If profile=True:
+                Tuple[torch.Tensor, Dict]: The influence scores and profiling statistics
         """
         if self.train_gradients is None:
             raise ValueError("No training gradients collected. Call collect_gradients first.")
 
-        # Get test gradients if not provided
-        if test_gradients is None:
-            if test_dataloader is None:
-                raise ValueError("Either test_gradients or test_dataloader must be provided")
-            test_gradients = self.collect_gradients(
-                test_dataloader,
-                dataset_type="test",
-            )
+
+        test_gradients = self.collect_gradients(test_dataloader, dataset_type="test")
 
         print(f"Computing influence scores...")
 
@@ -880,7 +882,7 @@ class LoraInfluence:
         elif self.hessian == "raw":
             if not hasattr(self, 'covariance_inverse'):
                 print("Computing Fisher information matrix inverse...")
-                self._compute_grad_covariance_inverse(damping)
+                self._compute_grad_covariance_inverse(self.damping)
 
             for module_name in self.lora_module_names:
                 layer_idx = self.lora_module_to_idx[module_name]
@@ -894,7 +896,7 @@ class LoraInfluence:
                 precond_train_grads = self._precondition_gradients_raw(
                     train_layer_grads,
                     module_name,
-                    damping
+                    self.damping
                 )
 
                 layer_influence = torch.matmul(precond_train_grads, test_layer_grads.t())
@@ -919,7 +921,7 @@ class LoraInfluence:
                 precond_train_grads = self._precondition_gradients_kfac(
                     train_layer_grads,
                     module_name,
-                    damping
+                    self.damping
                 ).reshape(num_train_samples, -1)
 
                 layer_influence = torch.matmul(precond_train_grads, test_layer_grads.t())
@@ -947,7 +949,7 @@ class LoraInfluence:
                 precond_train_grads = self._precondition_gradients_ekfac(
                     self.train_gradients[layer_idx],
                     module_name,
-                    damping
+                    self.damping
                 ).reshape(num_train_samples, -1)
 
                 layer_influence = torch.matmul(precond_train_grads, test_layer_grads.t())

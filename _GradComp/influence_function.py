@@ -49,12 +49,13 @@ def stable_inverse(matrix: torch.Tensor, damping: float = None) -> torch.Tensor:
 
     return inverse
 
-class GCIFAttributorRAW():
+class IFAttributor():
     def __init__(
         self,
         model,
         layer_name: Optional[Union[str, List[str]]],
-        damping = None,
+        hessian: Optional[str] = "raw",
+        damping: float = None,
         profile: bool = False,
         device: str = 'cpu'
     ) -> None:
@@ -71,6 +72,7 @@ class GCIFAttributorRAW():
         """
         self.model = model
         self.layer_name = layer_name
+        self.hessian = hessian # Currently only raw is supported
         self.damping = damping
         self.profile = profile
         self.device = device
