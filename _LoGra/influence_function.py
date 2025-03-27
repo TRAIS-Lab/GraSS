@@ -73,7 +73,7 @@ class IFAttributor:
         self.train_gradients = []
 
         # Storage for covariance matrices and eigendecompositions
-        self.covariance = {}
+        self.cov = {}
         self.eigenvalues = {}
         self.eigenvectors = {}
         self.ekfac_eigenvalues = {}
@@ -160,7 +160,7 @@ class IFAttributor:
         print("Initializing LoRA modules from PCA...")
 
         if covariance is None:
-            covariance = self.covariance
+            covariance = self.cov
 
         if not covariance:
             raise ValueError("No covariance data available for PCA initialization")
@@ -296,7 +296,7 @@ class IFAttributor:
                     "grad": cov
                 }
 
-            self.covariance = grad_covariance
+            self.cov = grad_covariance
             print(f"Computed gradient covariance for {len(grad_covariance)} modules")
 
         elif self.hessian in ["kfac", "ekfac"]:
@@ -357,7 +357,7 @@ class IFAttributor:
                 }
 
             # Store covariance matrices
-            self.covariance = fwd_bwd_covariance
+            self.cov = fwd_bwd_covariance
             print(f"Computed forward/backward covariance matrices for {len(fwd_bwd_covariance)} modules")
 
             # Initialize LoRA weights using PCA if requested
@@ -426,7 +426,7 @@ class IFAttributor:
                 self.profiling_stats['precondition'] += time.time() - start_time
 
         return {
-            "covariance": self.covariance if self.hessian in ["raw", "kfac", "ekfac"] else None,
+            "covariance": self.cov if self.hessian in ["raw", "kfac", "ekfac"] else None,
             "gradients": self.train_gradients
         }
 
@@ -442,7 +442,7 @@ class IFAttributor:
         eigenvalues = {}
         eigenvectors = {}
 
-        for name, cov_data in self.covariance.items():
+        for name, cov_data in self.cov.items():
             eigenvalues[name] = {}
             eigenvectors[name] = {}
 
@@ -494,15 +494,15 @@ class IFAttributor:
         """
         print("Computing gradient covariance inverse...")
 
-        if not hasattr(self, 'covariance') or not self.covariance:
+        if not hasattr(self, 'covariance') or not self.cov:
             raise ValueError("Gradient covariance must be computed before computing inverse")
 
         # Initialize inverse covariance dict
-        covariance_inverse = {}
+        con_inv = {}
 
-        for name, cov_data in self.covariance.items():
+        for name, cov in self.cov.items():
             # Get gradient covariance
-            grad_cov = cov_data.get("grad")
+            grad_cov = cov.get("grad")
 
             if grad_cov is None:
                 continue
@@ -524,16 +524,16 @@ class IFAttributor:
                 # Fall back to direct inverse
                 inverse = torch.inverse(damped_cov)
 
-            covariance_inverse[name] = {
+            con_inv[name] = {
                 "grad": inverse
             }
 
-        print(f"Computed gradient covariance inverse for {len(covariance_inverse)} modules")
+        print(f"Computed gradient covariance inverse for {len(con_inv)} modules")
 
         # Store inverse covariance
-        self.covariance_inverse = covariance_inverse
+        self.cov_inv = con_inv
 
-        return covariance_inverse
+        return con_inv
 
     def _compute_ekfac_eigenvalues_from_gradients(self):
         """
@@ -727,7 +727,7 @@ class IFAttributor:
             self._compute_grad_covariance_inverse()
 
         # Get inverse covariance
-        inverse_cov = self.covariance_inverse[module_name]["grad"]
+        inverse_cov = self.cov_inv[module_name]["grad"]
 
         # Precondition gradients: G * H^-1
         precond_grads = torch.matmul(gradients, inverse_cov)
@@ -882,22 +882,18 @@ class IFAttributor:
         elif self.hessian == "raw":
             if not hasattr(self, 'covariance_inverse'):
                 print("Computing Fisher information matrix inverse...")
-                self._compute_grad_covariance_inverse(self.damping)
+                self._compute_grad_covariance_inverse()
 
             for module_name in self.lora_module_names:
                 layer_idx = self.lora_module_to_idx[module_name]
 
                 # Skip if we don't have covariance for this module
-                if module_name not in self.covariance_inverse:
+                if module_name not in self.cov_inv:
                     continue
 
                 test_layer_grads = test_gradients[layer_idx]
                 train_layer_grads = self.train_gradients[layer_idx]
-                precond_train_grads = self._precondition_gradients_raw(
-                    train_layer_grads,
-                    module_name,
-                    self.damping
-                )
+                precond_train_grads = self._precondition_gradients_raw(train_layer_grads, module_name)
 
                 layer_influence = torch.matmul(precond_train_grads, test_layer_grads.t())
                 IF_score += layer_influence
@@ -918,11 +914,7 @@ class IFAttributor:
                 test_layer_grads = test_gradients[layer_idx]
                 train_layer_grads = self.train_gradients[layer_idx].view(num_train_samples, self.rank, self.rank)
 
-                precond_train_grads = self._precondition_gradients_kfac(
-                    train_layer_grads,
-                    module_name,
-                    self.damping
-                ).reshape(num_train_samples, -1)
+                precond_train_grads = self._precondition_gradients_kfac(train_layer_grads, module_name)
 
                 layer_influence = torch.matmul(precond_train_grads, test_layer_grads.t())
                 IF_score += layer_influence
@@ -943,14 +935,10 @@ class IFAttributor:
                     continue
 
                 # Extract gradients for this layer
-                test_layer_grads = test_gradients[layer_idx].reshape(num_test_samples, -1)
-                train_layer_grads = self.train_gradients[layer_idx].reshape(num_train_samples, -1)
+                test_layer_grads = test_gradients[layer_idx]
+                train_layer_grads = self.train_gradients[layer_idx]
 
-                precond_train_grads = self._precondition_gradients_ekfac(
-                    self.train_gradients[layer_idx],
-                    module_name,
-                    self.damping
-                ).reshape(num_train_samples, -1)
+                precond_train_grads = self._precondition_gradients_ekfac(train_layer_grads, module_name)
 
                 layer_influence = torch.matmul(precond_train_grads, test_layer_grads.t())
                 IF_score += layer_influence

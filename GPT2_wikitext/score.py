@@ -571,7 +571,7 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from GPT2_wikitext.utils import SubsetSampler, batch_size, setup_projection_kwargs, result_filename, lds
+    from GPT2_wikitext.utils import SubsetSampler, batch_size, setup_projection_kwargs, count_total_tokens, result_filename, lds
 
     device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
@@ -584,6 +584,7 @@ def main():
     if args.debug: # toy dataset
         train_dataset = train_dataset.select(range(8))
         test_dataset = test_dataset.select(range(4))
+
     train_sampler = SubsetSampler(range(len(train_dataset)))
     train_dataloader = DataLoader(
         train_dataset, collate_fn=default_data_collator, batch_size=train_batch_size, sampler=train_sampler
@@ -591,6 +592,10 @@ def main():
     test_dataloader = DataLoader(
         test_dataset, collate_fn=default_data_collator, batch_size=test_batch_size, shuffle=False
     )
+    train_tokens = count_total_tokens(train_dataloader)
+    test_samples = len(test_dataset)
+
+    throughput_stats = {}
 
     projector_kwargs = setup_projection_kwargs(args, device)
 
@@ -650,8 +655,36 @@ def main():
             )
 
             if args.profile:
+                # Measure cache throughput
+                torch.cuda.synchronize()
+                cache_start_time = time.time()
                 attributor.cache(train_dataloader)
+                torch.cuda.synchronize()
+                cache_end_time = time.time()
+                cache_duration = cache_end_time - cache_start_time
+                cache_throughput = train_tokens / cache_duration
+                throughput_stats["cache"] = {
+                    "tokens": train_tokens,
+                    "duration_seconds": cache_duration,
+                    "throughput_tokens_per_second": cache_throughput
+                }
+                print(f"Cache throughput: {cache_throughput:.2f} tokens/sec")
+
+
+                # Measure attribute throughput
+                torch.cuda.synchronize()
+                attribute_start_time = time.time()
                 score, profile = attributor.attribute(test_dataloader=test_dataloader)
+                torch.cuda.synchronize()
+                attribute_end_time = time.time()
+                attribute_duration = attribute_end_time - attribute_start_time
+                attribute_throughput = test_samples / attribute_duration
+                throughput_stats["attribute"] = {
+                    "test_samples": test_samples,
+                    "duration_seconds": attribute_duration,
+                    "throughput_tokens_per_second": attribute_throughput
+                }
+                print(f"Attribute throughput: {attribute_throughput:.2f} test samples/sec")
             else:
                 score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
 
@@ -681,8 +714,35 @@ def main():
         )
 
         if args.profile:
+            # Measure cache throughput
+            torch.cuda.synchronize()
+            cache_start_time = time.time()
             attributor.cache(train_dataloader=train_dataloader)
+            torch.cuda.synchronize()
+            cache_end_time = time.time()
+            cache_duration = cache_end_time - cache_start_time
+            cache_throughput = train_tokens / cache_duration
+            throughput_stats["cache"] = {
+                "tokens": train_tokens,
+                "duration_seconds": cache_duration,
+                "throughput_tokens_per_second": cache_throughput
+            }
+            print(f"Cache throughput: {cache_throughput:.2f} tokens/sec")
+
+           # Measure attribute throughput
+            torch.cuda.synchronize()
+            attribute_start_time = time.time()
             score, profile = attributor.attribute(test_dataloader=test_dataloader)
+            torch.cuda.synchronize()
+            attribute_end_time = time.time()
+            attribute_duration = attribute_end_time - attribute_start_time
+            attribute_throughput = test_samples / attribute_duration
+            throughput_stats["attribute"] = {
+                "test_samples": test_samples,
+                "duration_seconds": attribute_duration,
+                "throughput_tokens_per_second": attribute_throughput
+            }
+            print(f"Attribute throughput: {attribute_throughput:.2f} test samples/sec")
         else:
             attributor.cache(train_dataloader=train_dataloader)
             score = attributor.attribute(test_dataloader=test_dataloader)
@@ -729,7 +789,21 @@ def main():
             args=training_args,
             logix_args=logix_args_train,
         )
+
+        # Measure cache throughput
+        torch.cuda.synchronize()
+        cache_start_time = time.time()
         trainer.extract_log()
+        torch.cuda.synchronize()
+        cache_end_time = time.time()
+        cache_duration = cache_end_time - cache_start_time
+        cache_throughput = train_tokens / cache_duration
+        throughput_stats["cache"] = {
+            "tokens": train_tokens,
+            "duration_seconds": cache_duration,
+            "throughput_tokens_per_second": cache_throughput
+        }
+        print(f"Cache throughput: {cache_throughput:.2f} tokens/sec")
 
         # 2. Computing influence scores for test data
         model = LoGra_GPT2(checkpoint, config, resume=True) # reinitialize the model
@@ -760,7 +834,22 @@ def main():
             args=training_args,
             logix_args=logix_args_test,
         )
+
+        # Measure attribute throughput
+        torch.cuda.synchronize()
+        attribute_start_time = time.time()
         result = trainer.influence()
+        torch.cuda.synchronize()
+        attribute_end_time = time.time()
+        attribute_duration = attribute_end_time - attribute_start_time
+        attribute_throughput = test_samples / attribute_duration
+        throughput_stats["attribute"] = {
+            "test_samples": test_samples,
+            "duration_seconds": attribute_duration,
+            "throughput_tokens_per_second": attribute_throughput
+        }
+        print(f"Attribute throughput: {attribute_throughput:.2f} test samples/sec")
+
         score = result["influence"].T
 
     elif args.baseline == "dattri":
@@ -858,7 +947,7 @@ def main():
 
     logger.info("***** Attribution finished *****")
 
-    result = {"score": score, "lds": lds_score, "profile": profile}
+    result = {"score": score, "lds": lds_score, "profile": profile, "throughput": throughput_stats}
     logger.info(result)
 
     if not args.debug: # only save the results when not in debug mode
