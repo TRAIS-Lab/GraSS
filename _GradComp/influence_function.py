@@ -107,7 +107,7 @@ class IFAttributor():
         Hessian = [0] * num_layers
 
         train_grad = [None] * len(self.layer_name)
-        ihvp_train = [None] * len(self.layer_name)
+        ifvp_train = [None] * len(self.layer_name)
 
         num_samples = len(train_dataloader.sampler)
 
@@ -194,10 +194,10 @@ class IFAttributor():
             torch.cuda.synchronize()
             start_time = time.time()
 
-        print(f"Calculating iHVP...")
+        print(f"Calculating iFVP...")
         # Add damping term and compute inverses
         for layer_id in range(num_layers):
-            ihvp_train[layer_id] = torch.matmul(
+            ifvp_train[layer_id] = torch.matmul(
                 stable_inverse(Hessian[layer_id], damping=self.damping),
                 train_grad[layer_id].t()
             ).t()
@@ -206,7 +206,7 @@ class IFAttributor():
             torch.cuda.synchronize()
             self.profiling_stats['precondition'] += time.time() - start_time
 
-        return ihvp_train
+        return ifvp_train
 
     def cache(
         self,
@@ -214,7 +214,7 @@ class IFAttributor():
     ) -> None:
         # This means we can afford full calculation.
         self.full_train_dataloader = full_train_dataloader
-        self.cached_ihvp_train = self._iFVP(full_train_dataloader)
+        self.cached_ifvp_train = self._iFVP(full_train_dataloader)
 
     def attribute(
         self,
@@ -274,9 +274,9 @@ class IFAttributor():
 
         # Compute FIM factors if not cached
         if train_dataloader is not None and self.full_train_dataloader is None:
-            ihvp_train = self._iFVP(train_dataloader)
+            ifvp_train = self._iFVP(train_dataloader)
         else:
-            ihvp_train = self.cached_ihvp_train
+            ifvp_train = self.cached_ifvp_train
 
         # Compute influence scores
         for test_batch_idx, test_batch in enumerate(
@@ -337,7 +337,7 @@ class IFAttributor():
                     )
 
                     # Compute the influence function score from pre-computed iHVP components and test gradients
-                    result = torch.matmul(ihvp_train[layer_id], test_grad.t())
+                    result = torch.matmul(ifvp_train[layer_id], test_grad.t())
 
                     IF_score[:, col_st:col_ed] += result
 
