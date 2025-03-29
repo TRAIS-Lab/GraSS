@@ -194,8 +194,6 @@ class IFAttributor:
             per_module_forward = {name: [] for name in self.lora_module_names}
             per_module_backward = {name: [] for name in self.lora_module_names}
 
-        n_samples = 0
-
         # Process each batch
         for batch_idx, batch in enumerate(tqdm(train_dataloader, desc="Processing training data")):
             # Zero gradients
@@ -298,6 +296,7 @@ class IFAttributor:
 
             self.cov = grad_covariance
             print(f"Computed gradient covariance for {len(grad_covariance)} modules")
+            self._compute_grad_covariance_inverse()
 
         elif self.hessian in ["kfac", "ekfac"]:
             fwd_bwd_covariance = {}
@@ -724,7 +723,7 @@ class IFAttributor:
         """
         # Ensure covariance inverse is computed
         if not hasattr(self, 'covariance_inverse'):
-            self._compute_grad_covariance_inverse()
+            raise ValueError("Covariance inverse must be computed before using raw Hessian")
 
         # Get inverse covariance
         inverse_cov = self.cov_inv[module_name]["grad"]

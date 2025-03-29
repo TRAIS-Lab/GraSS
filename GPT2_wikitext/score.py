@@ -682,7 +682,7 @@ def main():
                 throughput_stats["attribute"] = {
                     "test_samples": test_samples,
                     "duration_seconds": attribute_duration,
-                    "throughput_tokens_per_second": attribute_throughput
+                    "throughput_test_sample_per_second": attribute_throughput
                 }
                 print(f"Attribute throughput: {attribute_throughput:.2f} test samples/sec")
             else:
@@ -740,7 +740,7 @@ def main():
             throughput_stats["attribute"] = {
                 "test_samples": test_samples,
                 "duration_seconds": attribute_duration,
-                "throughput_tokens_per_second": attribute_throughput
+                "throughput_test_sample_per_second": attribute_throughput
             }
             print(f"Attribute throughput: {attribute_throughput:.2f} test samples/sec")
         else:
@@ -760,12 +760,12 @@ def main():
         assert args.layer == "Linear", "LogIX only supports Linear setting now."
         assert args.projection is not None, "LogIX requires projection method."
 
-        model = LoGra_GPT2(checkpoint, config, resume=True)
-        model.eval()
-
         LogIXTrainer = patch_trainer(transformers.Trainer)
 
         # 1. Computing EK-FAC factors for training data
+        model = LoGra_GPT2(checkpoint, config, resume=True).cuda(device)
+        model.eval()
+
         logix_args_train = LogIXArguments(
             project=f"./LogIX/project/{args.projection}",
             config=f"./LogIX/project/{args.projection}.yaml",
@@ -806,7 +806,7 @@ def main():
         print(f"Cache throughput: {cache_throughput:.2f} tokens/sec")
 
         # 2. Computing influence scores for test data
-        model = LoGra_GPT2(checkpoint, config, resume=True) # reinitialize the model
+        model = LoGra_GPT2(checkpoint, config, resume=True).cuda(device) # reinitialize the model
         model.eval()
         logix_args_test = LogIXArguments(
             project=f"./LogIX/project/{args.projection}",
@@ -846,7 +846,7 @@ def main():
         throughput_stats["attribute"] = {
             "test_samples": test_samples,
             "duration_seconds": attribute_duration,
-            "throughput_tokens_per_second": attribute_throughput
+            "throughput_test_sample_per_second": attribute_throughput
         }
         print(f"Attribute throughput: {attribute_throughput:.2f} test samples/sec")
 
