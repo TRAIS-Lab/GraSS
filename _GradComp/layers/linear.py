@@ -98,11 +98,18 @@ class GCLinear(nn.Linear):
 
         if proj_factorize:
             dumb_grad_comp_1 = torch.zeros_like(self.pre_activation.view(-1, self.pre_activation.shape[-1]))
+            active_indices = projector_kwargs.get("active_indices", -1)
+            projector_kwargs.pop("active_indices")
+
+            if active_indices == None:
+                active_indices = {"pre_activation": None, "input_features": None}
+
             projector_grad_comp_1 = random_project(
                 dumb_grad_comp_1,
                 dumb_grad_comp_1.shape[0],
                 proj_seed=base_seed,
                 pre_compute=proj_factorize,
+                active_indices=active_indices["pre_activation"],
                 **projector_kwargs,
             )
             dumb_grad_comp_2 = torch.zeros_like(input_features.view(-1, input_features.shape[-1]))
@@ -111,6 +118,7 @@ class GCLinear(nn.Linear):
                 dumb_grad_comp_2.shape[0],
                 proj_seed=base_seed + 1,
                 pre_compute=proj_factorize,
+                active_indices=active_indices["input_features"],
                 **projector_kwargs,
             )
 

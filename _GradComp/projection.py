@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Tuple
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from typing import Dict, List, Union
+    from typing import Dict, List, Union, Optional
 
 import os
 import sys
@@ -30,8 +30,6 @@ from torch import Tensor
 
 from _GradComp.utils import _vectorize as vectorize
 from _GradComp.utils import get_parameter_chunk_sizes
-
-# from GPT2_wikitext.localize.utils import active_localize_indices
 
 
 class ProjectionType(str, Enum):
@@ -122,10 +120,9 @@ class BasicProjector(AbstractProjector):
         dtype: torch.dtype = torch.float32,
         ensemble_id: int = 0,
         method: str = "Gaussian",
-        module_name: str = "",
+        active_indices: Optional[Tensor] = None,
         threshold: float = 1e-7,
         random_drop: float = 0.0,
-        localize: int = -1,
         pre_compute: bool = False,
     ) -> None:
         """Initializes hyperparameters for BasicProjector.
@@ -280,10 +277,9 @@ class CudaProjector(AbstractProjector):
         device: str,
         max_batch_size: int,
         method: str,
-        module_name: str = "",
+        active_indices: Optional[Tensor] = None,
         threshold: float = 1e-7,
         random_drop: float = 0.0,
-        localize: int = -1,
         pre_compute: bool = False,
     ) -> None:
         """Initializes hyperparameters for CudaProjector.
@@ -302,10 +298,9 @@ class CudaProjector(AbstractProjector):
                 Set this if you get a 'The batch size of the CudaProjector is
                 too large for your GPU' error. Must be either 8, 16, or 32.
             method (str): The method used for the projection.
-            module_name (str): The name of the module to be projected.
+            active_indices (Optional[Tensor]): The indices of the features to be considered.
             threshold (float): The threshold used before applying projection.
             random_drop (float): The probability of dropping a feature.
-            localize (int): The number of localization indices.
             pre_compute (bool): If True, the projection construction will be pre-computed
 
         Raises:
@@ -315,17 +310,12 @@ class CudaProjector(AbstractProjector):
         super().__init__(feature_dim, proj_dim, seed, proj_type, device)
         self.max_batch_size = max_batch_size
         self.threshold = threshold
-        self.module_name = module_name
 
-        if localize > 0:
-            mask_path = f"../GPT2_wikitext/localize/mask_{localize}/{self.module_name}.pt" #TODO: fix this to be more general
-            try:
-                self.active_indices = torch.load(mask_path, map_location=device, weights_only=False)
-            except FileNotFoundError:
-                self.active_indices = torch.randint(feature_dim, (localize,), device=device)
-        else:
+        if active_indices is None:
             active_mask = torch.rand(feature_dim, device=device) > random_drop
-            self.active_indices = torch.nonzero(active_mask).squeeze()
+            active_indices = torch.nonzero(active_mask).squeeze()
+
+        self.active_indices = active_indices.to(device)
 
         # if active_indices is a single element, then it will be a 0-dim tensor
         if self.active_indices.dim() == 0:
@@ -753,10 +743,9 @@ def make_random_projector(
     method: str = "Gaussian",
     *,
     use_half_precision: bool = True,
-    module_name: str = "",
+    active_indices: Optional[Tensor] = None,
     threshold: float = 1e-7,
     random_drop: float = 0.0,
-    localize: int = -1,
     pre_compute: bool = False,
 ) -> Tensor:
     """Initialize random projector by the info of feature about to be projected.
@@ -778,10 +767,9 @@ def make_random_projector(
         method (str): The method used for the projection.
         use_half_precision (bool): If True, torch.float16 will be used for all
             computations and arrays will be stored in torch.float16.
-        module_name (str): The name of the module to be projected.
+        active_indices (Optional[Tensor]): The indices of the features to be considered.
         threshold (float): The threshold used before applying projection.
         random_drop (float): The probability of dropping a feature.
-        localize (int): The number of localization indices.
         pre_compute (bool): If True, the projection construction will be pre-computed
 
     Returns:
@@ -861,10 +849,9 @@ def make_random_projector(
                     max_batch_size=proj_max_batch_size,
                     device=device,
                     method=method,
-                    module_name=module_name,
+                    active_indices=active_indices,
                     threshold=threshold,
                     random_drop=random_drop,
-                    localize=localize,
                     pre_compute=pre_compute,
                 )
                 for i, chunk_size in enumerate(param_chunk_sizes)
@@ -888,10 +875,9 @@ def make_random_projector(
             max_batch_size=proj_max_batch_size,
             device=device,
             method=method,
-            module_name=module_name,
+            active_indices=active_indices,
             threshold=threshold,
             random_drop=random_drop,
-            localize=localize,
             pre_compute=pre_compute,
         )
     elif projector == BasicProjector:
@@ -903,10 +889,9 @@ def make_random_projector(
             dtype=dtype,
             device=device,
             method=method,
-            module_name=module_name,
+            active_indices=active_indices,
             threshold=threshold,
             random_drop=random_drop,
-            localize=localize,
             pre_compute=pre_compute,
         )
 
@@ -923,10 +908,9 @@ def random_project(
     method: str = "Gaussian",
     *,
     use_half_precision: bool = True,
-    module_name: str = "",
+    active_indices: Optional[Tensor] = None,
     threshold: float = 1e-7,
     random_drop: float = 0.0,
-    localize: int = -1,
     pre_compute: bool = False,
 ) -> Callable:
     """Randomly projects the features to a smaller dimension.
@@ -949,10 +933,9 @@ def random_project(
         method (str): The method used for the projection.
         use_half_precision (bool): If True, torch.float16 will be used for all
             computations and arrays will be stored in torch.float16.
-        module_name (str): The name of the module to be projected.
+        active_indices (Optional[Tensor]): The indices of the features to be considered.
         threshold (float): The threshold used before applying projection.
         random_drop (float): The probability of dropping a feature.
-        localize (int): The number of localization indices.
         pre_compute (bool): If True, the projection construction will be pre-computed
 
     Returns:
@@ -975,10 +958,9 @@ def random_project(
         proj_seed=proj_seed,
         method=method,
         use_half_precision=use_half_precision,
-        module_name=module_name,
+        active_indices=active_indices,
         threshold=threshold,
         random_drop=random_drop,
-        localize=localize,
         pre_compute=pre_compute,
     )
 

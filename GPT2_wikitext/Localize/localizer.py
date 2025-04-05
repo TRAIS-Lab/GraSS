@@ -10,7 +10,7 @@ class DualComponentMaskOptimizer:
             self,
             pre_activation_dim,
             input_features_dim,
-            lambda_reg=0.001,
+            lambda_reg=1e-1,
             lr=0.01,
             min_active_pre_activation=10,
             max_active_pre_activation=None,
@@ -259,15 +259,17 @@ class DualComponentMaskOptimizer:
             'input_features_sparsity': input_sparsity
         }
 
-    def train(self,
-              train_pre_activation,
-              train_input_features,
-              test_pre_activation,
-              test_input_features,
-              num_epochs=500,
-              log_every=50,
-              correlation_threshold=0.7,
-              is_3d=False):
+    def train(
+            self,
+            train_pre_activation,
+            train_input_features,
+            test_pre_activation,
+            test_input_features,
+            num_epochs=500,
+            log_every=50,
+            correlation_threshold=0.9,
+            is_3d=False
+        ):
         """
         Train the dual mask optimizer for multiple epochs.
 
@@ -365,7 +367,7 @@ class DualComponentMaskOptimizer:
 
                 # Early stopping based on correlation threshold
                 avg_rank_correlation = eval_metrics.get('avg_rank_correlation', float('nan'))
-                if not math.isnan(avg_rank_correlation) and avg_rank_correlation < correlation_threshold:
+                if not math.isnan(correlation_value) and avg_rank_correlation < correlation_threshold:
                     self._log(f"Early stopping at epoch {epoch} - correlation {avg_rank_correlation:.4f} below threshold {correlation_threshold:.4f}")
                     break
 
@@ -395,9 +397,9 @@ class DualComponentMaskOptimizer:
         # Report if we met the correlation threshold
         if 'avg_rank_correlation' in eval_metrics and not math.isnan(eval_metrics['avg_rank_correlation']):
             if eval_metrics['avg_rank_correlation'] >= correlation_threshold:
-                self._log(f"✓ Final correlation: {eval_metrics['avg_rank_correlation']:.4f} (above threshold {correlation_threshold:.4f})")
+                self._log(f"✓ Final rank correlation: {eval_metrics['avg_rank_correlation']:.4f} (above threshold {correlation_threshold:.4f})")
             else:
-                self._log(f"✗ Final correlation: {eval_metrics['avg_rank_correlation']:.4f} (below threshold {correlation_threshold:.4f})")
+                self._log(f"✗ Final rank correlation: {eval_metrics['avg_rank_correlation']:.4f} (below threshold {correlation_threshold:.4f})")
 
         return eval_metrics
 
@@ -537,18 +539,18 @@ class DualComponentMaskOptimizer:
         mask_input = self.sigmoid_input()
 
         # Get indices for pre-activation mask
-        pre_indices = torch.where(mask_pre > threshold)[0].cpu().numpy()
+        pre_indices = torch.where(mask_pre > threshold)[0]
         if min_count_pre is not None and len(pre_indices) < min_count_pre:
             self._log(f"Warning: Only {len(pre_indices)} pre-activation parameters above threshold. Selecting top-{min_count_pre} instead.", level="warning")
             values, top_indices = torch.topk(mask_pre, k=min_count_pre)
-            pre_indices = top_indices.cpu().numpy()
+            pre_indices = top_indices
 
         # Get indices for input features mask
-        input_indices = torch.where(mask_input > threshold)[0].cpu().numpy()
+        input_indices = torch.where(mask_input > threshold)[0]
         if min_count_input is not None and len(input_indices) < min_count_input:
             self._log(f"Warning: Only {len(input_indices)} input feature parameters above threshold. Selecting top-{min_count_input} instead.", level="warning")
             values, top_indices = torch.topk(mask_input, k=min_count_input)
-            input_indices = top_indices.cpu().numpy()
+            input_indices = top_indices
 
         # Log summary of selected indices
         effective_params = len(pre_indices) * len(input_indices)

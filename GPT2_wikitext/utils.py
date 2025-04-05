@@ -81,9 +81,9 @@ def setup_projection_kwargs(args, device):
     # Compatibility checking
     if args.localize > 0:
         assert proj_method == "Identity", "Localize option can't be combined with projection."
-        assert proj_factorize == False, "Localize option can't be combined with factorized projection."
+        assert args.layer == "Linear", "Localize option only works with Linear layer."
         assert args.random_drop == 0.0, "Localize option can't be combined with random drop."
-        # assert args.threshold == 0.0, "Localize option can't be combined with threshold."
+        assert args.threshold == 0.0, "Localize option can't be combined with threshold."
 
     projector_kwargs = {
         "proj_dim": proj_dim,

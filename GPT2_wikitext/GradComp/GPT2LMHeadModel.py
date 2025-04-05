@@ -125,7 +125,7 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
             raise ValueError(f"Unsupported layer type for LayerNorm: {type(old_layer)}")
         return new_layer
 
-    def set_projectors(self, projector_kwargs, train_dataloader):
+    def set_projectors(self, layer, projector_kwargs, train_dataloader):
         """
         Set projectors for all GC layers in the model.
 
@@ -136,23 +136,40 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
         if projector_kwargs is None:
             return
 
-        for batch in train_dataloader:
-            self.forward(batch["input_ids"].cuda(self.device), attention_mask=batch["attention_mask"].cuda(self.device))
-            break
+        train_batch = next(iter(train_dataloader))
+        self.forward(train_batch["input_ids"].cuda(self.device), attention_mask=train_batch["attention_mask"].cuda(self.device))
 
         proj_seed = projector_kwargs.get('proj_seed', 0)
         proj_factorize = projector_kwargs.get("proj_factorize", True)
+        localize = projector_kwargs.get("localize", -1)
 
         projector_kwargs.pop("proj_seed")
         projector_kwargs.pop("proj_factorize")
+        projector_kwargs.pop("localize")
+
+        if layer == "Linear":
+            proj_layer = (GCLinear, GCEmbedding)
+        elif layer == "LayerNorm":
+            proj_layer = (GCLayerNorm)
+        elif layer == "Linear_LayerNorm":
+            proj_layer = (GCLinear, GCEmbedding, GCLayerNorm)
 
         # Apply projectors to all GC layers
         for module_id, (module_name, module) in enumerate(self.named_modules()):
-            if isinstance(module, GCLinear) or isinstance(module, GCEmbedding) or isinstance(module, GCLayerNorm):
+            if isinstance(module, proj_layer):
                 base_seed = proj_seed + int(1e4) * module_id
                 print(f"Setting projector for {module_name}...")
                 # push module_name to projector_kwargs
-                projector_kwargs["module_name"] = module_name
+                if localize > 0:
+                    try:
+                        mask_path = f"../GPT2_wikitext/Localize/mask_{localize}/{module_name}.pt"
+                        active_indices = torch.load(mask_path, weights_only=False)
+                    except FileNotFoundError:
+                        print(f"Mask file not found for {module_name}. Using default active indices.")
+
+                    projector_kwargs["active_indices"] = active_indices
+                else:
+                    projector_kwargs["active_indices"] = None
                 module.set_projector(base_seed, projector_kwargs, proj_factorize)
 
 

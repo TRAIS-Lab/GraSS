@@ -624,7 +624,7 @@ def main():
         assert hessian in ["none", "raw"], "Invalid Hessian type."
 
         model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
-        model.set_projectors(projector_kwargs, train_dataloader)
+        model.set_projectors(args.layer, projector_kwargs, train_dataloader)
         model.eval()
 
         if hessian == "none":
@@ -644,10 +644,9 @@ def main():
 
         elif hessian == "raw":
             from _GradComp.influence_function import IFAttributor
-            layers = find_GClayers(model, args.layer)[:-1]
             attributor = IFAttributor(
                 model=model,
-                layer_name=layers,
+                layer_name=find_GClayers(model, args.layer)[:-1],
                 hessian="raw",
                 profile=args.profile,
                 device=device,

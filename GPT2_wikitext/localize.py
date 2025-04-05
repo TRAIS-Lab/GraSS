@@ -215,8 +215,8 @@ def parse_args():
     parser.add_argument(
         "--localize",
         type=int,
-        default=300,
-        help="Number of aimed localized parameters.",
+        default=16,
+        help="Number of aimed (factorized) localized parameters.",
     )
     parser.add_argument(
         "--epoch",
@@ -227,7 +227,7 @@ def parse_args():
     parser.add_argument(
         "--log_interval",
         type=int,
-        default=100,
+        default=50,
         help="Interval for logging the training process.",
     )
     parser.add_argument(
@@ -251,7 +251,7 @@ def parse_args():
     parser.add_argument(
         "--early_stop",
         type=float,
-        default=0.6,
+        default=0.9,
         help="The correlation threshold for early stopping.",
     )
 
@@ -542,6 +542,8 @@ def main():
         "localize": False,
     }
 
+    assert args.layer == "Linear", "Localize option only works with Linear layer."
+
     # Logging setting
     logger.info(f"The train dataset length: {len(train_dataset)}.")
     logger.info(f"The test dataset length: {len(test_dataset)}.")
@@ -563,7 +565,7 @@ def main():
     from GPT2_wikitext.GradComp.utils import find_GClayers
 
     model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
-    model.set_projectors(projector_kwargs, train_dataloader)
+    model.set_projectors(args.layer, projector_kwargs, train_dataloader)
     model.eval()
 
     layers = find_GClayers(model, args.layer, return_module_name=True)[:-1]
@@ -571,7 +573,7 @@ def main():
     from GPT2_wikitext.Localize.localizer import DualComponentMaskOptimizer
 
     # Create output directory for saving masks
-    output_dir = f"./Localize/dual_mask_{args.localize}"
+    output_dir = f"./Localize/mask_{args.localize}"
     os.makedirs(output_dir, exist_ok=True)
 
     # Optimize each layer one by one to save memory
@@ -691,9 +693,9 @@ def main():
             lambda_reg=args.regularization,
             lr=args.learning_rate,
             min_active_pre_activation=args.localize,  # Adjust based on your requirements
-            max_active_pre_activation=args.localize * 2,
+            max_active_pre_activation=args.localize,
             min_active_input=args.localize,
-            max_active_input=args.localize * 2,
+            max_active_input=args.localize,
             device=device,
             logger=logger,
         )
