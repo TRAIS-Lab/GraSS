@@ -79,7 +79,7 @@ def setup_projection_kwargs(args, device):
             proj_dim = int(proj_dim) # Convert to integer
 
     # Compatibility checking
-    if args.localize != 0.0:
+    if args.localize > 0:
         assert proj_method == "Identity", "Localize option can't be combined with projection."
         assert proj_factorize == False, "Localize option can't be combined with factorized projection."
         assert args.random_drop == 0.0, "Localize option can't be combined with random drop."

@@ -31,7 +31,7 @@ from torch import Tensor
 from _GradComp.utils import _vectorize as vectorize
 from _GradComp.utils import get_parameter_chunk_sizes
 
-from GPT2_wikitext.localize.utils import active_localize_indices
+# from GPT2_wikitext.localize.utils import active_localize_indices
 
 
 class ProjectionType(str, Enum):
@@ -125,7 +125,7 @@ class BasicProjector(AbstractProjector):
         module_name: str = "",
         threshold: float = 1e-7,
         random_drop: float = 0.0,
-        localize: float = 0.0,
+        localize: int = -1,
         pre_compute: bool = False,
     ) -> None:
         """Initializes hyperparameters for BasicProjector.
@@ -283,7 +283,7 @@ class CudaProjector(AbstractProjector):
         module_name: str = "",
         threshold: float = 1e-7,
         random_drop: float = 0.0,
-        localize: float = 0.0,
+        localize: int = -1,
         pre_compute: bool = False,
     ) -> None:
         """Initializes hyperparameters for CudaProjector.
@@ -305,7 +305,7 @@ class CudaProjector(AbstractProjector):
             module_name (str): The name of the module to be projected.
             threshold (float): The threshold used before applying projection.
             random_drop (float): The probability of dropping a feature.
-            localize (float): The localization sparsity.
+            localize (int): The number of localization indices.
             pre_compute (bool): If True, the projection construction will be pre-computed
 
         Raises:
@@ -317,23 +317,15 @@ class CudaProjector(AbstractProjector):
         self.threshold = threshold
         self.module_name = module_name
 
-        if localize > 0.0:
-            mask_path = f"../GPT2_wikitext/localize/{localize}/mask.pt" #TODO: fix this to be more general
-            model_name_or_path = "openai-community/gpt2" #TODO: fix this to be more general
-
-            # Get active indices from localization mask
-            active_indices = active_localize_indices(mask_path, module_name, model_name_or_path=model_name_or_path, device=device)
-            if active_indices is not None:
-                # Use the active indices to create a mask
-                active_mask = torch.zeros(feature_dim, device=device, dtype=torch.bool)
-                active_mask[active_indices] = True
-            else:
-                # Fallback if module not found in mask
-                active_mask = torch.ones(feature_dim, device=device, dtype=torch.bool)
+        if localize > 0:
+            mask_path = f"../GPT2_wikitext/localize/mask_{localize}/{self.module_name}.pt" #TODO: fix this to be more general
+            try:
+                self.active_indices = torch.load(mask_path, map_location=device, weights_only=False)
+            except FileNotFoundError:
+                self.active_indices = torch.randint(feature_dim, (localize,), device=device)
         else:
             active_mask = torch.rand(feature_dim, device=device) > random_drop
-
-        self.active_indices = torch.nonzero(active_mask).squeeze()
+            self.active_indices = torch.nonzero(active_mask).squeeze()
 
         # if active_indices is a single element, then it will be a 0-dim tensor
         if self.active_indices.dim() == 0:
@@ -764,7 +756,7 @@ def make_random_projector(
     module_name: str = "",
     threshold: float = 1e-7,
     random_drop: float = 0.0,
-    localize: float = 0.0,
+    localize: int = -1,
     pre_compute: bool = False,
 ) -> Tensor:
     """Initialize random projector by the info of feature about to be projected.
@@ -789,7 +781,7 @@ def make_random_projector(
         module_name (str): The name of the module to be projected.
         threshold (float): The threshold used before applying projection.
         random_drop (float): The probability of dropping a feature.
-        localize (float): The localization sparsity.
+        localize (int): The number of localization indices.
         pre_compute (bool): If True, the projection construction will be pre-computed
 
     Returns:
@@ -934,7 +926,7 @@ def random_project(
     module_name: str = "",
     threshold: float = 1e-7,
     random_drop: float = 0.0,
-    localize: float = 0.0,
+    localize: int = -1,
     pre_compute: bool = False,
 ) -> Callable:
     """Randomly projects the features to a smaller dimension.
@@ -960,7 +952,7 @@ def random_project(
         module_name (str): The name of the module to be projected.
         threshold (float): The threshold used before applying projection.
         random_drop (float): The probability of dropping a feature.
-        localize (float): The localization sparsity.
+        localize (int): The number of localization indices.
         pre_compute (bool): If True, the projection construction will be pre-computed
 
     Returns:

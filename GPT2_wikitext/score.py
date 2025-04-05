@@ -313,9 +313,9 @@ def parse_args():
     )
     parser.add_argument(
         "--localize",
-        type=float,
-        default=0.0,
-        help="Percentage of localized parameters to be considered.",
+        type=int,
+        default=-1,
+        help="The number of localized parameters to be considered (per-layer).",
     )
 
     args = parser.parse_args()
@@ -582,8 +582,8 @@ def main():
     train_batch_size, test_batch_size = batch_size(args.baseline, args.tda)
 
     if args.debug: # toy dataset
-        train_dataset = train_dataset.select(range(8))
-        test_dataset = test_dataset.select(range(4))
+        train_dataset = train_dataset.select(range(200))
+        test_dataset = test_dataset.select(range(20))
 
     train_sampler = SubsetSampler(range(len(train_dataset)))
     train_dataloader = DataLoader(
@@ -622,8 +622,6 @@ def main():
         hessian = hessian.lower()
         assert tda == "IF", "GradComp only supports Influence Function now."
         assert hessian in ["none", "raw"], "Invalid Hessian type."
-        assert args.layer == "Linear", "LoGra only supports Linear setting now."
-        assert args.projection is not None, "LoGra requires projection method."
 
         model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
         model.set_projectors(projector_kwargs, train_dataloader)
@@ -646,9 +644,10 @@ def main():
 
         elif hessian == "raw":
             from _GradComp.influence_function import IFAttributor
+            layers = find_GClayers(model, args.layer)[:-1]
             attributor = IFAttributor(
                 model=model,
-                layer_name=find_GClayers(model, args.layer),
+                layer_name=layers,
                 hessian="raw",
                 profile=args.profile,
                 device=device,

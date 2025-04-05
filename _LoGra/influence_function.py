@@ -493,7 +493,7 @@ class IFAttributor:
         """
         print("Computing gradient covariance inverse...")
 
-        if not hasattr(self, 'covariance') or not self.cov:
+        if not hasattr(self, 'cov') or not self.cov:
             raise ValueError("Gradient covariance must be computed before computing inverse")
 
         # Initialize inverse covariance dict
@@ -722,7 +722,7 @@ class IFAttributor:
             Preconditioned gradients
         """
         # Ensure covariance inverse is computed
-        if not hasattr(self, 'covariance_inverse'):
+        if not hasattr(self, 'cov_inv'):
             raise ValueError("Covariance inverse must be computed before using raw Hessian")
 
         # Get inverse covariance
