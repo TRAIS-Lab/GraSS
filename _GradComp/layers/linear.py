@@ -112,6 +112,7 @@ class GCLinear(nn.Linear):
                 active_indices=active_indices["pre_activation"],
                 **projector_kwargs,
             )
+
             dumb_grad_comp_2 = torch.zeros_like(input_features.view(-1, input_features.shape[-1]))
             projector_grad_comp_2 = random_project(
                 dumb_grad_comp_2,
@@ -122,6 +123,9 @@ class GCLinear(nn.Linear):
                 **projector_kwargs,
             )
 
+            projector_grad_comp_1 = torch.compile(projector_grad_comp_1)
+            projector_grad_comp_2 = torch.compile(projector_grad_comp_2)
+
             self.projector_grad_comp = (projector_grad_comp_1, projector_grad_comp_2)
         else:
             if is_3d:
@@ -129,13 +133,15 @@ class GCLinear(nn.Linear):
             else:
                 dumb_grad = torch.einsum('bi,bj->bij', self.pre_activation, input_features).reshape(batch_size, -1)
 
-            self.projector_grad = random_project(
+            projector_grad = random_project(
                 dumb_grad,
                 dumb_grad.shape[0],
                 proj_seed=base_seed,
                 pre_compute=proj_factorize,
                 **projector_kwargs,
             )
+
+            self.projector_grad = torch.compile(projector_grad)
 
     def grad_comp(self, grad_pre_activation: Tensor, per_sample: bool = True) -> Tuple[Tensor, Tensor]:
         """

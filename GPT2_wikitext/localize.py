@@ -573,7 +573,7 @@ def main():
     from GPT2_wikitext.Localize.localizer import DualComponentMaskOptimizer
 
     # Create output directory for saving masks
-    output_dir = f"./Localize/mask_{args.localize}"
+    output_dir = f"./Localize/mask_{args.localize}*{args.localize}"
     os.makedirs(output_dir, exist_ok=True)
 
     # Optimize each layer one by one to save memory
@@ -605,9 +605,6 @@ def main():
         input_features_dim = input_features.shape[-1]
 
         logger.info(f"Layer {layer_idx + 1} - Pre-activation dimension: {pre_activation_dim}, Input features dimension: {input_features_dim}")
-
-        # Check if tensors are 3D (sequence data)
-        is_3d = grad_pre_activation.dim() == 3
 
         # Collect training gradient components
         train_pre_activations = []

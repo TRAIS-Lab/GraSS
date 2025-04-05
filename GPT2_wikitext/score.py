@@ -311,12 +311,6 @@ def parse_args():
         default=0.0,
         help="Randomly drop the specified percentage of the projection input dimensions.",
     )
-    parser.add_argument(
-        "--localize",
-        type=int,
-        default=-1,
-        help="The number of localized parameters to be considered (per-layer).",
-    )
 
     args = parser.parse_args()
 

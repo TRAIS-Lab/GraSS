@@ -65,16 +65,22 @@ class GCLayerNorm(nn.LayerNorm):
                 pre_compute=proj_factorize,
                 **projector_kwargs,
             )
+
+            projector_grad_comp_1 = torch.compile(projector_grad_comp_1)
+            projector_grad_comp_2 = torch.compile(projector_grad_comp_2)
+
             self.projector_grad_comp = (projector_grad_comp_1, projector_grad_comp_2)
         else:
             dumb_grad_comp = torch.zeros((self.normalized.shape[0], self.normalized.shape[-1] * 2))
-            self.projector_grad = random_project(
+            projector_grad = random_project(
                 dumb_grad_comp,
                 dumb_grad_comp.shape[0],
                 proj_seed=base_seed,
                 pre_compute=proj_factorize,
                 **projector_kwargs,
             )
+
+            self.projector_grad = torch.compile(projector_grad)
 
     def grad_comp(self, grad_pre_activation: Tensor, per_sample: bool = True) -> Tuple[Tensor, Tensor]:
         """

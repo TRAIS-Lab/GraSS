@@ -141,11 +141,9 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
 
         proj_seed = projector_kwargs.get('proj_seed', 0)
         proj_factorize = projector_kwargs.get("proj_factorize", True)
-        localize = projector_kwargs.get("localize", -1)
 
         projector_kwargs.pop("proj_seed")
         projector_kwargs.pop("proj_factorize")
-        projector_kwargs.pop("localize")
 
         if layer == "Linear":
             proj_layer = (GCLinear, GCEmbedding)
@@ -160,9 +158,14 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
                 base_seed = proj_seed + int(1e4) * module_id
                 print(f"Setting projector for {module_name}...")
                 # push module_name to projector_kwargs
-                if localize > 0:
+                if projector_kwargs.get("method") == "Localize":
+                    active_indices = None
                     try:
-                        mask_path = f"../GPT2_wikitext/Localize/mask_{localize}/{module_name}.pt"
+                        dim = projector_kwargs["proj_dim"]
+                        if proj_factorize:
+                            mask_path = f"../GPT2_wikitext/Localize/mask_{dim}*{dim}/{module_name}.pt"
+                        else:
+                            mask_path = f"../GPT2_wikitext/Localize/mask_{dim}/{module_name}.pt"
                         active_indices = torch.load(mask_path, weights_only=False)
                     except FileNotFoundError:
                         print(f"Mask file not found for {module_name}. Using default active indices.")

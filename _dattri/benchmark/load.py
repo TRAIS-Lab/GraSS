@@ -17,19 +17,19 @@ from io import BytesIO
 import requests
 import torch
 
-from datasets.cifar import (
+from .datasets.cifar import (
     create_cifar2_dataset,
     create_resnet9_model,
     loss_cifar_resnet9,
     train_cifar_resnet9,
 )
-from datasets.maestro import (
+from .datasets.maestro import (
     create_maestro_datasets,
     create_musictransformer_model,
     loss_maestro_musictransformer,
     train_maestro_musictransformer,
 )
-from datasets.mnist import (
+from .datasets.mnist import (
     create_lr_model,
     create_mlp_model,
     create_mnist_dataset,
@@ -38,8 +38,8 @@ from datasets.mnist import (
     train_mnist_lr,
     train_mnist_mlp,
 )
-from datasets.shakespeare_char import create_shakespeare_dataset
-from utils import SubsetSampler
+from .datasets.shakespeare_char import create_shakespeare_dataset
+from .utils import SubsetSampler
 
 REPO_URL = "https://huggingface.co/datasets/trais-lab/dattri-benchmark/resolve/main/"
 

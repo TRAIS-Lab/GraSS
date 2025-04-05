@@ -79,11 +79,9 @@ def setup_projection_kwargs(args, device):
             proj_dim = int(proj_dim) # Convert to integer
 
     # Compatibility checking
-    if args.localize > 0:
-        assert proj_method == "Identity", "Localize option can't be combined with projection."
+    if proj_method == "Localize":
         assert args.layer == "Linear", "Localize option only works with Linear layer."
         assert args.random_drop == 0.0, "Localize option can't be combined with random drop."
-        assert args.threshold == 0.0, "Localize option can't be combined with threshold."
 
     projector_kwargs = {
         "proj_dim": proj_dim,
@@ -95,7 +93,6 @@ def setup_projection_kwargs(args, device):
         "use_half_precision": False,
         "threshold": args.threshold,
         "random_drop": args.random_drop,
-        "localize": args.localize,
     }
 
     return projector_kwargs
@@ -131,11 +128,9 @@ def result_filename(args):
     if args.projection is not None:
         filename_parts.append(args.projection)
 
-    if args.localize != 0.0:
-        filename_parts.append(f"loc-{args.localize}")
-    else:
-        filename_parts.append(f"thrd-{args.threshold}")
-        filename_parts.append(f"rdp-{args.random_drop}")
+
+    filename_parts.append(f"thrd-{args.threshold}")
+    filename_parts.append(f"rdp-{args.random_drop}")
 
     training_setting = args.output_dir.split("/")[-1]
     # Join parts and save the file

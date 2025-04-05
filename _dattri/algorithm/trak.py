@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 import torch
 from torch.func import vmap
 from tqdm import tqdm
-
+import time
 from ..func.projection import random_project
 from ..func.utils import _unflatten_params
 
@@ -109,6 +109,7 @@ class TRAKAttributor(BaseAttributor):
         """
         _check_shuffle(full_train_dataloader)
         self.full_train_dataloader = full_train_dataloader
+        proj_time = 0
         inv_XTX_XT_list = []
         running_Q = 0
         running_count = 0
@@ -149,6 +150,9 @@ class TRAKAttributor(BaseAttributor):
                 grad_t = torch.nan_to_num(grad_t)
                 grad_t /= self.norm_scaler
                 batch_size = grad_t.shape[0]
+
+                torch.cuda.synchronize()
+                start_time = time.time()
                 grad_p = (
                     random_project(
                         grad_t,
@@ -158,6 +162,9 @@ class TRAKAttributor(BaseAttributor):
                     .clone()
                     .detach()
                 )
+                torch.cuda.synchronize()
+                proj_time += time.time() - start_time
+
                 full_train_projected_grad.append(grad_p)
                 Q.append(
                     (
@@ -184,6 +191,7 @@ class TRAKAttributor(BaseAttributor):
             running_Q /= running_count
         self.inv_XTX_XT_list = inv_XTX_XT_list
         self.Q = running_Q
+        return proj_time
 
     def attribute(  # noqa: PLR0912,PLR0915
         self,
@@ -214,10 +222,6 @@ class TRAKAttributor(BaseAttributor):
         _check_shuffle(test_dataloader)
         if train_dataloader is not None:
             _check_shuffle(train_dataloader)
-
-        time_backward = 0
-        time_inner_product = 0
-        time_projection = 0
 
         running_xinv_XTX_XT = 0
         running_Q = 0
