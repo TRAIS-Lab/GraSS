@@ -28,7 +28,7 @@ DEFAULT_PROJECTOR_KWARGS = {
     "proj_seed": 0,
     "device": "cpu",
     "use_half_precision": False,
-    "threshold": None,
+    "threshold": 0.0,
 }
 
 
@@ -42,6 +42,7 @@ class TRAKAttributor(BaseAttributor):
         projector_kwargs: Optional[Dict[str, Any]] = None,
         layer_name: Optional[Union[str, List[str]]] = None,
         device: str = "cpu",
+        regularization: float = 0.0,
     ) -> None:
         """Initialize the TRAK attributor.
 
@@ -70,6 +71,10 @@ class TRAKAttributor(BaseAttributor):
                 if multiple layers are needed. The name of layer should follow the
                 key of model.named_parameters(). Default: None.
             device (str): The device to run the attributor. Default is "cpu".
+            regularization (float): Regularization term add before matrix inversion.
+                Useful for singular or ill-conditioned matrices.
+                Added as `regularization * I`, where `I` is the identity matrix.
+                Default is 0.0.
         """
         self.task = task
         self.norm_scaler = (
@@ -83,8 +88,6 @@ class TRAKAttributor(BaseAttributor):
         self.projector_kwargs = DEFAULT_PROJECTOR_KWARGS
         if projector_kwargs is not None:
             self.projector_kwargs.update(projector_kwargs)
-            self.threshold = projector_kwargs.get("threshold", None)
-            self.projector_kwargs.pop("threshold")
 
         self.layer_name = layer_name
         self.device = device
@@ -96,6 +99,7 @@ class TRAKAttributor(BaseAttributor):
             randomness="different",
         )
         self.full_train_dataloader = None
+        self.regularization = regularization
 
     def cache(
         self,
@@ -113,6 +117,10 @@ class TRAKAttributor(BaseAttributor):
         inv_XTX_XT_list = []
         running_Q = 0
         running_count = 0
+
+        num_zeros = 0
+        total_num = 0
+
         for ckpt_idx in range(len(self.task.get_checkpoints())):
             parameters, _ = self.task.get_param(
                 ckpt_idx=ckpt_idx,
@@ -149,9 +157,13 @@ class TRAKAttributor(BaseAttributor):
                 grad_t = self.grad_loss_func(parameters, train_batch_data)
                 grad_t = torch.nan_to_num(grad_t)
                 grad_t /= self.norm_scaler
+
+                # record sparsity
+                num_zeros += torch.sum(grad_t == 0).item()
+                total_num += grad_t.numel()
                 batch_size = grad_t.shape[0]
 
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 start_time = time.time()
                 grad_p = (
                     random_project(
@@ -162,7 +174,7 @@ class TRAKAttributor(BaseAttributor):
                     .clone()
                     .detach()
                 )
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 proj_time += time.time() - start_time
 
                 full_train_projected_grad.append(grad_p)
@@ -179,19 +191,19 @@ class TRAKAttributor(BaseAttributor):
                 )
             full_train_projected_grad = torch.cat(full_train_projected_grad, dim=0)
             Q = torch.cat(Q, dim=0)
-            inv_XTX_XT = (
-                torch.linalg.inv(
-                    full_train_projected_grad.T @ full_train_projected_grad,
-                )
-                @ full_train_projected_grad.T
-            )
+            kernel_matrix = full_train_projected_grad.T @ full_train_projected_grad
+            kernel_matrix.diagonal().add_(self.regularization)
+            inv_XTX_XT = (torch.linalg.inv(kernel_matrix) @ full_train_projected_grad.T)
             inv_XTX_XT_list.append(inv_XTX_XT)
             running_Q = running_Q * running_count + Q
             running_count += 1  # noqa: SIM113
             running_Q /= running_count
         self.inv_XTX_XT_list = inv_XTX_XT_list
         self.Q = running_Q
-        return proj_time
+
+        sparsity = num_zeros / total_num
+        print(f"gradient sparsity: {sparsity:.4f}")
+        print("projection time:", proj_time)
 
     def attribute(  # noqa: PLR0912,PLR0915
         self,
@@ -336,10 +348,12 @@ class TRAKAttributor(BaseAttributor):
             test_projected_grad = torch.cat(test_projected_grad, dim=0)
 
             if train_dataloader is not None:
+                kernel_matrix = train_projected_grad.T @ train_projected_grad
+                kernel_matrix.diagonal().add_(self.regularization)
                 running_xinv_XTX_XT = (
                     running_xinv_XTX_XT * running_count
                     + test_projected_grad
-                    @ torch.linalg.inv(train_projected_grad.T @ train_projected_grad)
+                    @ torch.linalg.inv(kernel_matrix)
                     @ train_projected_grad.T
                 )
             else:

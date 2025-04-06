@@ -14,17 +14,18 @@ from _dattri.metric import lds
 from _dattri.task import AttributionTask
 
 
-if __name__ == "__main__":
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--proj_method", type=str, default="Gaussian")
+    parser.add_argument("--proj_dim", type=int, default=1024)
+    parser.add_argument("--damping", type=float, default=0.1)
     args = parser.parse_args()
 
     # create cifar 10 dataset
     model_details, groundtruth = load_benchmark(
         model="resnet9", dataset="cifar2", metric="lds"
     )
-
-    print(groundtruth[0].shape)
 
     model = model_details["model"].to(args.device)
     model = model.eval()
@@ -47,13 +48,13 @@ if __name__ == "__main__":
         p = torch.exp(-loss(yhat, label_t))
         return p
 
-    task = AttributionTask(model=model, loss_func=f, checkpoints=model_details["models_full"][:5])
+    task = AttributionTask(model=model, loss_func=f, checkpoints=model_details["models_half"][:10])
 
     projector_kwargs = {
         "device": args.device,
         "use_half_precision": False,
-        "method": "SJLT",
-        "proj_dim": 4096,
+        "method": args.proj_method,
+        "proj_dim": args.proj_dim,
     }
 
     attributor = TRAKAttributor(
@@ -61,6 +62,7 @@ if __name__ == "__main__":
         correct_probability_func=m,
         device=args.device,
         projector_kwargs=projector_kwargs,
+        regularization=args.damping,
     )
 
     train_dataloader = torch.utils.data.DataLoader(
@@ -75,11 +77,13 @@ if __name__ == "__main__":
         sampler=model_details["test_sampler"],
     )
 
-    proj_time = attributor.cache(train_dataloader)
-    print("projection time:", proj_time)
+    attributor.cache(train_dataloader)
+
     with torch.no_grad():
         score = attributor.attribute(test_dataloader=test_dataloader)
 
-    print("score shape:", score.shape)
     lds_score = lds(score, groundtruth)[0]
     print("lds:", torch.mean(lds_score[~torch.isnan(lds_score)]))
+
+if __name__ == "__main__":
+    main()
