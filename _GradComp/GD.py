@@ -172,7 +172,7 @@ class GradDotAttributor():
                 train_labels = train_batch["labels"].to(self.device)
 
                 # time backward pass
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 start = time.time()
 
                 # Forward pass
@@ -190,7 +190,7 @@ class GradDotAttributor():
                 # Calculate gradients
                 Z_grad_train = torch.autograd.grad(train_loss, train_pre_acts, retain_graph=True)
 
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 end = time.time()
                 time_backward += end - start
 
@@ -237,13 +237,13 @@ class GradDotAttributor():
             test_pre_acts = [layer.pre_activation for layer in self.layer_name]
 
             # time backward pass
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(self.device)
             start = time.time()
 
             # Calculate gradients
             Z_grad_test = torch.autograd.grad(test_loss, test_pre_acts, retain_graph=True)
 
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(self.device)
             end = time.time()
             time_backward += end - start
 
@@ -253,12 +253,12 @@ class GradDotAttributor():
                     grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_test, per_sample=True)
 
                     # time inner product
-                    torch.cuda.synchronize()
+                    torch.cuda.synchronize(self.device)
                     start = time.time()
 
                     result = layer.grad_dot_prod_from_grad_comp(train_grad_comp_1[layer_id], train_grad_comp_2[layer_id], grad_comp_1, grad_comp_2)
 
-                    torch.cuda.synchronize()
+                    torch.cuda.synchronize(self.device)
                     end = time.time()
                     time_inner_product += end - start
 

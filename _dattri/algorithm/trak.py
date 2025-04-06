@@ -205,6 +205,8 @@ class TRAKAttributor(BaseAttributor):
         print(f"gradient sparsity: {sparsity:.4f}")
         print("projection time:", proj_time)
 
+        return proj_time
+
     def attribute(  # noqa: PLR0912,PLR0915
         self,
         test_dataloader: torch.utils.data.DataLoader,

@@ -648,10 +648,10 @@ def main():
 
             if args.profile:
                 # Measure cache throughput
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(device)
                 cache_start_time = time.time()
                 attributor.cache(train_dataloader)
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(device)
                 cache_end_time = time.time()
                 cache_duration = cache_end_time - cache_start_time
                 cache_throughput = train_tokens / cache_duration
@@ -664,10 +664,10 @@ def main():
 
 
                 # Measure attribute throughput
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(device)
                 attribute_start_time = time.time()
                 score, profile = attributor.attribute(test_dataloader=test_dataloader)
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(device)
                 attribute_end_time = time.time()
                 attribute_duration = attribute_end_time - attribute_start_time
                 attribute_throughput = test_samples / attribute_duration
@@ -707,10 +707,10 @@ def main():
 
         if args.profile:
             # Measure cache throughput
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(device)
             cache_start_time = time.time()
             attributor.cache(train_dataloader=train_dataloader)
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(device)
             cache_end_time = time.time()
             cache_duration = cache_end_time - cache_start_time
             cache_throughput = train_tokens / cache_duration
@@ -722,10 +722,10 @@ def main():
             print(f"Cache throughput: {cache_throughput:.2f} tokens/sec")
 
            # Measure attribute throughput
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(device)
             attribute_start_time = time.time()
             score, profile = attributor.attribute(test_dataloader=test_dataloader)
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(device)
             attribute_end_time = time.time()
             attribute_duration = attribute_end_time - attribute_start_time
             attribute_throughput = test_samples / attribute_duration
@@ -783,11 +783,11 @@ def main():
         )
 
         # Measure cache throughput
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(device)
         cache_start_time = time.time()
         trainer.extract_log()
-        torch.cuda.synchronize()
-        cache_end_time = time.time()
+        torch.cuda.synchronize(device)
+        cache_end_time = time.time(device)
         cache_duration = cache_end_time - cache_start_time
         cache_throughput = train_tokens / cache_duration
         throughput_stats["cache"] = {
@@ -828,10 +828,10 @@ def main():
         )
 
         # Measure attribute throughput
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(device)
         attribute_start_time = time.time()
         result = trainer.influence()
-        torch.cuda.synchronize()
+        torch.cuda.synchronize(device)
         attribute_end_time = time.time()
         attribute_duration = attribute_end_time - attribute_start_time
         attribute_throughput = test_samples / attribute_duration

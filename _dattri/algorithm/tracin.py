@@ -311,7 +311,7 @@ class TracInAttributor(BaseAttributor):
 
                 # Apply projection if specified
                 if self.projector_kwargs is not None:
-                    torch.cuda.synchronize()
+                    torch.cuda.synchronize(self.device)
                     start = time.time()
 
                     test_random_project = random_project(

@@ -125,7 +125,7 @@ class IFAttributor():
 
             # Time forward/backward pass
             if self.profile:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 start_time = time.time()
 
             # Forward pass
@@ -137,35 +137,35 @@ class IFAttributor():
             )
 
             if self.profile:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 self.profiling_stats['forward'] += time.time() - start_time
 
             logp = -outputs.loss
             train_loss = logp - torch.log(1 - torch.exp(logp))
 
             if self.profile:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 start_time = time.time()
 
             train_pre_acts = [layer.pre_activation for layer in self.layer_name]
             Z_grad_train = torch.autograd.grad(train_loss, train_pre_acts, retain_graph=True)
 
             if self.profile:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 self.profiling_stats['backward'] += time.time() - start_time
 
             # Compute FIM factors for each layer
             with torch.no_grad():
                 for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
                     if self.profile:
-                        torch.cuda.synchronize()
+                        torch.cuda.synchronize(self.device)
                         start_time = time.time()
 
                     grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_full, per_sample=True)
                     grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
 
                     if self.profile:
-                        torch.cuda.synchronize()
+                        torch.cuda.synchronize(self.device)
                         self.profiling_stats['projection'] += time.time() - start_time
 
                     if train_grad[layer_id] is None:
@@ -180,18 +180,18 @@ class IFAttributor():
 
                     # Time Hessian calculation
                     if self.profile:
-                        torch.cuda.synchronize()
+                        torch.cuda.synchronize(self.device)
                         start_time = time.time()
 
                     Hessian[layer_id] += torch.matmul(grad.t(), grad) / num_samples
 
                     if self.profile:
-                        torch.cuda.synchronize()
+                        torch.cuda.synchronize(self.device)
                         self.profiling_stats['precondition'] += time.time() - start_time
 
         # Time inverse Hessian calculation
         if self.profile:
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(self.device)
             start_time = time.time()
 
         print(f"Calculating iFVP...")
@@ -203,7 +203,7 @@ class IFAttributor():
             ).t()
 
         if self.profile:
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(self.device)
             self.profiling_stats['precondition'] += time.time() - start_time
 
         return ifvp_train
@@ -288,7 +288,7 @@ class IFAttributor():
 
              # Time forward pass
             if self.profile:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 start_time = time.time()
 
             outputs = self.model(
@@ -298,7 +298,7 @@ class IFAttributor():
             )
 
             if self.profile:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 self.profiling_stats['forward'] += time.time() - start_time
 
             logp = -outputs.loss
@@ -306,27 +306,27 @@ class IFAttributor():
 
             # Time backward pass
             if self.profile:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 start_time = time.time()
 
             test_pre_acts = [layer.pre_activation for layer in self.layer_name]
             Z_grad_test = torch.autograd.grad(test_loss, test_pre_acts, retain_graph=True)
 
             if self.profile:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 self.profiling_stats['backward'] += time.time() - start_time
 
             with torch.no_grad():
                 for layer_id, (layer, z_grad_test) in enumerate(zip(self.layer_name, Z_grad_test)):
                     if self.profile:
-                        torch.cuda.synchronize()
+                        torch.cuda.synchronize(self.device)
                         start_time = time.time()
 
                     grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_test, per_sample=True)
                     test_grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
 
                     if self.profile:
-                        torch.cuda.synchronize()
+                        torch.cuda.synchronize(self.device)
                         self.profiling_stats['projection'] += time.time() - start_time
 
 

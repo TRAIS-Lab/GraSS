@@ -22,6 +22,12 @@ def main():
     parser.add_argument("--damping", type=float, default=0.1)
     args = parser.parse_args()
 
+    # Print the settings
+    print("Settings: ResNet9 + CIFAR2")
+    print("Projection Method:", args.proj_method)
+    print("Projection Dimension:", args.proj_dim)
+    print("Damping:", args.damping)
+
     # create cifar 10 dataset
     model_details, groundtruth = load_benchmark(
         model="resnet9", dataset="cifar2", metric="lds"
@@ -48,7 +54,7 @@ def main():
         p = torch.exp(-loss(yhat, label_t))
         return p
 
-    task = AttributionTask(model=model, loss_func=f, checkpoints=model_details["models_half"][:10])
+    task = AttributionTask(model=model, loss_func=f, checkpoints=model_details["models_half"][:5])
 
     projector_kwargs = {
         "device": args.device,

@@ -207,14 +207,14 @@ class IFAttributor:
 
             # Time forward pass
             if self.profile:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 start_time = time.time()
 
             # Forward pass
             outputs = self.model(**inputs) if isinstance(inputs, dict) else self.model(inputs)
 
             if self.profile:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 self.profiling_stats['forward'] += time.time() - start_time
 
             # Compute custom loss
@@ -223,14 +223,14 @@ class IFAttributor:
 
             # Time backward pass
             if self.profile:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 start_time = time.time()
 
             # Backward pass
             loss.backward(retain_graph=True)
 
             if self.profile:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 self.profiling_stats['backward'] += time.time() - start_time
 
             for name, module in self.lora_modules.items():
@@ -251,7 +251,7 @@ class IFAttributor:
 
         # Time hessian
         if self.profile:
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(self.device)
             start_time = time.time()
 
         # Compute covariance matrices if needed
@@ -366,13 +366,13 @@ class IFAttributor:
             # Compute eigendecomposition for Hessian approximation
             if self.hessian in ["kfac", "ekfac"]:
                 if self.profile:
-                    torch.cuda.synchronize()
+                    torch.cuda.synchronize(self.device)
                     start_time = time.time()
 
                 self._compute_eigendecomposition()
 
                 if self.profile:
-                    torch.cuda.synchronize()
+                    torch.cuda.synchronize(self.device)
                     self.profiling_stats['precondition'] += time.time() - start_time
 
         # Concatenate gradients for each module
@@ -415,13 +415,13 @@ class IFAttributor:
         if self.hessian == "ekfac":
             # Compute EK-FAC eigenvalues if needed
             if self.profile:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 start_time = time.time()
 
             self._compute_ekfac_eigenvalues_from_gradients()
 
             if self.profile:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 self.profiling_stats['precondition'] += time.time() - start_time
 
         return {
@@ -629,14 +629,14 @@ class IFAttributor:
 
             # Time forward pass
             if self.profile:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 start_time = time.time()
 
             # Forward pass
             outputs = self.model(**inputs) if isinstance(inputs, dict) else self.model(inputs)
 
             if self.profile:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 self.profiling_stats['forward'] += time.time() - start_time
 
             logp = -outputs.loss
@@ -644,14 +644,14 @@ class IFAttributor:
 
             # Time backward pass
             if self.profile:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 start_time = time.time()
 
             # Backward pass
             loss.backward()
 
             if self.profile:
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(self.device)
                 self.profiling_stats['backward'] += time.time() - start_time
 
             # Collect projected gradients
@@ -866,7 +866,7 @@ class IFAttributor:
         IF_score = torch.zeros((num_train_samples, num_test_samples), device=self.train_gradients.device)
 
         if self.profile:
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(self.device)
             start_time = time.time()
 
         # Compute influence scores based on hessian approximation
@@ -946,7 +946,7 @@ class IFAttributor:
             raise ValueError(f"Unsupported hessian approximation: {self.hessian}")
 
         if self.profile:
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(self.device)
             self.profiling_stats['precondition'] += time.time() - start_time
 
         return (IF_score, self.profiling_stats) if self.profile else IF_score
