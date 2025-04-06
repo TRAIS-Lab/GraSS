@@ -94,7 +94,7 @@ def main():
     args = parser.parse_args()
 
     # Define the grid of damping values to search
-    damping_values = [0.1, 1.0, 10.0, 100.0, 1000.0]
+    damping_values = [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e3, 1e4]
 
     # Print the settings
     print("Settings: MusicTransformer + MAESTRO")
@@ -236,7 +236,7 @@ def main():
         "proj_time": proj_time,
     }
 
-    torch.save(result, f".results/{args.proj_method}-{args.proj_dim}.pt")
+    torch.save(result, f"./results/{args.proj_method}-{args.proj_dim}-{best_damping}.pt")
 
 if __name__ == "__main__":
     main()
