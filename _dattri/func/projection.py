@@ -1288,76 +1288,6 @@ def random_project(
 
     return _random_project_func
 
-def SJLT(vecs, proj_dim, threshold=0, rand_indices_and_signs=None, seed=0, batch_size=32, c=1, blow_up=1):
-    """
-    Batched SJLT implementation that processes input vectors in smaller batches
-
-    Args:
-        vecs (torch.Tensor): Input tensor of shape [num_vectors, original_dim]
-        proj_dim (int): Target projection dimension
-        threshold (float): Threshold for sparsity. Default: 0
-        rand_indices_and_signs (tuple): Precomputed random indices and signs. Default: None
-        seed (int): Random seed for reproducibility. Default: 0
-        batch_size (int): Number of vectors to process at once. Default: 32
-        c (int): Sparsity parameter. Default: 5
-        blow_up (int): Intermediate dimension multiplier. Default: 1
-
-    Returns:
-        torch.Tensor: Projected tensor of shape [num_vectors, proj_dim]
-    """
-    num_vectors, original_dim = vecs.size()
-    device = vecs.device
-
-    if rand_indices_and_signs is None:
-        torch.manual_seed(seed)
-        rand_indices = torch.randint(proj_dim * blow_up, (original_dim, c), device=device)
-        rand_signs = torch.randint(0, 2, (original_dim, c), device=device) * 2 - 1
-    else:
-        rand_indices, rand_signs = rand_indices_and_signs
-        # print(rand_indices.shape, rand_signs.shape)
-        # print(original_dim, c)
-
-        assert rand_indices.shape == (original_dim, c), "Invalid random indices shape"
-        assert rand_signs.shape == (original_dim, c), "Invalid random signs shape"
-
-    # Initialize output tensor
-    output = torch.zeros(num_vectors, proj_dim, device=device)
-
-    # Process in batches
-    for i in range(0, num_vectors, batch_size):
-        end_idx = min(i + batch_size, num_vectors)
-
-        # Process batch using original SJLT function
-        batch_output = sjlt(vecs[i:end_idx], proj_dim, threshold, rand_indices, rand_signs, c, blow_up)
-
-        # Store batch output
-        output[i:end_idx] = batch_output
-
-    return output
-
-def sjlt(vecs, proj_dim, threshold, rand_indices, rand_signs, c, blow_up):
-    batch_size, _ = vecs.size()
-    device = vecs.device
-
-    # Get indices of elements above threshold in a single pass
-    batch_idx, input_idx = torch.nonzero(torch.abs(vecs) >= threshold, as_tuple=True)
-    if input_idx.numel() == 0:
-        return torch.zeros(batch_size, proj_dim, device=device)
-
-    values = vecs[batch_idx, input_idx]
-
-    scaled_vals = values.repeat_interleave(c) * rand_signs[input_idx].flatten()
-    final_indices = batch_idx.repeat_interleave(c) * (proj_dim * blow_up) + rand_indices[input_idx].flatten()
-
-    # Initialize and fill output tensor
-    vecs_p = torch.zeros(batch_size, proj_dim * blow_up, device=device)
-    vecs_p.view(-1).index_add_(0, final_indices, scaled_vals)
-
-    # Sum and normalize
-    vecs_p = vecs_p.view(batch_size, proj_dim, blow_up).sum(dim=2)
-    return vecs_p / (c ** 0.5)
-
-
 def backward_SJLT_indices(proj_dim, c, device, active_indices, seed=0):
     """
     Fully vectorized representation for SJLT contribution indices.
@@ -1404,3 +1334,72 @@ def backward_SJLT_indices(proj_dim, c, device, active_indices, seed=0):
         'pos_output_mapping': pos_output_mapping,
         'neg_output_mapping': neg_output_mapping,
     }
+
+# def SJLT(vecs, proj_dim, threshold=0, rand_indices_and_signs=None, seed=0, batch_size=32, c=1, blow_up=1):
+#     """
+#     Batched SJLT implementation that processes input vectors in smaller batches
+
+#     Args:
+#         vecs (torch.Tensor): Input tensor of shape [num_vectors, original_dim]
+#         proj_dim (int): Target projection dimension
+#         threshold (float): Threshold for sparsity. Default: 0
+#         rand_indices_and_signs (tuple): Precomputed random indices and signs. Default: None
+#         seed (int): Random seed for reproducibility. Default: 0
+#         batch_size (int): Number of vectors to process at once. Default: 32
+#         c (int): Sparsity parameter. Default: 5
+#         blow_up (int): Intermediate dimension multiplier. Default: 1
+
+#     Returns:
+#         torch.Tensor: Projected tensor of shape [num_vectors, proj_dim]
+#     """
+#     num_vectors, original_dim = vecs.size()
+#     device = vecs.device
+
+#     if rand_indices_and_signs is None:
+#         torch.manual_seed(seed)
+#         rand_indices = torch.randint(proj_dim * blow_up, (original_dim, c), device=device)
+#         rand_signs = torch.randint(0, 2, (original_dim, c), device=device) * 2 - 1
+#     else:
+#         rand_indices, rand_signs = rand_indices_and_signs
+#         # print(rand_indices.shape, rand_signs.shape)
+#         # print(original_dim, c)
+
+#         assert rand_indices.shape == (original_dim, c), "Invalid random indices shape"
+#         assert rand_signs.shape == (original_dim, c), "Invalid random signs shape"
+
+#     # Initialize output tensor
+#     output = torch.zeros(num_vectors, proj_dim, device=device)
+
+#     # Process in batches
+#     for i in range(0, num_vectors, batch_size):
+#         end_idx = min(i + batch_size, num_vectors)
+
+#         # Process batch using original SJLT function
+#         batch_output = sjlt(vecs[i:end_idx], proj_dim, threshold, rand_indices, rand_signs, c, blow_up)
+
+#         # Store batch output
+#         output[i:end_idx] = batch_output
+
+#     return output
+
+# def sjlt(vecs, proj_dim, threshold, rand_indices, rand_signs, c, blow_up):
+#     batch_size, _ = vecs.size()
+#     device = vecs.device
+
+#     # Get indices of elements above threshold in a single pass
+#     batch_idx, input_idx = torch.nonzero(torch.abs(vecs) >= threshold, as_tuple=True)
+#     if input_idx.numel() == 0:
+#         return torch.zeros(batch_size, proj_dim, device=device)
+
+#     values = vecs[batch_idx, input_idx]
+
+#     scaled_vals = values.repeat_interleave(c) * rand_signs[input_idx].flatten()
+#     final_indices = batch_idx.repeat_interleave(c) * (proj_dim * blow_up) + rand_indices[input_idx].flatten()
+
+#     # Initialize and fill output tensor
+#     vecs_p = torch.zeros(batch_size, proj_dim * blow_up, device=device)
+#     vecs_p.view(-1).index_add_(0, final_indices, scaled_vals)
+
+#     # Sum and normalize
+#     vecs_p = vecs_p.view(batch_size, proj_dim, blow_up).sum(dim=2)
+#     return vecs_p / (c ** 0.5)
