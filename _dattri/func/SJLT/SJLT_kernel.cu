@@ -102,6 +102,13 @@ std::vector<torch::Tensor> sjlt_projection_cuda(
     int threads,
     int fixed_blocks) {
 
+    // IMPORTANT CHANGE: Get the device index of the input tensor
+    // This ensures we run the kernels on the same device as the input
+    int device_idx = input.device().index();
+
+    // Set current device to match the input tensor's device
+    cudaSetDevice(device_idx);
+
     // Set the cache configuration (call this once)
     static bool cacheConfigSet = false;
     if (!cacheConfigSet) {
@@ -112,7 +119,7 @@ std::vector<torch::Tensor> sjlt_projection_cuda(
     auto batch_size = input.size(0);
     auto original_dim = input.size(1);
 
-    // Create output tensor
+    // Create output tensor on the same device as input
     auto output = torch::zeros({batch_size, proj_dim},
                               torch::TensorOptions()
                               .dtype(input.dtype())
@@ -120,9 +127,6 @@ std::vector<torch::Tensor> sjlt_projection_cuda(
 
     // Compute normalization factor
     float normalization_factor = 1.0f / sqrt(c);
-
-    // Fix the number of blocks to the specified value
-    // const int fixed_blocks = 168;
 
     // Ensure threads is a multiple of 32 (warp size) for optimal performance
     threads = (threads / 32) * 32;
@@ -146,6 +150,12 @@ std::vector<torch::Tensor> sjlt_projection_cuda(
             proj_dim,
             normalization_factor);
     }));
+
+    // Check for CUDA errors
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(cudaGetErrorString(err));
+    }
 
     return {output};
 }

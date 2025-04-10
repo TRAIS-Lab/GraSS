@@ -1,7 +1,7 @@
-# sjlt_cuda.py
+import torch
+import math
 import os
 import subprocess
-import torch
 
 # Check if the CUDA extension is already compiled
 try:
@@ -24,7 +24,9 @@ class SJLTProjection(torch.nn.Module):
             original_dim: Original dimension of the input vectors
             proj_dim: Target projection dimension
             c: Number of non-zeros per column (sparsity parameter)
-            device: Device to run the computation on
+            threads: Number of CUDA threads per block
+            fixed_blocks: Number of CUDA blocks to use
+            device: Device to run the computation on (e.g., 'cuda:0', 'cuda:1')
         """
         super(SJLTProjection, self).__init__()
 
@@ -56,14 +58,20 @@ class SJLTProjection(torch.nn.Module):
         Returns:
             Projected tensor of shape [batch_size, proj_dim]
         """
-        # Ensure input is on the correct device
-        x = x.to(self.device)
+        # Move input to the specified device if necessary
+        if x.device != self.rand_indices.device:
+            x = x.to(self.device)
+
+        # Ensure indices and signs are on the same device as input
+        # This is a safety check in case device context has changed
+        rand_indices = self.rand_indices.to(x.device)
+        rand_signs = self.rand_signs.to(x.device)
 
         # Apply SJLT projection using CUDA kernel
         output = sjlt_cuda_ext.sjlt_projection_cuda(
             x,
-            self.rand_indices,
-            self.rand_signs,
+            rand_indices,
+            rand_signs,
             self.proj_dim,
             self.c,
             self.threads,
