@@ -609,7 +609,7 @@ def main():
     profile = None
     if args.baseline == "GC": #TODO: merge GC with IF-RAW
         check_min_version("4.46.0")
-        from GPT2_wikitext.GradComp.utils import find_GClayers
+        from _GradComp.layers.utils import find_GClayers
 
         # get which Hessian to use
         tda, hessian = args.tda.split("-")
@@ -702,6 +702,7 @@ def main():
             hessian=hessian,
             projector_kwargs=projector_kwargs,
             profile=args.profile,
+            device=device,
             cpu_offload=True,
         )
 

@@ -562,7 +562,7 @@ def main():
     checkpoint = f"{args.output_dir}/{model_id}"
 
     check_min_version("4.46.0")
-    from GPT2_wikitext.GradComp.utils import find_GClayers
+    from _GradComp.layers.utils import find_GClayers
 
     model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
     model.set_projectors(args.layer, projector_kwargs, train_dataloader)

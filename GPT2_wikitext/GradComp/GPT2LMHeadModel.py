@@ -19,70 +19,55 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
     def __init__(self, config):
         super().__init__(config)
         self.hooks = []
-        self._replace_with_GC_layers()
+        self._replace_with_GC_layers(self)
 
-
-    def _replace_with_GC_layers(self):
+    def _replace_with_GC_layers(self, module):
         """
-        Replace standard layers with GC layers in GPT2 model.
+        Recursively traverse model structure and replace layers based on their type.
+
+        Args:
+            module: Current module to process
         """
-        # Replace word embeddings
-        if hasattr(self.transformer, 'wte'):
-            token_embedding = GCEmbedding(
-                num_embeddings=self.transformer.wte.num_embeddings,
-                embedding_dim=self.transformer.wte.embedding_dim
-            )
-            self.transformer.wte = token_embedding
+        # Get all named children (direct submodules)
+        for name, child in list(module.named_children()):
+            # First recursively process any children of this child
+            self._replace_with_GC_layers(child)
 
-        if hasattr(self.transformer, 'wpe'):
-            position_embedding = GCEmbedding(
-                num_embeddings=self.transformer.wpe.num_embeddings,
-                embedding_dim=self.transformer.wpe.embedding_dim
-            )
-            self.transformer.wpe = position_embedding
+            # Then check if this child needs replacement
+            if isinstance(child, nn.Linear) or isinstance(child, Conv1D):
+                # Replace with GCLinear
+                new_layer = self._create_GCLinear(child)
+                setattr(module, name, new_layer)
 
-        # Replace layers in transformer blocks
-        if hasattr(self, 'transformer') and hasattr(self.transformer, 'h'):
-            for i, block in enumerate(self.transformer.h):
-                # Replace attention layers
-                if hasattr(block, 'attn'):
-                    if hasattr(block.attn, 'c_attn'):
-                        new_layer = self._create_GCLinear(block.attn.c_attn)
-                        block.attn.c_attn = new_layer
+            elif isinstance(child, nn.Embedding):
+                # Replace with GCEmbedding
+                new_layer = GCEmbedding(
+                    num_embeddings=child.num_embeddings,
+                    embedding_dim=child.embedding_dim,
+                    padding_idx=child.padding_idx
+                )
+                # Copy the weights
+                new_layer.weight.data = child.weight.data.clone()
+                setattr(module, name, new_layer)
 
-                    if hasattr(block.attn, 'c_proj'):
-                        new_layer = self._create_GCLinear(block.attn.c_proj)
-                        block.attn.c_proj = new_layer
-
-                # Replace MLP layers
-                if hasattr(block, 'mlp'):
-                    if hasattr(block.mlp, 'c_fc'):
-                        new_layer = self._create_GCLinear(block.mlp.c_fc)
-                        block.mlp.c_fc = new_layer
-
-                    if hasattr(block.mlp, 'c_proj'):
-                        new_layer = self._create_GCLinear(block.mlp.c_proj)
-                        block.mlp.c_proj = new_layer
-
-                # Replace LayerNorm layers
-                for ln_attr in ['ln_1', 'ln_2']:
-                    if hasattr(block, ln_attr):
-                        new_ln_layer = self._create_GCLayerNorm(getattr(block, ln_attr))
-                        setattr(block, ln_attr, new_ln_layer)
-
-        # Replace final layers
-        if hasattr(self, 'lm_head'):
-            new_layer = self._create_GCLinear(self.lm_head)
-            self.lm_head = new_layer
-
-        if hasattr(self.transformer, 'ln_f'):
-            new_ln_layer = self._create_GCLayerNorm(self.transformer.ln_f)
-            self.transformer.ln_f = new_ln_layer
+            elif isinstance(child, nn.LayerNorm):
+                # Replace with GCLayerNorm
+                new_layer = GCLayerNorm(
+                    normalized_shape=child.normalized_shape,
+                    elementwise_affine=child.elementwise_affine,
+                    eps=child.eps
+                )
+                # Copy weights and biases if they exist
+                if child.elementwise_affine:
+                    new_layer.weight.data = child.weight.data.clone()
+                    new_layer.bias.data = child.bias.data.clone()
+                setattr(module, name, new_layer)
 
     def _create_GCLinear(self, old_layer):
         """
         Create a GC layer from either Conv1D or Linear layer.
         """
+        assert isinstance(old_layer, (nn.Linear, Conv1D)), "Layer must be either Linear or Conv1D"
         if isinstance(old_layer, Conv1D):
             # Conv1D uses transposed weights compared to Linear
             new_layer = GCLinear(
@@ -102,8 +87,6 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
             new_layer.weight.data = old_layer.weight.clone()
             if old_layer.bias is not None:
                 new_layer.bias.data = old_layer.bias.clone()
-        else:
-            raise ValueError(f"Unsupported layer type: {type(old_layer)}")
 
         return new_layer
 
@@ -111,18 +94,16 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
         """
         Create a GCLayerNorm from a standard LayerNorm.
         """
-        if isinstance(old_layer, nn.LayerNorm):
-            # Create the custom LayerNorm layer with the same configuration
-            new_layer = GCLayerNorm(
-                normalized_shape=old_layer.normalized_shape,
-                elementwise_affine=old_layer.elementwise_affine,
-            )
-            # Copy weights and biases if they exist
-            if old_layer.elementwise_affine:
-                new_layer.weight.data = old_layer.weight.clone()
-                new_layer.bias.data = old_layer.bias.clone()
-        else:
-            raise ValueError(f"Unsupported layer type for LayerNorm: {type(old_layer)}")
+        assert isinstance(old_layer, nn.LayerNorm), "Layer must be a LayerNorm"
+        new_layer = GCLayerNorm(
+            normalized_shape=old_layer.normalized_shape,
+            elementwise_affine=old_layer.elementwise_affine,
+        )
+        # Copy weights and biases if they exist
+        if old_layer.elementwise_affine:
+            new_layer.weight.data = old_layer.weight.clone()
+            new_layer.bias.data = old_layer.bias.clone()
+
         return new_layer
 
     def set_projectors(self, layer, projector_kwargs, train_dataloader):

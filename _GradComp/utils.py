@@ -11,8 +11,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Any, Dict, Optional, Tuple
 
-import functools
-
 import torch
 from torch import Tensor
 

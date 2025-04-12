@@ -27,6 +27,7 @@ class IFAttributor:
             damping: float = None,
             projector_kwargs: dict = None,
             profile: bool = False,
+            device: str = "cpu",
             cpu_offload: bool = False,
         ):
         """
@@ -37,6 +38,8 @@ class IFAttributor:
             layer_type: Type of layers to add LoRA to
             hessian: Method for Hessian approximation ("none", "raw", "kfac", "ekfac")
             projector_kwargs: Dictionary of projector configuration
+            profile: Whether to profile the computation
+            device: Device to use for computation
             cpu_offload: Whether to offload gradients to CPU
         """
         self.model = model
@@ -44,6 +47,7 @@ class IFAttributor:
         self.hessian = hessian
         self.damping = damping
         self.profile = profile
+        self.device = device
         self.cpu_offload = cpu_offload
 
         proj_dim = projector_kwargs.get("proj_dim", None)
