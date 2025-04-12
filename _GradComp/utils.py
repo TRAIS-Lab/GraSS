@@ -160,3 +160,42 @@ def get_parameter_chunk_sizes(
     params_per_chunk = [max_chunk_size] * num_chunk + [remaining]
 
     return max_chunk_size, params_per_chunk
+
+def stable_inverse(matrix: torch.Tensor, damping: float = None) -> torch.Tensor:
+    """
+    Compute a numerically stable inverse of a matrix using eigendecomposition.
+
+    Args:
+        matrix: Input matrix to invert
+        damping: Damping factor for numerical stability
+
+    Returns:
+        Stable inverse of the input matrix
+    """
+    # sometimes the matrix is a single number, so we need to check if it's a scalar
+    if len(matrix.shape) == 0:
+        if matrix == 0:
+            # return a 2d 0 tensor
+            return torch.tensor([[0.0]], device=matrix.device)
+        else:
+            if damping is None:
+                return torch.tensor([[1.0 / (matrix * 1.1)]], device=matrix.device)
+            else:
+                return torch.tensor([[1.0 / (matrix * (1 + damping))]], device=matrix.device)
+
+    # Add damping to the diagonal
+    if damping is None:
+        damping = 0.1 * torch.trace(matrix) / matrix.size(0)
+
+    damped_matrix = matrix + damping * torch.eye(matrix.size(0), device=matrix.device)
+
+    try:
+        # Try Cholesky decomposition first (more stable)
+        L = torch.linalg.cholesky(damped_matrix)
+        inverse = torch.cholesky_inverse(L)
+    except RuntimeError:
+        print(f"Falling back to direct inverse due to Cholesky failure")
+        # Fall back to direct inverse
+        inverse = torch.inverse(damped_matrix)
+
+    return inverse

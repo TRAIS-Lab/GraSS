@@ -22,28 +22,28 @@ class IFAttributor:
     def __init__(
             self,
             model: nn.Module,
-            layer_name: str = "Linear",
-            hessian: str = "kfac",
+            layer_type: str = "Linear",
+            hessian: str = "raw",
             damping: float = None,
             projector_kwargs: dict = None,
             profile: bool = False,
             device: str = "cpu",
             cpu_offload: bool = False,
-        ):
+        ) -> None:
         """
         Initialize the LoraInfluence calculator.
 
         Args:
             model: PyTorch model
-            layer_type: Type of layers to add LoRA to
-            hessian: Method for Hessian approximation ("none", "raw", "kfac", "ekfac")
-            projector_kwargs: Dictionary of projector configuration
-            profile: Whether to profile the computation
-            device: Device to use for computation
-            cpu_offload: Whether to offload gradients to CPU
+            layer_type: Type of layers to add LoRA to. Defaults to "Linear".
+            hessian (str): Type of Hessian approximation hessian ("none", "raw", "kfac", "ekfac"). Defaults to "raw".
+            projector_kwargs: Dictionary of projector configuration. Defaults to None.
+            profile (bool): Record time used in various parts of the algorithm run. Defaults to False.
+            device (str): Device to run the model on. Defaults to 'cpu'.
+            cpu_offload (bool): Whether to offload the model to CPU. Defaults to False.
         """
         self.model = model
-        self.layer_type = layer_name
+        self.layer_type = layer_type
         self.hessian = hessian
         self.damping = damping
         self.profile = profile
@@ -87,7 +87,7 @@ class IFAttributor:
         self.lora_module_names = list(self.lora_modules.keys())
         self.lora_module_to_idx = {name: idx for idx, name in enumerate(self.lora_module_names)}
 
-        print(f"Initialized LoraInfluence with {len(self.lora_modules)} {layer_name} layers at rank {self.rank}")
+        print(f"Initialized LoraInfluence with {len(self.lora_modules)} {layer_type} layers at rank {self.rank}")
 
         if self.profile:
             self.profiling_stats = {

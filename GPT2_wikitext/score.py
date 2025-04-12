@@ -698,7 +698,7 @@ def main():
 
         attributor = IFAttributor(
             model=model,
-            layer_name=args.layer, #TODO: fix to match
+            layer_type=args.layer, #TODO: fix to match
             hessian=hessian,
             projector_kwargs=projector_kwargs,
             profile=args.profile,

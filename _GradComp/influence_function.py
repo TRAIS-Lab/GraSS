@@ -6,69 +6,41 @@ if TYPE_CHECKING:
     from typing import List, Optional, Union, Tuple
 
 import torch
+import torch.nn as nn
 from tqdm import tqdm
-
 import time
 
-def stable_inverse(matrix: torch.Tensor, damping: float = None) -> torch.Tensor:
+from .utils import stable_inverse
+
+class IFAttributor:
     """
-    Compute a numerically stable inverse of a matrix using eigendecomposition.
+    Influence function calculator that uses vanilla gradient components.
 
-    Args:
-        matrix: Input matrix to invert
-        damping: Damping factor for numerical stability
-
-    Returns:
-        Stable inverse of the input matrix
+    This class implements efficient influence function calculation using
+    customized projection to reduce the dimensionality of gradients.
     """
-    # sometimes the matrix is a single number, so we need to check if it's a scalar
-    if len(matrix.shape) == 0:
-        if matrix == 0:
-            # return a 2d 0 tensor
-            return torch.tensor([[0.0]], device=matrix.device)
-        else:
-            if damping is None:
-                return torch.tensor([[1.0 / (matrix * 1.1)]], device=matrix.device)
-            else:
-                return torch.tensor([[1.0 / (matrix * (1 + damping))]], device=matrix.device)
 
-    # Add damping to the diagonal
-    if damping is None:
-        damping = 0.1 * torch.trace(matrix) / matrix.size(0)
-
-    damped_matrix = matrix + damping * torch.eye(matrix.size(0), device=matrix.device)
-
-    try:
-        # Try Cholesky decomposition first (more stable)
-        L = torch.linalg.cholesky(damped_matrix)
-        inverse = torch.cholesky_inverse(L)
-    except RuntimeError:
-        print(f"Falling back to direct inverse due to Cholesky failure")
-        # Fall back to direct inverse
-        inverse = torch.inverse(damped_matrix)
-
-    return inverse
-
-class IFAttributor():
     def __init__(
         self,
-        model,
+        model: nn.Module,
         layer_name: Optional[Union[str, List[str]]],
-        hessian: Optional[str] = "raw",
+        hessian: str = "raw",
         damping: float = None,
         profile: bool = False,
-        device: str = 'cpu'
+        device: str = 'cpu',
+        cpu_offload: bool = False,
     ) -> None:
-        """Ghost Inner Product Attributor for Gradient Dot.
+        """
+        Influence Function Attributor equivalent to LoGra.
 
         Args:
-            model (_type_): _description_
-            layer_name (Optional[Union[str, List[str]]], optional): _description_. Defaults to None.
-            projector_kwargs (Optional[Dict[str, Any]], optional): _description_. Defaults to None.
-            damping (float): Damping used when calculating the Hessian inverse. Defaults to 1e-4.
-            profile (bool, optional): Record time used in various parts of the algorithm run. Defaults to False.
-            mode (str, optional): Currently only "default" mode is supported. Defaults to "default".
-            device (str, optional): _description_. Defaults to 'cpu'.
+            model (nn.Module): PyTorch model.
+            layer_name (Optional[Union[str, List[str]]], optional): All layers the are going to be attribute. Defaults to None.
+            hessian (str): Type of Hessian approximation hessian ("none", "raw", "kfac", "ekfac"). Defaults to "raw".
+            damping (float): Damping used when calculating the Hessian inverse. Defaults to None.
+            profile (bool): Record time used in various parts of the algorithm run. Defaults to False.
+            device (str): Device to run the model on. Defaults to 'cpu'.
+            cpu_offload (bool): Whether to offload the model to CPU. Defaults to False.
         """
         self.model = model
         self.layer_name = layer_name
@@ -76,6 +48,8 @@ class IFAttributor():
         self.damping = damping
         self.profile = profile
         self.device = device
+        self.cpu_offload = cpu_offload
+
         self.full_train_dataloader = None
 
         # Initialize profiling stats
