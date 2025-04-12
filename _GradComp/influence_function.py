@@ -93,34 +93,34 @@ class IFAttributor:
                 leave=False,
             ),
         ):
-            train_input_ids = train_batch["input_ids"].to(self.device)
-            train_attention_masks = train_batch["attention_mask"].to(self.device)
-            train_labels = train_batch["labels"].to(self.device)
+            # Prepare inputs
+            if isinstance(train_batch, dict):
+                inputs = {k: v.to(self.model.device) for k, v in train_batch.items()}
+            else:
+                inputs = train_batch[0].to(self.model.device)
 
-            # Time forward/backward pass
+            # Time forward pass
             if self.profile:
                 torch.cuda.synchronize(self.device)
                 start_time = time.time()
 
             # Forward pass
-            #TODO: update to {k: v.to(self.device) for k, v in train_batch.items()}
-            outputs = self.model(
-                input_ids=train_input_ids,
-                attention_mask=train_attention_masks,
-                labels=train_labels
-            )
+            outputs = self.model(**inputs) if isinstance(inputs, dict) else self.model(inputs)
 
             if self.profile:
                 torch.cuda.synchronize(self.device)
                 self.profiling_stats['forward'] += time.time() - start_time
 
+            # Compute custom loss
             logp = -outputs.loss
             train_loss = logp - torch.log(1 - torch.exp(logp))
 
+            # Time backward pass
             if self.profile:
                 torch.cuda.synchronize(self.device)
                 start_time = time.time()
 
+            # Backward pass
             train_pre_acts = [layer.pre_activation for layer in self.layer_name]
             Z_grad_train = torch.autograd.grad(train_loss, train_pre_acts, retain_graph=True)
 
@@ -130,13 +130,14 @@ class IFAttributor:
 
             # Compute FIM factors for each layer
             with torch.no_grad():
-                for layer_id, (layer, z_grad_full) in enumerate(zip(self.layer_name, Z_grad_train)):
+                for layer_id, (layer, z_grad_train) in enumerate(zip(self.layer_name, Z_grad_train)):
                     if self.profile:
                         torch.cuda.synchronize(self.device)
                         start_time = time.time()
 
-                    grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_full, per_sample=True)
-                    grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
+                    # grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_train, per_sample=True)
+                    # grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
+                    grad = layer.grad_from_grad_comp(z_grad_train, per_sample=True)
 
                     if self.profile:
                         torch.cuda.synchronize(self.device)
@@ -256,25 +257,25 @@ class IFAttributor:
         for test_batch_idx, test_batch in enumerate(
             tqdm(test_dataloader, desc="computing influence scores...", leave=False),
         ):
-            test_input_ids = test_batch["input_ids"].to(self.device)
-            test_attention_masks = test_batch["attention_mask"].to(self.device)
-            test_labels = test_batch["labels"].to(self.device)
+            # Prepare inputs
+            if isinstance(test_batch, dict):
+                inputs = {k: v.to(self.model.device) for k, v in test_batch.items()}
+            else:
+                inputs = test_batch[0].to(self.model.device)
 
              # Time forward pass
             if self.profile:
                 torch.cuda.synchronize(self.device)
                 start_time = time.time()
 
-            outputs = self.model(
-                input_ids=test_input_ids,
-                attention_mask=test_attention_masks,
-                labels=test_labels
-            )
+            # Forward pass
+            outputs = self.model(**inputs) if isinstance(inputs, dict) else self.model(inputs)
 
             if self.profile:
                 torch.cuda.synchronize(self.device)
                 self.profiling_stats['forward'] += time.time() - start_time
 
+            #Compute custom loss
             logp = -outputs.loss
             test_loss = logp - torch.log(1 - torch.exp(logp))
 
@@ -283,6 +284,7 @@ class IFAttributor:
                 torch.cuda.synchronize(self.device)
                 start_time = time.time()
 
+            # Backward pass
             test_pre_acts = [layer.pre_activation for layer in self.layer_name]
             Z_grad_test = torch.autograd.grad(test_loss, test_pre_acts, retain_graph=True)
 
@@ -296,8 +298,9 @@ class IFAttributor:
                         torch.cuda.synchronize(self.device)
                         start_time = time.time()
 
-                    grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_test, per_sample=True)
-                    test_grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
+                    # grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_test, per_sample=True)
+                    # test_grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
+                    test_grad = layer.grad_from_grad_comp(z_grad_test, per_sample=True)
 
                     if self.profile:
                         torch.cuda.synchronize(self.device)

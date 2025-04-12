@@ -143,19 +143,73 @@ class GCLinear(nn.Linear):
 
             self.projector_grad = torch.compile(projector_grad)
 
-    def grad_comp(self, grad_pre_activation: Tensor, per_sample: bool = True) -> Tuple[Tensor, Tensor]:
-        """
-        Return the components of the gradient of parameters (for both 2D and 3D inputs).
-        If projector is set, apply the projector to the gradient components.
+    # def grad_comp(self, grad_pre_activation: Tensor, per_sample: bool = True) -> Tuple[Tensor, Tensor]:
+    #     """
+    #     Return the components of the gradient of parameters (for both 2D and 3D inputs).
+    #     If projector is set, apply the projector to the gradient components.
 
-        For Linear, gradient can be decomposed into the gradient of the pre_activation and the input.
+    #     For Linear, gradient can be decomposed into the gradient of the pre_activation and the input.
+
+    #     Args:
+    #         grad_pre_activation: Gradient of the loss w.r.t. the pre-activation (dL/dx_o)
+    #         per_sample: Whether to maintain per-sample gradients (default: True)
+
+    #     Returns:
+    #         tuple: (grad_pre_activation, augmented_input)
+    #     """
+    #     input_features = self.layer_input
+    #     is_3d = input_features.dim() == 3
+
+    #     if is_3d:
+    #         batch_size, seq_length, hidden_size = input_features.shape
+    #         # Reshape 3D tensors to 2D for consistent processing
+    #         input_features = input_features.reshape(-1, hidden_size)
+    #         grad_pre_activation = grad_pre_activation.reshape(-1, self.out_features)
+    #     else:
+    #         batch_size = input_features.shape[0]
+
+    #     # Scale the gradient if we're computing per-sample gradients
+    #     if per_sample:
+    #         grad_pre_activation = grad_pre_activation * batch_size
+
+    #     # Handle bias term by augmenting input with ones
+    #     if self.has_bias:
+    #         ones = torch.ones(input_features.size(0), 1,
+    #                         device=input_features.device,
+    #                         dtype=input_features.dtype)
+    #         input_features = torch.cat([input_features, ones], dim=1)
+
+    #     if is_3d:
+    #         # Reshape back to 3D
+    #         input_features = input_features.reshape(batch_size, seq_length, -1)
+    #         grad_pre_activation = grad_pre_activation.reshape(batch_size, seq_length, -1)
+
+    #     if self.projector_grad_comp != (None, None):
+    #         projector_grad_comp_1, projector_grad_comp_2 = self.projector_grad_comp
+
+    #         grad_pre_activation_flatten = grad_pre_activation.view(-1, grad_pre_activation.shape[-1])
+    #         input_features_flatten = input_features.view(-1, input_features.shape[-1])
+
+    #         if is_3d:
+    #             grad_pre_activation = projector_grad_comp_1(grad_pre_activation_flatten).view(grad_pre_activation.shape[0], grad_pre_activation.shape[1], -1)
+    #             input_features = projector_grad_comp_2(input_features_flatten).view(input_features.shape[0], input_features.shape[1], -1)
+    #         else:
+    #             grad_pre_activation = projector_grad_comp_1(grad_pre_activation_flatten)
+    #             input_features = projector_grad_comp_2(input_features_flatten)
+
+    #     return grad_pre_activation, input_features
+
+    def grad_from_grad_comp(self, grad_pre_activation: Tensor, per_sample: bool = True) -> Tensor:
+        """
+        Construct gradient from the gradient components.
+
+        For Linear, components are gradient of the pre-activation and the input features.
 
         Args:
-            grad_pre_activation: Gradient of the loss w.r.t. the pre-activation (dL/dx_o)
-            per_sample: Whether to maintain per-sample gradients (default: True)
+            grad_pre_activation: Gradient of loss w.r.t. the pre-activation
 
         Returns:
-            tuple: (grad_pre_activation, augmented_input)
+            Tensor: Gradient of loss w.r.t. all parameters of the layer
         """
         input_features = self.layer_input
         is_3d = input_features.dim() == 3
@@ -197,23 +251,6 @@ class GCLinear(nn.Linear):
                 grad_pre_activation = projector_grad_comp_1(grad_pre_activation_flatten)
                 input_features = projector_grad_comp_2(input_features_flatten)
 
-        return grad_pre_activation, input_features
-
-    def grad_from_grad_comp(self, grad_pre_activation: Tensor, input_features: Tensor) -> Tensor:
-        """
-        Construct gradient from the gradient components.
-
-        For Linear, components are gradient of the pre-activation and the input features.
-
-        Args:
-            grad_pre_activation: Gradient of loss w.r.t. the pre-activation
-            input_features: Input features to the layer
-
-        Returns:
-            Tensor: Gradient of loss w.r.t. all parameters of the layer
-        """
-        batch_size = grad_pre_activation.shape[0]
-        is_3d = input_features.dim() == 3
         if is_3d:
             grad = torch.einsum('ijk,ijl->ikl', grad_pre_activation, input_features).reshape(batch_size, -1)
         else:
