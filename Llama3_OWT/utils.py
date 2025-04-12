@@ -100,15 +100,15 @@ def setup_projection_kwargs(args, device):
 def batch_size(baseline, tda):
     if baseline == "GC":
         if tda == "GD":
-            train_batch_size = 12
-            test_batch_size = 12
+            train_batch_size = 2
+            test_batch_size = 2
         elif tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
-            train_batch_size = 12
-            test_batch_size = 12
+            train_batch_size = 2
+            test_batch_size = 2
     elif baseline == "LoGra":
         if tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
-            train_batch_size = 12
-            test_batch_size = 12
+            train_batch_size = 2
+            test_batch_size = 2
     elif baseline == "LogIX":
         if tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
             train_batch_size = 32
@@ -128,8 +128,7 @@ def result_filename(args):
     filename_parts.append(f"thrd-{args.threshold}")
     filename_parts.append(f"rdp-{args.random_drop}")
 
-    training_setting = args.output_dir.split("/")[-1]
     # Join parts and save the file
-    result_filename = f"./results/{training_setting}/{args.baseline}/{args.tda}/{args.layer}/{'_'.join(filename_parts)}.pt"
+    result_filename = f"./results/{args.baseline}/{args.tda}/{args.layer}/{'_'.join(filename_parts)}.pt"
 
     return result_filename

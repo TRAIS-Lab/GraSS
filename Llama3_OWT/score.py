@@ -575,6 +575,8 @@ def main():
     test_dataset = lm_datasets["validation"]
     train_batch_size, test_batch_size = batch_size(args.baseline, args.tda)
 
+    train_dataset = train_dataset.select(range(200))
+    test_dataset = test_dataset.select(range(50))
     if args.debug: # toy dataset
         train_dataset = train_dataset.select(range(200))
         test_dataset = test_dataset.select(range(20))
@@ -617,7 +619,7 @@ def main():
         assert tda == "IF", "GradComp only supports Influence Function now."
         assert hessian in ["none", "raw"], "Invalid Hessian type."
 
-        model = LlamaForCausalLM.from_pretrained(checkpoint).cuda(device)
+        # model = LlamaForCausalLM.from_pretrained(checkpoint).cuda(device)
         model.set_projectors(args.layer, projector_kwargs, train_dataloader)
         model.eval()
 
@@ -683,7 +685,6 @@ def main():
     elif args.baseline == "LoGra":
         check_min_version("4.46.0")
         from _LoGra.influence_function import IFAttributor
-        from LogIX.utils import LoGra_GPT2
 
         # get which Hessian to use
         tda, hessian = args.tda.split("-")
@@ -693,7 +694,8 @@ def main():
         assert args.layer == "Linear", "LoGra only supports Linear setting now."
         assert args.projection is not None, "LoGra requires projection method."
 
-        model = LoGra_GPT2(checkpoint, config, resume=True).cuda(device)
+        # model = LlamaForCausalLM.from_pretrained(checkpoint).cuda(device)
+        model = model.cuda(device)
         model.eval()
 
         attributor = IFAttributor(
@@ -702,6 +704,7 @@ def main():
             hessian=hessian,
             projector_kwargs=projector_kwargs,
             profile=args.profile,
+            device=device,
             cpu_offload=True,
         )
 
@@ -742,7 +745,6 @@ def main():
     elif args.baseline == "LogIX":
         #check_min_version("4.46.0") # LogIX is built on top of 4.40.0, ignore the checking
         from _LogIX.huggingface import LogIXArguments, patch_trainer
-        from LogIX.utils import LoGra_GPT2
 
         # get which Hessian to use
         tda, hessian = args.tda.split("-")
@@ -755,7 +757,7 @@ def main():
         LogIXTrainer = patch_trainer(transformers.Trainer)
 
         # 1. Computing EK-FAC factors for training data
-        model = LoGra_GPT2(checkpoint, config, resume=True).cuda(device)
+        model = model.cuda(device)
         model.eval()
 
         logix_args_train = LogIXArguments(
@@ -798,7 +800,7 @@ def main():
         print(f"Cache throughput: {cache_throughput:.2f} tokens/sec")
 
         # 2. Computing influence scores for test data
-        model = LoGra_GPT2(checkpoint, config, resume=True).cuda(device) # reinitialize the model
+        model = model.cuda(device) # reinitialize the model
         model.eval()
         logix_args_test = LogIXArguments(
             project=f"./LogIX/project/{args.projection}",

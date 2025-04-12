@@ -570,7 +570,7 @@ def main():
 
     layers = find_GClayers(model, args.layer, return_module_name=True)[:-1]
 
-    from GPT2_wikitext.Localize.localizer import DualComponentMaskOptimizer
+    from _Localizer.localizer import GradientComponentMaskOptimizer
 
     # Create output directory for saving masks
     output_dir = f"./Localize/mask_{args.localize}*{args.localize}"
@@ -684,7 +684,7 @@ def main():
         logger.info(f"Training the dual component mask optimizer for layer {layer_idx + 1}...")
 
         # Initialize the optimizer for this layer
-        optimizer = DualComponentMaskOptimizer(
+        optimizer = GradientComponentMaskOptimizer(
             pre_activation_dim=pre_activation_dim,
             input_features_dim=input_features_dim,
             lambda_reg=args.regularization,

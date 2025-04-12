@@ -1,0 +1,7 @@
+root_dir: ./
+logging:
+  flush_threshold: 1000000000
+  num_workers: 1
+lora:
+  init: random
+  rank: 32

@@ -231,27 +231,28 @@ class IFAttributor:
                 start_time = time.time()
 
             # Backward pass
-            loss.backward(retain_graph=True)
+            loss.backward()
 
             if self.profile:
                 torch.cuda.synchronize(self.device)
                 self.profiling_stats['backward'] += time.time() - start_time
 
             for name, module in self.lora_modules.items():
-                # Update and collect projected gradients
                 module.update_projected_grad()
 
-                # Store gradients for influence computation
-                grad_tensor = module.projected_grad.detach()
                 if self.cpu_offload:
-                    grad_tensor = grad_tensor.cpu()
-
-                per_module_gradients[name].append(grad_tensor)
+                    per_module_gradients[name].append(module.projected_grad.detach().cpu())
+                else:
+                    per_module_gradients[name].append(module.projected_grad.detach())
 
                 # For covariance computation
                 if self.hessian in ["kfac", "ekfac"]:
-                    per_module_forward[name].append(module.projected_input.detach())
-                    per_module_backward[name].append(module.projected_grad_pre_activation.detach())
+                    if self.cpu_offload:
+                        per_module_forward[name].append(module.projected_input.detach().cpu())
+                        per_module_backward[name].append(module.projected_grad_pre_activation.detach().cpu())
+                    else:
+                        per_module_forward[name].append(module.projected_input.detach())
+                        per_module_backward[name].append(module.projected_grad_pre_activation.detach())
 
         # Time hessian
         if self.profile:
@@ -661,15 +662,15 @@ class IFAttributor:
             # Collect projected gradients
             for name, module in self.lora_modules.items():
                 module.update_projected_grad()
-                grad_tensor = module.projected_grad.detach()
+
                 if self.cpu_offload:
-                    grad_tensor = grad_tensor.cpu()
-                per_module_gradients[name].append(grad_tensor)
+                    per_module_gradients[name].append(module.projected_grad.detach().cpu())
+                else:
+                    per_module_gradients[name].append(module.projected_grad.detach())
 
             # Update total sample count
-            if per_module_gradients[self.lora_module_names[0]]:  # Check if we have at least one gradient
-                batch_size = per_module_gradients[self.lora_module_names[0]][-1].shape[0]
-                total_samples += batch_size
+            if per_module_gradients[self.lora_module_names[0]]:
+                total_samples += per_module_gradients[self.lora_module_names[0]][-1].shape[0]
 
         print(f"Collected gradients from {len(per_module_gradients[self.lora_module_names[0]])} batches, total samples: {total_samples}")
 
