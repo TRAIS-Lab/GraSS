@@ -60,7 +60,7 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from GradComp.LlamaForCausalLM import LlamaForCausalLM
+from GradComp.LlamaForCausalLM import GCLlamaForCausalLM
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
@@ -481,7 +481,7 @@ def main():
         )
 
     if args.model_name_or_path:
-        model = LlamaForCausalLM.from_pretrained(
+        model = GCLlamaForCausalLM.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
             config=config,
@@ -490,7 +490,7 @@ def main():
         )
     else:
         logger.info("Training new model from scratch")
-        model = LlamaForCausalLM.from_config(config, trust_remote_code=args.trust_remote_code)
+        model = GCLlamaForCausalLM.from_config(config, trust_remote_code=args.trust_remote_code)
 
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
@@ -605,9 +605,6 @@ def main():
     logger.info(f"Layer: {args.layer}")
     logger.info("***** Running attribution *****")
 
-    model_id = 0
-    checkpoint = f"{args.output_dir}/{model_id}"
-
     profile = None
     if args.baseline == "GC": #TODO: merge GC with IF-RAW
         check_min_version("4.46.0")
@@ -619,7 +616,6 @@ def main():
         assert tda == "IF", "GradComp only supports Influence Function now."
         assert hessian in ["none", "raw"], "Invalid Hessian type."
 
-        # model = LlamaForCausalLM.from_pretrained(checkpoint).cuda(device)
         model.set_projectors(args.layer, projector_kwargs, train_dataloader)
         model.eval()
 
@@ -642,10 +638,11 @@ def main():
             from _GradComp.influence_function import IFAttributor
             attributor = IFAttributor(
                 model=model,
-                layer_name=find_GClayers(model, args.layer)[:-1],
+                layer_name=find_GClayers(model, args.layer),
                 hessian="raw",
                 profile=args.profile,
                 device=device,
+                cpu_offload=True,
             )
 
             if args.profile:

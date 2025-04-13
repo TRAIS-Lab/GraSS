@@ -78,7 +78,8 @@ class IFAttributor:
         """
         num_layers = len(self.layer_name)
 
-        Hessian = [0] * num_layers
+        # Initialize Hessian on the appropriate device
+        Hessian = [torch.zeros((1, 1), device="cpu" if self.cpu_offload else self.device) for _ in range(num_layers)]
 
         train_grad = [None] * len(self.layer_name)
         ifvp_train = [None] * len(self.layer_name)
@@ -135,30 +136,52 @@ class IFAttributor:
                         torch.cuda.synchronize(self.device)
                         start_time = time.time()
 
-                    # grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_train, per_sample=True)
-                    # grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
+                    # Calculate gradient
                     grad = layer.grad_from_grad_comp(z_grad_train, per_sample=True)
 
                     if self.profile:
                         torch.cuda.synchronize(self.device)
                         self.profiling_stats['projection'] += time.time() - start_time
 
+                    # Initialize train_grad if not done yet
                     if train_grad[layer_id] is None:
-                        train_grad[layer_id] = torch.zeros((num_samples, *grad.shape[1:]), device=self.device)
+                        # Choose device based on cpu_offload setting
+                        storage_device = "cpu" if self.cpu_offload else self.device
+                        train_grad[layer_id] = torch.zeros((num_samples, *grad.shape[1:]), device=storage_device)
 
                     col_st = train_batch_idx * train_dataloader.batch_size
                     col_ed = min(
                         (train_batch_idx + 1) * train_dataloader.batch_size,
                         len(train_dataloader.sampler),
                     )
-                    train_grad[layer_id][col_st:col_ed] = grad.detach()
+
+                    # Store gradients with CPU offloading if enabled
+                    if self.cpu_offload:
+                        train_grad[layer_id][col_st:col_ed] = grad.detach().cpu()
+                    else:
+                        train_grad[layer_id][col_st:col_ed] = grad.detach()
 
                     # Time Hessian calculation
                     if self.profile:
                         torch.cuda.synchronize(self.device)
                         start_time = time.time()
 
-                    Hessian[layer_id] += torch.matmul(grad.t(), grad) / num_samples
+                    # Compute Hessian with CPU offloading if enabled
+                    if self.cpu_offload:
+                        # Ensure Hessian is properly sized
+                        if Hessian[layer_id].shape[0] == 1:  # First iteration
+                            Hessian[layer_id] = torch.zeros((grad.shape[1], grad.shape[1]), device="cpu")
+
+                        # Move to GPU for computation, then back to CPU
+                        grad_gpu = grad.to(device=self.device)
+                        hessian_update = torch.matmul(grad_gpu.t(), grad_gpu) / num_samples
+                        Hessian[layer_id] += hessian_update.cpu()
+                    else:
+                        # Ensure Hessian is properly sized
+                        if Hessian[layer_id].shape[0] == 1:  # First iteration
+                            Hessian[layer_id] = torch.zeros((grad.shape[1], grad.shape[1]), device=self.device)
+
+                        Hessian[layer_id] += torch.matmul(grad.t(), grad) / num_samples
 
                     if self.profile:
                         torch.cuda.synchronize(self.device)
@@ -172,10 +195,22 @@ class IFAttributor:
         print(f"Calculating iFVP...")
         # Add damping term and compute inverses
         for layer_id in range(num_layers):
-            ifvp_train[layer_id] = torch.matmul(
-                stable_inverse(Hessian[layer_id], damping=self.damping),
-                train_grad[layer_id].t()
-            ).t()
+            if self.cpu_offload:
+                # Move to GPU for computation
+                hessian_gpu = Hessian[layer_id].to(device=self.device)
+                train_grad_gpu = train_grad[layer_id].to(device=self.device)
+
+                # Compute inverse and product
+                hessian_inv = stable_inverse(hessian_gpu, damping=self.damping)
+                result = torch.matmul(hessian_inv, train_grad_gpu.t()).t()
+
+                # Move back to CPU
+                ifvp_train[layer_id] = result.cpu()
+            else:
+                ifvp_train[layer_id] = torch.matmul(
+                    stable_inverse(Hessian[layer_id], damping=self.damping),
+                    train_grad[layer_id].t()
+                ).t()
 
         if self.profile:
             torch.cuda.synchronize(self.device)
@@ -245,7 +280,9 @@ class IFAttributor:
         else:
             num_train = len(self.full_train_dataloader.sampler)
 
-        IF_score = torch.zeros(num_train, len(test_dataloader.sampler), device=self.device)
+        # Initialize IF_score on appropriate device based on cpu_offload
+        storage_device = "cpu" if self.cpu_offload else self.device
+        IF_score = torch.zeros(num_train, len(test_dataloader.sampler), device=storage_device)
 
         # Compute FIM factors if not cached
         if train_dataloader is not None and self.full_train_dataloader is None:
@@ -298,14 +335,11 @@ class IFAttributor:
                         torch.cuda.synchronize(self.device)
                         start_time = time.time()
 
-                    # grad_comp_1, grad_comp_2 = layer.grad_comp(z_grad_test, per_sample=True)
-                    # test_grad = layer.grad_from_grad_comp(grad_comp_1, grad_comp_2)
                     test_grad = layer.grad_from_grad_comp(z_grad_test, per_sample=True)
 
                     if self.profile:
                         torch.cuda.synchronize(self.device)
                         self.profiling_stats['projection'] += time.time() - start_time
-
 
                     col_st = test_batch_idx * test_dataloader.batch_size
                     col_ed = min(
@@ -313,9 +347,27 @@ class IFAttributor:
                         len(test_dataloader.sampler),
                     )
 
-                    # Compute the influence function score from pre-computed iHVP components and test gradients
-                    result = torch.matmul(ifvp_train[layer_id], test_grad.t())
+                    # Compute the influence function score with CPU offloading if enabled
+                    if self.cpu_offload:
+                        # Move data to GPU for computation
+                        ifvp_train_gpu = ifvp_train[layer_id].to(device=self.device)
+                        test_grad_gpu = test_grad.to(device=self.device)
 
-                    IF_score[:, col_st:col_ed] += result
+                        # Compute on GPU
+                        result = torch.matmul(ifvp_train_gpu, test_grad_gpu.t())
 
-        return (IF_score, self.profiling_stats) if self.profile else IF_score
+                        # Update IF_score on CPU
+                        IF_score_segment = IF_score[:, col_st:col_ed].to(device=self.device)
+                        IF_score_segment += result
+                        IF_score[:, col_st:col_ed] = IF_score_segment.cpu()
+                    else:
+                        # Compute directly on the current device
+                        result = torch.matmul(ifvp_train[layer_id], test_grad.t())
+                        IF_score[:, col_st:col_ed] += result
+
+        # Move final result to desired device if needed
+        final_result = IF_score
+        if self.profile:
+            return (final_result, self.profiling_stats)
+        else:
+            return final_result

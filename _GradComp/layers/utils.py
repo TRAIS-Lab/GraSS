@@ -1,5 +1,5 @@
-from linear import GCLinear, GCEmbedding
-from layer_norm import GCLayerNorm
+from .linear import GCLinear, GCEmbedding
+from .layer_norm import GCLayerNorm
 
 def find_GClayers(model, setting="Linear", return_module_name=False):
     GC_layers = []
