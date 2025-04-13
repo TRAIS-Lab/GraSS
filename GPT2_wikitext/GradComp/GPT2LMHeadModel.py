@@ -106,11 +106,12 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
 
         return new_layer
 
-    def set_projectors(self, layer, projector_kwargs, train_dataloader):
+    def set_projectors(self, layer_names, projector_kwargs, train_dataloader):
         """
         Set projectors for all GC layers in the model.
 
         Args:
+            layer_names: Layer's names to set projectors
             projector_kwargs: Dictionary containing projector configuration.
             train_dataloader: Dataloader for training data. Used to get the input shape for the first layer.
         """
@@ -118,24 +119,23 @@ class GCGPT2LMHeadModel(GPT2LMHeadModel):
             return
 
         train_batch = next(iter(train_dataloader))
-        self.forward(train_batch["input_ids"].cuda(self.device), attention_mask=train_batch["attention_mask"].cuda(self.device))
+        self.forward(
+            train_batch["input_ids"].to(self.device),
+            attention_mask=train_batch["attention_mask"].to(self.device)
+        )
 
         proj_seed = projector_kwargs.get('proj_seed', 0)
         proj_factorize = projector_kwargs.get("proj_factorize", True)
 
-        projector_kwargs.pop("proj_seed")
-        projector_kwargs.pop("proj_factorize")
-
-        if layer == "Linear":
-            proj_layer = (GCLinear, GCEmbedding)
-        elif layer == "LayerNorm":
-            proj_layer = (GCLayerNorm)
-        elif layer == "Linear_LayerNorm":
-            proj_layer = (GCLinear, GCEmbedding, GCLayerNorm)
+        # Remove these keys as they're handled separately
+        if 'proj_seed' in projector_kwargs:
+            projector_kwargs.pop("proj_seed")
+        if 'proj_factorize' in projector_kwargs:
+            projector_kwargs.pop("proj_factorize")
 
         # Apply projectors to all GC layers
         for module_id, (module_name, module) in enumerate(self.named_modules()):
-            if isinstance(module, proj_layer):
+            if module_name in layer_names:
                 base_seed = proj_seed + int(1e4) * module_id
                 print(f"Setting projector for {module_name}...")
                 # push module_name to projector_kwargs

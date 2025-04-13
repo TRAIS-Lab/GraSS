@@ -348,7 +348,7 @@ class CudaProjector(AbstractProjector):
                 active_dim = self.active_indices.numel()
                 rand_indices = torch.randint(proj_dim, (active_dim, self.c), device=device)
                 rand_signs = torch.randint(0, 2, (active_dim, self.c), device=device) * 2 - 1
-                self.sjlt_cuda_module = SJLTProjection(active_dim, proj_dim, self.c, device)
+                self.sjlt_cuda_module = SJLTProjection(active_dim, proj_dim, self.c, device=device)
                 self.sjlt_cuda_module.rand_indices.copy_(rand_indices)
                 self.sjlt_cuda_module.rand_signs.copy_(rand_signs.to(torch.int8))
         elif self.method == "SJLT_R":

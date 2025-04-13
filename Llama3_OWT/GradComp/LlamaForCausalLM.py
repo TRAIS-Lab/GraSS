@@ -77,12 +77,12 @@ class GCLlamaForCausalLM(LlamaForCausalLM):
 
         return new_layer
 
-    def set_projectors(self, layer, projector_kwargs, train_dataloader):
+    def set_projectors(self, layer_names, projector_kwargs, train_dataloader):
         """
         Set projectors for all GC layers in the model.
 
         Args:
-            layer: Layer type to set projectors for ("Linear", "LayerNorm", or "Linear_LayerNorm")
+            layer_names: Layer's names to set projectors
             projector_kwargs: Dictionary containing projector configuration.
             train_dataloader: Dataloader for training data. Used to get the input shape for the first layer.
         """
@@ -105,19 +105,9 @@ class GCLlamaForCausalLM(LlamaForCausalLM):
         if 'proj_factorize' in projector_kwargs:
             projector_kwargs.pop("proj_factorize")
 
-        # Define which layer types to apply projectors to
-        if layer == "Linear":
-            proj_layer = (GCLinear, GCEmbedding)
-        elif layer == "LayerNorm":
-            proj_layer = (GCLayerNorm)
-        elif layer == "Linear_LayerNorm":
-            proj_layer = (GCLinear, GCEmbedding, GCLayerNorm)
-        else:
-            raise ValueError(f"Unknown layer type: {layer}")
-
         # Apply projectors to all GC layers
         for module_id, (module_name, module) in enumerate(self.named_modules()):
-            if isinstance(module, proj_layer):
+            if module_name in layer_names:
                 base_seed = proj_seed + int(1e4) * module_id
                 print(f"Setting projector for {module_name}...")
 

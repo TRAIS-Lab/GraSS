@@ -30,6 +30,7 @@ from torch import Tensor
 
 from _GradComp.utils import _vectorize as vectorize
 from _GradComp.utils import get_parameter_chunk_sizes
+from _GradComp.SJLT.sjlt_cuda import SJLTProjection
 
 
 class ProjectionType(str, Enum):
@@ -355,9 +356,12 @@ class CudaProjector(AbstractProjector):
             self.c = 1
             if self.pre_compute:
                 torch.manual_seed(self.seed)
-                rand_indices = torch.randint(proj_dim, (feature_dim, self.c), device=device)
-                rand_signs = torch.randint(0, 2, (feature_dim, self.c), device=device) * 2 - 1
-                self.rand_indices_and_signs = (rand_indices, rand_signs)
+                active_dim = self.active_indices.numel()
+                rand_indices = torch.randint(proj_dim, (active_dim, self.c), device=device)
+                rand_signs = torch.randint(0, 2, (active_dim, self.c), device=device) * 2 - 1
+                self.sjlt_cuda_module = SJLTProjection(active_dim, proj_dim, self.c, device=device)
+                self.sjlt_cuda_module.rand_indices.copy_(rand_indices)
+                self.sjlt_cuda_module.rand_signs.copy_(rand_signs.to(torch.int8))
         elif self.method == "SJLT_R":
             self.c = 2
             if self.pre_compute:
@@ -459,32 +463,25 @@ class CudaProjector(AbstractProjector):
                     raise RuntimeError(msg) from e
                 raise e from None
         elif self.method == "SJLT":
-            batch_size, _ = features.size()
             features = features[:, self.active_indices]
 
             if self.pre_compute:
-                rand_indices, rand_signs = self.rand_indices_and_signs
+                with torch.no_grad():
+                    result = self.sjlt_cuda_module(features)
             else:
                 torch.manual_seed(self.seed)
                 active_dim = self.active_indices.numel()
                 rand_indices = torch.randint(self.proj_dim, (active_dim, self.c), device=self.device)
                 rand_signs = torch.randint(0, 2, (active_dim, self.c), device=self.device) * 2 - 1
 
-            # Get indices of elements above threshold in a single pass
-            batch_idx, input_idx = torch.nonzero(torch.abs(features) >= self.threshold, as_tuple=True)
-            if input_idx.numel() == 0:
-                return torch.zeros(batch_size, self.proj_dim, device=self.device)
+                sjlt_cuda_module = SJLTProjection(active_dim, self.proj_dim, self.c, device=self.device)
 
-            values = features[batch_idx, input_idx]
+                sjlt_cuda_module.rand_indices.copy_(rand_indices)
+                sjlt_cuda_module.rand_signs.copy_(rand_signs.to(torch.int8))
 
-            scaled_vals = values.repeat_interleave(self.c) * rand_signs[input_idx].flatten()
-            final_indices = batch_idx.repeat_interleave(self.c) * (self.proj_dim) + rand_indices[input_idx].flatten()
+                with torch.no_grad():
+                    result = sjlt_cuda_module(features)
 
-            # Initialize and fill output tensor
-            batch_vec_p = torch.zeros(batch_size, self.proj_dim, device=self.device)
-            batch_vec_p.view(-1).index_add_(0, final_indices, scaled_vals)
-
-            result = batch_vec_p / (self.c ** 0.5)
         elif self.method == "SJLT_R":
             batch_size, _ = features.size()
 

@@ -96,16 +96,13 @@ def setup_projection_kwargs(args, device):
 
 def batch_size(baseline, tda):
     if baseline == "GC":
-        if tda == "GD":
-            train_batch_size = 2
-            test_batch_size = 2
-        elif tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
-            train_batch_size = 8
-            test_batch_size = 8
+        if tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
+            train_batch_size = 1
+            test_batch_size = 1
     elif baseline == "LoGra":
         if tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
-            train_batch_size = 2
-            test_batch_size = 2
+            train_batch_size = 1
+            test_batch_size = 1
     elif baseline == "LogIX":
         if tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
             train_batch_size = 32

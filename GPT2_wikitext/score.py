@@ -617,17 +617,17 @@ def main():
         assert tda == "IF", "GradComp only supports Influence Function now."
         assert hessian in ["none", "raw"], "Invalid Hessian type."
 
-        model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
-        model.set_projectors(args.layer, projector_kwargs, train_dataloader)
-        model.eval()
+        layer_names = find_GClayers(model, args.layer, return_type="name")
 
         from _GradComp.influence_function import IFAttributor
         attributor = IFAttributor(
             model=model,
-            layer_name=find_GClayers(model, args.layer)[:-1],
+            layer_names=layer_names,
             hessian=hessian,
             profile=args.profile,
             device=device,
+            cpu_offload=False,
+            projector_kwargs=projector_kwargs,
         )
 
         if args.profile:
@@ -677,17 +677,16 @@ def main():
         assert args.layer == "Linear", "LoGra only supports Linear setting now."
         assert args.projection is not None, "LoGra requires projection method."
 
-        model = LoGra_GPT2(checkpoint, config, resume=True).cuda(device)
-        model.eval()
+        model = LoGra_GPT2(checkpoint, config, resume=True)
 
         attributor = IFAttributor(
             model=model,
             layer_type=args.layer, #TODO: fix to match
             hessian=hessian,
-            projector_kwargs=projector_kwargs,
             profile=args.profile,
             device=device,
             cpu_offload=True,
+            projector_kwargs=projector_kwargs,
         )
 
         if args.profile:

@@ -1,8 +1,9 @@
 from .linear import GCLinear, GCEmbedding
 from .layer_norm import GCLayerNorm
 
-def find_GClayers(model, setting="Linear", return_module_name=False):
+def find_GClayers(model, setting="Linear", return_type="instance"):
     GC_layers = []
+    return_module_name = not (return_type == "instance")
 
     if return_module_name:
         for module_name, module in model.named_modules():
@@ -32,4 +33,11 @@ def find_GClayers(model, setting="Linear", return_module_name=False):
         else:
             raise ValueError("Invalid setting now. Choose from 'Linear', 'LayerNorm', and 'Linear_LayerNorm'.")
 
-    return GC_layers
+    if return_type == "instance":
+        return GC_layers
+    elif return_type == "name":
+        return [name for name, layer in GC_layers]
+    elif return_type == "name_instance":
+        return [(name, layer) for name, layer in GC_layers]
+    else:
+        raise ValueError("Invalid return_type. Choose from 'instance', 'name', and 'name_instance'.")

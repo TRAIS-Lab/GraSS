@@ -25,10 +25,10 @@ class IFAttributor:
             layer_type: str = "Linear",
             hessian: str = "raw",
             damping: float = None,
-            projector_kwargs: dict = None,
             profile: bool = False,
             device: str = "cpu",
             cpu_offload: bool = False,
+            projector_kwargs: dict = None,
         ) -> None:
         """
         Initialize the LoraInfluence calculator.
@@ -37,12 +37,15 @@ class IFAttributor:
             model: PyTorch model
             layer_type: Type of layers to add LoRA to. Defaults to "Linear".
             hessian (str): Type of Hessian approximation hessian ("none", "raw", "kfac", "ekfac"). Defaults to "raw".
-            projector_kwargs: Dictionary of projector configuration. Defaults to None.
             profile (bool): Record time used in various parts of the algorithm run. Defaults to False.
             device (str): Device to run the model on. Defaults to 'cpu'.
             cpu_offload (bool): Whether to offload the model to CPU. Defaults to False.
+            projector_kwargs: Dictionary of projector configuration. Defaults to None.
         """
         self.model = model
+        self.model.to(device)
+        self.model.eval()
+
         self.layer_type = layer_type
         self.hessian = hessian
         self.damping = damping
@@ -189,9 +192,6 @@ class IFAttributor:
         """
         print("Extracting information from training data...")
 
-        # Set model to eval mode
-        self.model.eval()
-
         # Initialize accumulators for both covariance and gradients
         per_module_gradients = {name: [] for name in self.lora_module_names}
         if self.hessian in ["kfac", "ekfac"]:
@@ -199,15 +199,15 @@ class IFAttributor:
             per_module_backward = {name: [] for name in self.lora_module_names}
 
         # Process each batch
-        for batch_idx, batch in enumerate(tqdm(train_dataloader, desc="Processing training data")):
+        for train_batch_idx, train_batch in enumerate(tqdm(train_dataloader, desc="Processing training data")):
             # Zero gradients
             self.model.zero_grad()
 
             # Prepare inputs
-            if isinstance(batch, dict):
-                inputs = {k: v.to(self.model.device) for k, v in batch.items()}
+            if isinstance(train_batch, dict):
+                inputs = {k: v.to(self.model.device) for k, v in train_batch.items()}
             else:
-                inputs = batch[0].to(self.model.device)
+                inputs = train_batch[0].to(self.model.device)
 
             # Time forward pass
             if self.profile:
@@ -223,7 +223,7 @@ class IFAttributor:
 
             # Compute custom loss
             logp = -outputs.loss
-            loss = logp - torch.log(1 - torch.exp(logp))
+            train_loss = logp - torch.log(1 - torch.exp(logp))
 
             # Time backward pass
             if self.profile:
@@ -231,7 +231,7 @@ class IFAttributor:
                 start_time = time.time()
 
             # Backward pass
-            loss.backward()
+            train_loss.backward()
 
             if self.profile:
                 torch.cuda.synchronize(self.device)
@@ -281,15 +281,15 @@ class IFAttributor:
 
                 for i in range(0, num_samples, batch_size):
                     end_idx = min(i + batch_size, num_samples)
-                    batch = all_grads[i:end_idx]
+                    train_batch = all_grads[i:end_idx]
 
                     if self.cpu_offload:
                         # Use GPU for computation, then move back to CPU
-                        cov_gpu = cov.to(device=batch.device)
-                        cov_gpu.addmm_(batch.t(), batch)
+                        cov_gpu = cov.to(device=train_batch.device)
+                        cov_gpu.addmm_(train_batch.t(), train_batch)
                         cov = cov_gpu.to(device="cpu", non_blocking=True)
                     else:
-                        cov.addmm_(batch.t(), batch)
+                        cov.addmm_(train_batch.t(), train_batch)
 
                 # Normalize by number of samples
                 cov /= num_samples
@@ -325,10 +325,10 @@ class IFAttributor:
                 # Incrementally compute covariance
                 processed_samples = 0
 
-                for batch_idx in range(len(per_module_forward[name])):
+                for train_batch_idx in range(len(per_module_forward[name])):
                     # Get batch data
-                    fwd_batch = per_module_forward[name][batch_idx]
-                    bwd_batch = per_module_backward[name][batch_idx]
+                    fwd_batch = per_module_forward[name][train_batch_idx]
+                    bwd_batch = per_module_backward[name][train_batch_idx]
 
                     # Flatten sequence dimension
                     fwd_flat = fwd_batch.view(-1, fwd_dim)
@@ -614,15 +614,13 @@ class IFAttributor:
             or the same structure for test
         """
         print(f"Collecting projected gradients from {dataset_type} data...")
-        # Set model to eval mode
-        self.model.eval()
 
         # Initialize lists to collect gradients by module
         per_module_gradients = {name: [] for name in self.lora_module_names}
         total_samples = 0
 
         # Process each batch
-        for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"Processing {dataset_type} batches")):
+        for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"Processing {dataset_type} data")):
             # Zero gradients
             self.model.zero_grad()
 
@@ -954,4 +952,8 @@ class IFAttributor:
             torch.cuda.synchronize(self.device)
             self.profiling_stats['precondition'] += time.time() - start_time
 
-        return (IF_score, self.profiling_stats) if self.profile else IF_score
+        # Return result
+        if self.profile:
+            return (IF_score, self.profiling_stats)
+        else:
+            return IF_score

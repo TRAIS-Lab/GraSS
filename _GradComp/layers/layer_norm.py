@@ -126,21 +126,3 @@ class GCLayerNorm(nn.LayerNorm):
         if self.projector_grad != None:
             grad = self.projector_grad(grad)
         return grad
-
-    @staticmethod
-    def grad_dot_prod_from_grad_comp(A1: Tensor, B1: Tensor, A2: Tensor, B2: Tensor) -> Tensor:
-        """Compute gradient sample norm for the weight matrix in a GCLayerNorm layer.
-
-        Args:
-            A1 (Tensor): train weight gradient of the layer.
-            B1 (Tensor): train bias gradient of the layer.
-            A2 (Tensor): test weight gradient of the layer.
-            B2 (Tensor): test bias gradient of the layer.
-
-        Returns:
-            Tensor: the gradient sample norm.
-        """
-        if A1.dim() == 2 and B1.dim() == 2:
-            return torch.matmul(A1, A2.T) + torch.matmul(B1, B2.T)
-        else:
-            raise ValueError(f"Unexpected grad_weight shape: {A1.size()}, grad_bias shape: {B1.size()}")

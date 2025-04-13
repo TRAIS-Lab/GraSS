@@ -568,7 +568,7 @@ def main():
     model.set_projectors(args.layer, projector_kwargs, train_dataloader)
     model.eval()
 
-    layers = find_GClayers(model, args.layer, return_module_name=True)[:-1]
+    layers = find_GClayers(model, args.layer, return_type="name_instance")[:-1]
 
     from _Localizer.localizer import GradientComponentMaskOptimizer
 
