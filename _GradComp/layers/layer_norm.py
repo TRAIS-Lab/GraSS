@@ -82,48 +82,6 @@ class GCLayerNorm(nn.LayerNorm):
 
             self.projector_grad = torch.compile(projector_grad)
 
-    # def grad_comp(self, grad_pre_activation: Tensor, per_sample: bool = True) -> Tuple[Tensor, Tensor]:
-    #     """
-    #     Return the components of the gradient of parameters (for both 2D and 3D inputs).
-
-    #     For LayerNorm, since the parameter is small, we directly return gradients for the weight and bias.
-
-    #     Args:
-    #         grad_pre_activation: Gradient of loss w.r.t. pre-activation (dL/dx_o)
-    #         per_sample: Whether to maintain per-sample gradients (default: True)
-
-    #     Returns:
-    #         tuple: (grad_weight, grad_bias)
-    #     """
-    #     if not self.elementwise_affine:
-    #         raise ValueError("LayerNorm must have learnable parameters for per-example gradients.")
-
-    #     normalized = self.normalized
-    #     is_3d = self.normalized.dim() == 3
-
-    #     if per_sample:
-    #         grad_pre_activation = grad_pre_activation * normalized.shape[0]
-    #         if is_3d:
-    #             grad_weight = torch.einsum("ijk,ijk->ik", grad_pre_activation, normalized)
-    #             grad_bias = torch.sum(grad_pre_activation, dim=1)
-    #         else:
-    #             grad_weight = grad_pre_activation * normalized
-    #             grad_bias = grad_pre_activation
-    #     else:
-    #         if is_3d:
-    #             grad_weight = torch.sum(grad_pre_activation * normalized, dim=(0, 1))
-    #             grad_bias = torch.sum(grad_pre_activation, dim=(0, 1))
-    #         else:
-    #             grad_weight = torch.sum(grad_pre_activation * normalized, dim=0)
-    #             grad_bias = torch.sum(grad_pre_activation, dim=0)
-
-    #     if self.projector_grad_comp != (None, None):
-    #         projector_grad_comp_1, projector_grad_comp_2 = self.projector_grad_comp
-    #         grad_weight = projector_grad_comp_1(grad_weight)
-    #         grad_bias = projector_grad_comp_2(grad_bias)
-
-    #     return grad_weight, grad_bias
-
     def grad_from_grad_comp(self, grad_pre_activation: Tensor, per_sample: bool = True) -> Tensor:
         """
         Construct gradient from the gradient components.

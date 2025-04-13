@@ -621,64 +621,48 @@ def main():
         model.set_projectors(args.layer, projector_kwargs, train_dataloader)
         model.eval()
 
-        if hessian == "none":
-            from _GradComp.GD import GradDotAttributor
-            attributor = GradDotAttributor(
-                model=model,
-                layer_name=find_GClayers(model, args.layer),
-                lr=1e-3,
-                profile=args.profile,
-                device=device,
-            )
+        from _GradComp.influence_function import IFAttributor
+        attributor = IFAttributor(
+            model=model,
+            layer_name=find_GClayers(model, args.layer)[:-1],
+            hessian=hessian,
+            profile=args.profile,
+            device=device,
+        )
 
-            if args.profile:
-                score, profile = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
-            else:
-                score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
-
-        elif hessian == "raw":
-            from _GradComp.influence_function import IFAttributor
-            attributor = IFAttributor(
-                model=model,
-                layer_name=find_GClayers(model, args.layer)[:-1],
-                hessian="raw",
-                profile=args.profile,
-                device=device,
-            )
-
-            if args.profile:
-                # Measure cache throughput
-                torch.cuda.synchronize(device)
-                cache_start_time = time.time()
-                attributor.cache(train_dataloader)
-                torch.cuda.synchronize(device)
-                cache_end_time = time.time()
-                cache_duration = cache_end_time - cache_start_time
-                cache_throughput = train_tokens / cache_duration
-                throughput_stats["cache"] = {
-                    "tokens": train_tokens,
-                    "duration_seconds": cache_duration,
-                    "throughput_tokens_per_second": cache_throughput
-                }
-                print(f"Cache throughput: {cache_throughput:.2f} tokens/sec")
+        if args.profile:
+            # Measure cache throughput
+            torch.cuda.synchronize(device)
+            cache_start_time = time.time()
+            attributor.cache(train_dataloader)
+            torch.cuda.synchronize(device)
+            cache_end_time = time.time()
+            cache_duration = cache_end_time - cache_start_time
+            cache_throughput = train_tokens / cache_duration
+            throughput_stats["cache"] = {
+                "tokens": train_tokens,
+                "duration_seconds": cache_duration,
+                "throughput_tokens_per_second": cache_throughput
+            }
+            print(f"Cache throughput: {cache_throughput:.2f} tokens/sec")
 
 
-                # Measure attribute throughput
-                torch.cuda.synchronize(device)
-                attribute_start_time = time.time()
-                score, profile = attributor.attribute(test_dataloader=test_dataloader)
-                torch.cuda.synchronize(device)
-                attribute_end_time = time.time()
-                attribute_duration = attribute_end_time - attribute_start_time
-                attribute_throughput = test_samples / attribute_duration
-                throughput_stats["attribute"] = {
-                    "test_samples": test_samples,
-                    "duration_seconds": attribute_duration,
-                    "throughput_test_sample_per_second": attribute_throughput
-                }
-                print(f"Attribute throughput: {attribute_throughput:.2f} test samples/sec")
-            else:
-                score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
+            # Measure attribute throughput
+            torch.cuda.synchronize(device)
+            attribute_start_time = time.time()
+            score, profile = attributor.attribute(test_dataloader=test_dataloader)
+            torch.cuda.synchronize(device)
+            attribute_end_time = time.time()
+            attribute_duration = attribute_end_time - attribute_start_time
+            attribute_throughput = test_samples / attribute_duration
+            throughput_stats["attribute"] = {
+                "test_samples": test_samples,
+                "duration_seconds": attribute_duration,
+                "throughput_test_sample_per_second": attribute_throughput
+            }
+            print(f"Attribute throughput: {attribute_throughput:.2f} test samples/sec")
+        else:
+            score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
 
     elif args.baseline == "LoGra":
         check_min_version("4.46.0")

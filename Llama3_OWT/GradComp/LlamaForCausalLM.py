@@ -109,7 +109,7 @@ class GCLlamaForCausalLM(LlamaForCausalLM):
         if layer == "Linear":
             proj_layer = (GCLinear, GCEmbedding)
         elif layer == "LayerNorm":
-            proj_layer = (GCLayerNorm,)
+            proj_layer = (GCLayerNorm)
         elif layer == "Linear_LayerNorm":
             proj_layer = (GCLinear, GCEmbedding, GCLayerNorm)
         else:

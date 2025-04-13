@@ -70,10 +70,7 @@ def setup_projection_kwargs(args, device):
             proj_factorize = True
             proj_dim = proj_dim.split("*")
             assert proj_dim[0] == proj_dim[1], "Projection dimension must be the same for factorized projection."
-
             proj_dim = int(proj_dim[0]) # Convert to integer
-            if proj_method == "SJLT":
-                assert int(proj_dim[0]) > 512, "Projection dimension must be greater than 512 for to project the entire gradient to avoid the slow down due to local collisions."
         else:
             proj_factorize = False
             proj_dim = int(proj_dim) # Convert to integer
@@ -103,8 +100,8 @@ def batch_size(baseline, tda):
             train_batch_size = 2
             test_batch_size = 2
         elif tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
-            train_batch_size = 12
-            test_batch_size = 12
+            train_batch_size = 8
+            test_batch_size = 8
     elif baseline == "LoGra":
         if tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
             train_batch_size = 2

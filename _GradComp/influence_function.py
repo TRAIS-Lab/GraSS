@@ -82,7 +82,6 @@ class IFAttributor:
         Hessian = [torch.zeros((1, 1), device="cpu" if self.cpu_offload else self.device) for _ in range(num_layers)]
 
         train_grad = [None] * len(self.layer_name)
-        ifvp_train = [None] * len(self.layer_name)
 
         num_samples = len(train_dataloader.sampler)
 
@@ -192,31 +191,36 @@ class IFAttributor:
             torch.cuda.synchronize(self.device)
             start_time = time.time()
 
-        print(f"Calculating iFVP...")
-        # Add damping term and compute inverses
-        for layer_id in range(num_layers):
-            if self.cpu_offload:
-                # Move to GPU for computation
-                hessian_gpu = Hessian[layer_id].to(device=self.device)
-                train_grad_gpu = train_grad[layer_id].to(device=self.device)
+        if self.hessian == "none":
+            # If no Hessian approximation is used, return None
+            return train_grad
+        elif self.hessian == "raw":
+            print(f"Calculating iFVP...")
+            ifvp_train = [None] * len(self.layer_name)
+            # Add damping term and compute inverses
+            for layer_id in range(num_layers):
+                if self.cpu_offload:
+                    # Move to GPU for computation
+                    hessian_gpu = Hessian[layer_id].to(device=self.device)
+                    train_grad_gpu = train_grad[layer_id].to(device=self.device)
 
-                # Compute inverse and product
-                hessian_inv = stable_inverse(hessian_gpu, damping=self.damping)
-                result = torch.matmul(hessian_inv, train_grad_gpu.t()).t()
+                    # Compute inverse and product
+                    hessian_inv = stable_inverse(hessian_gpu, damping=self.damping)
+                    result = torch.matmul(hessian_inv, train_grad_gpu.t()).t()
 
-                # Move back to CPU
-                ifvp_train[layer_id] = result.cpu()
-            else:
-                ifvp_train[layer_id] = torch.matmul(
-                    stable_inverse(Hessian[layer_id], damping=self.damping),
-                    train_grad[layer_id].t()
-                ).t()
+                    # Move back to CPU
+                    ifvp_train[layer_id] = result.cpu()
+                else:
+                    ifvp_train[layer_id] = torch.matmul(
+                        stable_inverse(Hessian[layer_id], damping=self.damping),
+                        train_grad[layer_id].t()
+                    ).t()
 
-        if self.profile:
-            torch.cuda.synchronize(self.device)
-            self.profiling_stats['precondition'] += time.time() - start_time
+            if self.profile:
+                torch.cuda.synchronize(self.device)
+                self.profiling_stats['precondition'] += time.time() - start_time
 
-        return ifvp_train
+            return ifvp_train
 
     def cache(
         self,
