@@ -638,15 +638,6 @@ def main():
             attributor.cache(train_dataloader)
             torch.cuda.synchronize(device)
             cache_end_time = time.time()
-            cache_duration = cache_end_time - cache_start_time
-            cache_throughput = train_tokens / cache_duration
-            throughput_stats["cache"] = {
-                "tokens": train_tokens,
-                "duration_seconds": cache_duration,
-                "throughput_tokens_per_second": cache_throughput
-            }
-            print(f"Cache throughput: {cache_throughput:.2f} tokens/sec")
-
 
             # Measure attribute throughput
             torch.cuda.synchronize(device)
@@ -654,14 +645,6 @@ def main():
             score, profile = attributor.attribute(test_dataloader=test_dataloader)
             torch.cuda.synchronize(device)
             attribute_end_time = time.time()
-            attribute_duration = attribute_end_time - attribute_start_time
-            attribute_throughput = train_test_pairs / attribute_duration
-            throughput_stats["attribute"] = {
-                "train_test_pairs": train_test_pairs,
-                "duration_seconds": attribute_duration,
-                "throughput_per_second": attribute_throughput
-            }
-            print(f"Attribute throughput: {attribute_throughput:.2f} test samples/sec")
         else:
             score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
 
@@ -694,14 +677,6 @@ def main():
             attributor.cache(train_dataloader=train_dataloader)
             torch.cuda.synchronize(device)
             cache_end_time = time.time()
-            cache_duration = cache_end_time - cache_start_time
-            cache_throughput = train_tokens / cache_duration
-            throughput_stats["cache"] = {
-                "tokens": train_tokens,
-                "duration_seconds": cache_duration,
-                "throughput_tokens_per_second": cache_throughput
-            }
-            print(f"Cache throughput: {cache_throughput:.2f} tokens/sec")
 
            # Measure attribute throughput
             torch.cuda.synchronize(device)
@@ -709,14 +684,6 @@ def main():
             score, profile = attributor.attribute(test_dataloader=test_dataloader)
             torch.cuda.synchronize(device)
             attribute_end_time = time.time()
-            attribute_duration = attribute_end_time - attribute_start_time
-            attribute_throughput = train_test_pairs / attribute_duration
-            throughput_stats["attribute"] = {
-                "train_test_pairs": train_test_pairs,
-                "duration_seconds": attribute_duration,
-                "throughput_per_second": attribute_throughput
-            }
-            print(f"Attribute throughput: {attribute_throughput:.2f} test samples/sec")
         else:
             attributor.cache(train_dataloader=train_dataloader)
             score = attributor.attribute(test_dataloader=test_dataloader)
@@ -769,14 +736,6 @@ def main():
         trainer.extract_log()
         torch.cuda.synchronize(device)
         cache_end_time = time.time(device)
-        cache_duration = cache_end_time - cache_start_time
-        cache_throughput = train_tokens / cache_duration
-        throughput_stats["cache"] = {
-            "tokens": train_tokens,
-            "duration_seconds": cache_duration,
-            "throughput_tokens_per_second": cache_throughput
-        }
-        print(f"Cache throughput: {cache_throughput:.2f} tokens/sec")
 
         # 2. Computing influence scores for test data
         model = AutoModelForCausalLM.from_pretrained(checkpoint).cuda(device) # reinitialize the model
@@ -814,6 +773,21 @@ def main():
         result = trainer.influence()
         torch.cuda.synchronize(device)
         attribute_end_time = time.time()
+
+        score = result["influence"].T
+
+    else:
+        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'LoGra'.")
+
+    if args.profile:
+        cache_duration = cache_end_time - cache_start_time
+        cache_throughput = train_tokens / cache_duration
+        throughput_stats["cache"] = {
+            "tokens": train_tokens,
+            "duration_seconds": cache_duration,
+            "throughput_tokens_per_second": cache_throughput
+        }
+
         attribute_duration = attribute_end_time - attribute_start_time
         attribute_throughput = train_test_pairs / attribute_duration
         throughput_stats["attribute"] = {
@@ -821,12 +795,6 @@ def main():
             "duration_seconds": attribute_duration,
             "throughput_per_second": attribute_throughput
         }
-        print(f"Attribute throughput: {attribute_throughput:.2f} test samples/sec")
-
-        score = result["influence"].T
-
-    else:
-        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'LoGra'.")
 
     training_setting = args.output_dir.split("/")[-1]
     lds_score, _, _ = lds(score, training_setting)
