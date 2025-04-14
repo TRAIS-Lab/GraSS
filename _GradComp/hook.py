@@ -79,16 +79,6 @@ class HookManager:
 
     def get_projected_grads(self):
         """Get all projected gradients"""
-        # Add debug information
-        if not self.projected_grads:
-            print("Warning: No projected gradients captured. This could be because:")
-            print("  1. No backward pass has been performed yet")
-            print("  2. The layers specified in layer_names don't have grad_from_grad_comp method")
-            print("  3. The hook registration failed")
-            print(f"Registered layer names: {self.layer_names}")
-            print(f"Available inputs: {list(self.inputs.keys())}")
-            print(f"Available pre_activations: {list(self.pre_activations.keys())}")
-
         return self.projected_grads
 
     def remove_hooks(self):

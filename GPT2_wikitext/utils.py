@@ -72,8 +72,6 @@ def setup_projection_kwargs(args, device):
             assert proj_dim[0] == proj_dim[1], "Projection dimension must be the same for factorized projection."
 
             proj_dim = int(proj_dim[0]) # Convert to integer
-            if proj_method == "SJLT":
-                assert int(proj_dim[0]) > 512, "Projection dimension must be greater than 512 for to project the entire gradient to avoid the slow down due to local collisions."
         else:
             proj_factorize = False
             proj_dim = int(proj_dim) # Convert to integer

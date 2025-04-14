@@ -626,7 +626,7 @@ def main():
             hessian=hessian,
             profile=args.profile,
             device=device,
-            cpu_offload=False,
+            cpu_offload=True,
             projector_kwargs=projector_kwargs,
         )
 

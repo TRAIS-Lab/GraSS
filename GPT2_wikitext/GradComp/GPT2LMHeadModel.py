@@ -3,7 +3,7 @@ import sys
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '...'))
 sys.path.append(parent_dir)
 
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from transformers import GPT2LMHeadModel
 from transformers.models.gpt2.modeling_gpt2 import Conv1D
 from _GradComp.layers.linear import GCLinear, GCEmbedding
 from _GradComp.layers.layer_norm import GCLayerNorm
