@@ -60,7 +60,6 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from GradComp.LlamaForCausalLM import GCLlamaForCausalLM
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
@@ -481,7 +480,7 @@ def main():
         )
 
     if args.model_name_or_path:
-        model = GCLlamaForCausalLM.from_pretrained(
+        model = AutoModelForCausalLM.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
             config=config,
@@ -490,7 +489,7 @@ def main():
         )
     else:
         logger.info("Training new model from scratch")
-        model = GCLlamaForCausalLM.from_config(config, trust_remote_code=args.trust_remote_code)
+        model = AutoModelForCausalLM.from_config(config, trust_remote_code=args.trust_remote_code)
 
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
@@ -589,7 +588,7 @@ def main():
         test_dataset, collate_fn=default_data_collator, batch_size=test_batch_size, shuffle=False
     )
     train_tokens = count_total_tokens(train_dataloader)
-    test_samples = len(test_dataset)
+    train_test_pairs = len(train_dataset) * len(test_dataset)
 
     throughput_stats = {}
 
@@ -608,7 +607,8 @@ def main():
     profile = None
     if args.baseline == "GC":
         check_min_version("4.46.0")
-        from _GradComp.layers.utils import find_GClayers
+        from _GradComp.utils import find_layers
+        from _GradComp.influence_function import IFAttributor
 
         # get which Hessian to use
         tda, hessian = args.tda.split("-")
@@ -616,10 +616,11 @@ def main():
         assert tda == "IF", "GradComp only supports Influence Function now."
         assert hessian in ["none", "raw"], "Invalid Hessian type."
 
-        layer_names = find_GClayers(model, args.layer, return_type="name")
+        layer_names = find_layers(model, args.layer, return_type="name")
 
         from _GradComp.influence_function import IFAttributor
         attributor = IFAttributor(
+            setting="Llama3_OWT",
             model=model,
             layer_names=layer_names,
             hessian=hessian,
@@ -636,14 +637,6 @@ def main():
             attributor.cache(train_dataloader)
             torch.cuda.synchronize(device)
             cache_end_time = time.time()
-            cache_duration = cache_end_time - cache_start_time
-            cache_throughput = train_tokens / cache_duration
-            throughput_stats["cache"] = {
-                "tokens": train_tokens,
-                "duration_seconds": cache_duration,
-                "throughput_tokens_per_second": cache_throughput
-            }
-            print(f"Cache throughput: {cache_throughput:.2f} tokens/sec")
 
 
             # Measure attribute throughput
@@ -652,14 +645,6 @@ def main():
             score, profile = attributor.attribute(test_dataloader=test_dataloader)
             torch.cuda.synchronize(device)
             attribute_end_time = time.time()
-            attribute_duration = attribute_end_time - attribute_start_time
-            attribute_throughput = test_samples / attribute_duration
-            throughput_stats["attribute"] = {
-                "test_samples": test_samples,
-                "duration_seconds": attribute_duration,
-                "throughput_test_sample_per_second": attribute_throughput
-            }
-            print(f"Attribute throughput: {attribute_throughput:.2f} test samples/sec")
         else:
             score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
 
@@ -694,14 +679,6 @@ def main():
             attributor.cache(train_dataloader=train_dataloader)
             torch.cuda.synchronize(device)
             cache_end_time = time.time()
-            cache_duration = cache_end_time - cache_start_time
-            cache_throughput = train_tokens / cache_duration
-            throughput_stats["cache"] = {
-                "tokens": train_tokens,
-                "duration_seconds": cache_duration,
-                "throughput_tokens_per_second": cache_throughput
-            }
-            print(f"Cache throughput: {cache_throughput:.2f} tokens/sec")
 
            # Measure attribute throughput
             torch.cuda.synchronize(device)
@@ -709,14 +686,6 @@ def main():
             score, profile = attributor.attribute(test_dataloader=test_dataloader)
             torch.cuda.synchronize(device)
             attribute_end_time = time.time()
-            attribute_duration = attribute_end_time - attribute_start_time
-            attribute_throughput = test_samples / attribute_duration
-            throughput_stats["attribute"] = {
-                "test_samples": test_samples,
-                "duration_seconds": attribute_duration,
-                "throughput_test_sample_per_second": attribute_throughput
-            }
-            print(f"Attribute throughput: {attribute_throughput:.2f} test samples/sec")
         else:
             attributor.cache(train_dataloader=train_dataloader)
             score = attributor.attribute(test_dataloader=test_dataloader)
@@ -740,8 +709,8 @@ def main():
         model.eval()
 
         logix_args_train = LogIXArguments(
-            project=f"./LogIX/project/{args.projection}",
-            config=f"./LogIX/project/{args.projection}.yaml",
+            project=f"./LogIX/{args.projection}",
+            config=f"./LogIX/{args.projection}.yaml",
             lora=True,
             hessian=hessian,
             save="grad",
@@ -769,21 +738,19 @@ def main():
         trainer.extract_log()
         torch.cuda.synchronize(device)
         cache_end_time = time.time(device)
-        cache_duration = cache_end_time - cache_start_time
-        cache_throughput = train_tokens / cache_duration
-        throughput_stats["cache"] = {
-            "tokens": train_tokens,
-            "duration_seconds": cache_duration,
-            "throughput_tokens_per_second": cache_throughput
-        }
-        print(f"Cache throughput: {cache_throughput:.2f} tokens/sec")
 
         # 2. Computing influence scores for test data
-        model = model.cuda(device) # reinitialize the model
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model_name_or_path,
+            from_tf=bool(".ckpt" in args.model_name_or_path),
+            config=config,
+            low_cpu_mem_usage=args.low_cpu_mem_usage,
+            trust_remote_code=args.trust_remote_code,
+        ).cuda(device) # reinitialize the model
         model.eval()
         logix_args_test = LogIXArguments(
-            project=f"./LogIX/project/{args.projection}",
-            config=f"./LogIX/project/{args.projection}.yaml",
+            project=f"./LogIX/{args.projection}",
+            config=f"./LogIX/{args.projection}.yaml",
             lora=True,
             hessian=hessian,
             save="grad",
@@ -814,19 +781,28 @@ def main():
         result = trainer.influence()
         torch.cuda.synchronize(device)
         attribute_end_time = time.time()
-        attribute_duration = attribute_end_time - attribute_start_time
-        attribute_throughput = test_samples / attribute_duration
-        throughput_stats["attribute"] = {
-            "test_samples": test_samples,
-            "duration_seconds": attribute_duration,
-            "throughput_test_sample_per_second": attribute_throughput
-        }
-        print(f"Attribute throughput: {attribute_throughput:.2f} test samples/sec")
 
         score = result["influence"].T
 
     else:
         raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'LoGra', and 'dattri'.")
+
+    if args.profile:
+        cache_duration = cache_end_time - cache_start_time
+        cache_throughput = train_tokens / cache_duration
+        throughput_stats["cache"] = {
+            "tokens": train_tokens,
+            "duration_seconds": cache_duration,
+            "throughput_tokens_per_second": cache_throughput
+        }
+
+        attribute_duration = attribute_end_time - attribute_start_time
+        attribute_throughput = train_test_pairs / attribute_duration
+        throughput_stats["attribute"] = {
+            "train_test_pairs": train_test_pairs,
+            "duration_seconds": attribute_duration,
+            "throughput_pair_per_second": attribute_throughput
+        }
 
     logger.info("***** Attribution finished *****")
 

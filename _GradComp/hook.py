@@ -45,6 +45,53 @@ class HookManager:
         # Register hooks
         self._register_hooks()
 
+    def _register_hooks(self):
+        """Register forward and backward hooks to target layers"""
+        for name, module in self.model.named_modules():
+            if name in self.layer_names:
+                idx = self.layer_name_to_idx[name]
+
+                # Use functools.partial to correctly bind parameters to avoid late binding issues
+                forward_hook = functools.partial(self._forward_hook_fn, name)
+                backward_hook = functools.partial(self._backward_hook_fn, name)
+
+                # Register hooks with properly bound parameters
+                self.forward_hooks[idx] = module.register_forward_hook(forward_hook)
+                self.backward_hooks[idx] = module.register_full_backward_hook(backward_hook)
+
+    def set_projectors(self, projectors: List[Any]) -> None:
+        """
+        Set projector objects for each layer
+
+        Args:
+            projectors: List of projector objects, ordered by layer_names
+        """
+        self.projectors = projectors
+
+    def get_projected_grads(self) -> List[Tensor]:
+        """
+        Get all captured projected gradients
+
+        Returns:
+            List of projected gradient tensors, ordered by layer_names
+        """
+        return self.projected_grads
+
+    def get_projected_grad_by_name(self, name: str) -> Optional[Tensor]:
+        """
+        Get projected gradient for a specific layer by name
+
+        Args:
+            name: Layer name
+
+        Returns:
+            Projected gradient tensor for the specified layer
+        """
+        if name in self.layer_name_to_idx:
+            idx = self.layer_name_to_idx[name]
+            return self.projected_grads[idx]
+        return None
+
     def _forward_hook_fn(self, name: str, mod: nn.Module, inp: Any, out: Any) -> None:
         """
         Forward hook function that captures inputs and pre-activations
@@ -95,11 +142,11 @@ class HookManager:
         with torch.no_grad():
             if isinstance(mod, nn.Linear):
                 grad = self._linear_grad_from_grad_comp(
-                    mod, idx, name, grad_pre_activation, per_sample=True
+                    mod, idx, grad_pre_activation, per_sample=True
                 )
             elif isinstance(mod, nn.LayerNorm):
                 grad = self._layernorm_grad_from_grad_comp(
-                    mod, idx, name, grad_pre_activation, per_sample=True
+                    mod, idx, grad_pre_activation, per_sample=True
                 )
             elif isinstance(mod, nn.Embedding):
                 # Embeddings would need their own implementation
@@ -116,7 +163,6 @@ class HookManager:
         self,
         layer: nn.Linear,
         idx: int,
-        name: str,
         grad_pre_activation: Tensor,
         per_sample: bool = True
     ) -> Tensor:
@@ -198,7 +244,6 @@ class HookManager:
         self,
         layer: nn.LayerNorm,
         idx: int,
-        name: str,
         grad_pre_activation: Tensor,
         per_sample: bool = True
     ) -> Tensor:
@@ -256,44 +301,6 @@ class HookManager:
 
         return grad
 
-    def _register_hooks(self):
-        """Register forward and backward hooks to target layers"""
-        for name, module in self.model.named_modules():
-            if name in self.layer_names:
-                idx = self.layer_name_to_idx[name]
-
-                # Use functools.partial to correctly bind parameters to avoid late binding issues
-                forward_hook = functools.partial(self._forward_hook_fn, name)
-                backward_hook = functools.partial(self._backward_hook_fn, name)
-
-                # Register hooks with properly bound parameters
-                self.forward_hooks[idx] = module.register_forward_hook(forward_hook)
-                self.backward_hooks[idx] = module.register_full_backward_hook(backward_hook)
-
-    def get_projected_grads(self) -> List[Tensor]:
-        """
-        Get all captured projected gradients
-
-        Returns:
-            List of projected gradient tensors, ordered by layer_names
-        """
-        return self.projected_grads
-
-    def get_projected_grad_by_name(self, name: str) -> Optional[Tensor]:
-        """
-        Get projected gradient for a specific layer by name
-
-        Args:
-            name: Layer name
-
-        Returns:
-            Projected gradient tensor for the specified layer
-        """
-        if name in self.layer_name_to_idx:
-            idx = self.layer_name_to_idx[name]
-            return self.projected_grads[idx]
-        return None
-
     def remove_hooks(self) -> None:
         """Remove all hooks"""
         for hook in self.forward_hooks:
@@ -304,12 +311,3 @@ class HookManager:
                 hook.remove()
         self.forward_hooks = [None] * len(self.layer_names)
         self.backward_hooks = [None] * len(self.layer_names)
-
-    def set_projectors(self, projectors: List[Any]) -> None:
-        """
-        Set projector objects for each layer
-
-        Args:
-            projectors: List of projector objects, ordered by layer_names
-        """
-        self.projectors = projectors

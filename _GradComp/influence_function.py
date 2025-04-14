@@ -66,7 +66,7 @@ class IFAttributor:
 
         self.full_train_dataloader = None
         self.hook_manager = None
-        self.cached_ifvp_train = None
+        self.train_gradients = None
         self.projectors = None
 
         # Initialize profiling stats
@@ -98,22 +98,22 @@ class IFAttributor:
             self.device
         )
 
-    def _calculate_ifvp(
+    def cache(
         self,
-        train_dataloader: torch.utils.data.DataLoader,
+        full_train_dataloader: torch.utils.data.DataLoader
     ) -> List[torch.Tensor]:
         """
-        Compute FIM inverse Hessian vector product for each layer using hooks.
+        Cache IFVP for the full training data.
 
         Args:
-            train_dataloader: DataLoader for training data
-
-        Returns:
-            List of tensors containing the FIM factors for each layer
+            full_train_dataloader: DataLoader for the full training data
         """
+        print("Extracting information from training data...")
+        self.full_train_dataloader = full_train_dataloader
+
         # Set up the projectors
         if self.projectors is None:
-            self._setup_projectors(train_dataloader)
+            self._setup_projectors(full_train_dataloader)
 
         # Create name-to-index mapping for layer access
         layer_name_to_idx = {name: idx for idx, name in enumerate(self.layer_names)}
@@ -132,7 +132,7 @@ class IFAttributor:
             self.hook_manager.set_projectors(self.projectors)
 
         # Iterate through the training data to compute gradients
-        for train_batch_idx, train_batch in enumerate(tqdm(train_dataloader, desc="Processing training data")):
+        for train_batch_idx, train_batch in enumerate(tqdm(full_train_dataloader, desc="Processing training data")):
             # Zero gradients
             self.model.zero_grad()
 
@@ -197,7 +197,7 @@ class IFAttributor:
                 grads = torch.cat(per_layer_gradients[layer_idx], dim=0)
 
                 # Compute Hessian on GPU (more efficient)
-                hessian = torch.matmul(grads.t(), grads) / len(train_dataloader.sampler)
+                hessian = torch.matmul(grads.t(), grads) / len(full_train_dataloader.sampler)
 
                 # Store results based on offload preference
                 if self.cpu_offload:
@@ -230,7 +230,7 @@ class IFAttributor:
             start_time = time.time()
 
         if self.hessian == "none":
-            return train_grads
+            self.train_gradients = train_grads
         elif self.hessian == "raw":
             print("Computing gradient covariance inverse...")
 
@@ -277,23 +277,9 @@ class IFAttributor:
                 torch.cuda.synchronize(self.device)
                 self.profiling_stats['precondition'] += time.time() - start_time
 
-            return ifvp_train
+            self.train_gradients = ifvp_train
         else:
             raise ValueError(f"Unsupported Hessian approximation: {self.hessian}")
-
-    def cache(
-        self,
-        full_train_dataloader: torch.utils.data.DataLoader
-    ) -> None:
-        """
-        Cache IFVP for the full training data.
-
-        Args:
-            full_train_dataloader: DataLoader for the full training data
-        """
-        print("Extracting information from training data...")
-        self.full_train_dataloader = full_train_dataloader
-        self.cached_ifvp_train = self._calculate_ifvp(full_train_dataloader)
 
     def attribute(
         self,
@@ -331,7 +317,7 @@ class IFAttributor:
             ifvp_train = self._calculate_ifvp(train_dataloader)
         else:
             num_train = len(self.full_train_dataloader.sampler)
-            ifvp_train = self.cached_ifvp_train
+            ifvp_train = self.train_gradients
 
         # Storage device
         storage_device = "cpu" if self.cpu_offload else self.device

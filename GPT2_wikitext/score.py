@@ -564,9 +564,8 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from GPT2_wikitext.utils import SubsetSampler, batch_size, setup_projection_kwargs, count_total_tokens, result_filename, lds, replace_conv1d_modules
+    from GPT2_wikitext.utils import SubsetSampler, batch_size, replace_conv1d_modules, setup_projection_kwargs, count_total_tokens, result_filename, lds
 
-    setting = "GPT2_wikitext"
     device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
 
@@ -609,7 +608,7 @@ def main():
     model = replace_conv1d_modules(model)
 
     profile = None
-    if args.baseline == "GC": #TODO: merge GC with IF-RAW
+    if args.baseline == "GC":
         check_min_version("4.46.0")
         from _GradComp.utils import find_layers
         from _GradComp.influence_function import IFAttributor
@@ -623,7 +622,7 @@ def main():
         layer_names = find_layers(model, args.layer, return_type="name")
 
         attributor = IFAttributor(
-            setting=setting,
+            setting="GPT2_wikitext",
             model=model,
             layer_names=layer_names,
             hessian=hessian,
@@ -687,8 +686,7 @@ def main():
             torch.cuda.synchronize(device)
             attribute_end_time = time.time()
         else:
-            attributor.cache(train_dataloader=train_dataloader)
-            score = attributor.attribute(test_dataloader=test_dataloader)
+            score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
 
     elif args.baseline == "LogIX":
         #check_min_version("4.46.0") # LogIX is built on top of 4.40.0, ignore the checking

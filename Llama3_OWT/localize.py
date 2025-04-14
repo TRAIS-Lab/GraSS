@@ -60,7 +60,6 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from GradComp.GPT2LMHeadModel import GCGPT2LMHeadModel
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
@@ -424,7 +423,7 @@ def main():
         )
 
     if args.model_name_or_path:
-        model = GCGPT2LMHeadModel.from_pretrained(
+        model = AutoModelForCausalLM.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
             config=config,
@@ -433,7 +432,7 @@ def main():
         )
     else:
         logger.info("Training new model from scratch")
-        model = GCGPT2LMHeadModel.from_config(config, trust_remote_code=args.trust_remote_code)
+        model = AutoModelForCausalLM.from_config(config, trust_remote_code=args.trust_remote_code)
 
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
@@ -508,7 +507,11 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from GPT2_wikitext.utils import SubsetSampler, batch_size
+    from Llama3_OWT.utils import SubsetSampler
+    from _GradComp.utils import find_layers
+    from _Localizer.gradient_extractor import GradientExtractor
+    from _Localizer.localizer import Localizer
+    import gc
 
     device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
@@ -529,173 +532,65 @@ def main():
         test_dataset, collate_fn=default_data_collator, batch_size=test_batch_size, shuffle=False
     )
 
-    projector_kwargs = {
-        "proj_dim": 5000,
-        "proj_max_batch_size": 32,
-        "proj_seed": args.seed,
-        "proj_factorize": True,
-        "device": device,
-        "method": "Identity",
-        "use_half_precision": False,
-        "threshold": 0.0,
-        "random_drop": 0.0,
-        "localize": False,
-    }
-
-    assert args.layer == "Linear", "Localize option only works with Linear layer."
-
-    # Logging setting
-    logger.info(f"The train dataset length: {len(train_dataset)}.")
-    logger.info(f"The test dataset length: {len(test_dataset)}.")
-    logger.info(f"The train batch size: {train_batch_size}")
-    logger.info(f"The test batch size: {test_batch_size}")
-    logger.info(f"Localize parameters (per-layer): {args.localize}")
-    logger.info(f"Epochs: {args.epoch}")
-    logger.info(f"Learning rate: {args.learning_rate}")
-    logger.info(f"Lambda: {args.regularization}")
-    logger.info(f"Early stop threshold: {args.early_stop}")
-    logger.info(f"Log interval: {args.log_interval}")
-    logger.info(f"Layer: {args.layer}")
-    logger.info("***** Running attribution *****")
-
-    model_id = 0
-    checkpoint = f"{args.output_dir}/{model_id}"
-
-    check_min_version("4.46.0")
-    from _GradComp.layers.utils import find_GClayers
-
-    model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
-    model.set_projectors(args.layer, projector_kwargs, train_dataloader)
-    model.eval()
-
-    layers = find_GClayers(model, args.layer, return_type="name_instance")[:-1]
-
-    from _Localizer.localizer import GradientComponentMaskOptimizer
+    # Extract the layers we want to analyze
+    layers = find_layers(model, args.layer, return_type="name_instance")
 
     # Create output directory for saving masks
     output_dir = f"./Localize/mask_{args.localize}*{args.localize}"
     os.makedirs(output_dir, exist_ok=True)
 
-    # Optimize each layer one by one to save memory
+    # Initialize gradient extractor
+    logger.info("Initializing gradient extractor...")
+    extractor = GradientExtractor(
+        model=model,
+        device=device,
+    )
+
+    # Process each layer individually to save memory
     for layer_idx, (module_name, layer) in enumerate(layers):
-        logger.info(f"Processing layer {layer_idx + 1}/{len(layers)}")
+        logger.info(f"Processing layer {layer_idx + 1}/{len(layers)}: {module_name}")
 
-        # Get dimensions for pre-activation and input features
-        # We'll determine these from the first batch
-        train_batch = next(iter(train_dataloader))
-        train_input_ids = train_batch["input_ids"].to(device)
-        train_attention_masks = train_batch["attention_mask"].to(device)
-        train_labels = train_batch["labels"].to(device)
-
-        outputs = model(
-            input_ids=train_input_ids,
-            attention_mask=train_attention_masks,
-            labels=train_labels
+        # Extract gradients for this specific layer (both train and test)
+        train_components, test_components = extractor.extract_gradients_for_layer(
+            layer_name=module_name,
+            train_dataloader=train_dataloader,
+            test_dataloader=test_dataloader
         )
 
-        logp = -outputs.loss
-        train_loss = logp - torch.log(1 - torch.exp(logp))
+        if train_components is None or test_components is None:
+            logger.warning(f"No gradient components available for layer {module_name}, skipping...")
+            continue
 
-        train_pre_acts = [layer.pre_activation]
-        Z_grad_train = torch.autograd.grad(train_loss, train_pre_acts, retain_graph=True)[0]
-        grad_pre_activation, input_features = layer.grad_comp(Z_grad_train, per_sample=True)
+        # Extract components
+        train_pre_activations = train_components['pre_activation']
+        train_input_features = train_components['input_features']
+        test_pre_activations = test_components['pre_activation']
+        test_input_features = test_components['input_features']
+        is_3d = train_components['is_3d']
 
         # Get dimensions
-        pre_activation_dim = grad_pre_activation.shape[-1]
-        input_features_dim = input_features.shape[-1]
+        pre_activation_dim = train_pre_activations.shape[-1]
+        input_features_dim = train_input_features.shape[-1]
 
-        logger.info(f"Layer {layer_idx + 1} - Pre-activation dimension: {pre_activation_dim}, Input features dimension: {input_features_dim}")
-
-        # Collect training gradient components
-        train_pre_activations = []
-        train_input_features = []
-
-        logger.info("Collecting training gradient components...")
-        for train_batch_idx, train_batch in enumerate(
-            tqdm(train_dataloader, desc=f"Processing training data for layer {layer_idx + 1}", leave=False)
-        ):
-            train_input_ids = train_batch["input_ids"].to(device)
-            train_attention_masks = train_batch["attention_mask"].to(device)
-            train_labels = train_batch["labels"].to(device)
-
-            # Forward pass
-            outputs = model(
-                input_ids=train_input_ids,
-                attention_mask=train_attention_masks,
-                labels=train_labels
-            )
-
-            logp = -outputs.loss
-            train_loss = logp - torch.log(1 - torch.exp(logp))
-
-            train_pre_acts = layer.pre_activation
-            Z_grad_train = torch.autograd.grad(train_loss, train_pre_acts, retain_graph=True)[0]
-            batch_grad_pre_activation, batch_input_features = layer.grad_comp(Z_grad_train, per_sample=True)
-
-            # Store components for this batch
-            train_pre_activations.append(batch_grad_pre_activation.detach())
-            train_input_features.append(batch_input_features.detach())
-
-        # Collect test gradient components
-        test_pre_activations = []
-        test_input_features = []
-
-        logger.info("Collecting test gradient components...")
-        for test_batch_idx, test_batch in enumerate(
-            tqdm(test_dataloader, desc=f"Processing test data for layer {layer_idx + 1}", leave=False)
-        ):
-            test_input_ids = test_batch["input_ids"].to(device)
-            test_attention_masks = test_batch["attention_mask"].to(device)
-            test_labels = test_batch["labels"].to(device)
-
-            # Forward pass
-            outputs = model(
-                input_ids=test_input_ids,
-                attention_mask=test_attention_masks,
-                labels=test_labels
-            )
-
-            logp = -outputs.loss
-            test_loss = logp - torch.log(1 - torch.exp(logp))
-
-            test_pre_acts = [layer.pre_activation]
-            Z_grad_test = torch.autograd.grad(test_loss, test_pre_acts, retain_graph=True)[0]
-            batch_grad_pre_activation, batch_input_features = layer.grad_comp(Z_grad_test, per_sample=True)
-
-            # Store components for this batch
-            test_pre_activations.append(batch_grad_pre_activation.detach())
-            test_input_features.append(batch_input_features.detach())
-
-        is_3d = train_pre_activations[0].ndim == 3
-        # Concatenate all batches
-        if is_3d:
-            # Handle 3D tensors
-            train_pre_activations = torch.cat(train_pre_activations, dim=0)
-            train_input_features = torch.cat(train_input_features, dim=0)
-            test_pre_activations = torch.cat(test_pre_activations, dim=0)
-            test_input_features = torch.cat(test_input_features, dim=0)
-        else:
-            # Handle 2D tensors
-            train_pre_activations = torch.cat(train_pre_activations, dim=0)
-            train_input_features = torch.cat(train_input_features, dim=0)
-            test_pre_activations = torch.cat(test_pre_activations, dim=0)
-            test_input_features = torch.cat(test_input_features, dim=0)
+        logger.info(f"Layer {layer_idx + 1} - Pre-activation dimension: {pre_activation_dim}, "
+                   f"Input features dimension: {input_features_dim}")
 
         logger.info(f"Training the dual component mask optimizer for layer {layer_idx + 1}...")
 
         # Initialize the optimizer for this layer
-        optimizer = GradientComponentMaskOptimizer(
+        optimizer = Localizer(
             pre_activation_dim=pre_activation_dim,
             input_features_dim=input_features_dim,
             lambda_reg=args.regularization,
             lr=args.learning_rate,
-            min_active_pre_activation=args.localize,  # Adjust based on your requirements
+            min_active_pre_activation=args.localize,
             max_active_pre_activation=args.localize,
             min_active_input=args.localize,
             max_active_input=args.localize,
             device=device,
             logger=logger,
         )
+
         # Train the optimizer
         eval_metrics = optimizer.train(
             train_pre_activation=train_pre_activations,
@@ -721,8 +616,10 @@ def main():
         sparsity = 100 - (effective_params / total_params * 100)
 
         logger.info(f"Results for Layer {layer_idx + 1}:")
-        logger.info(f"Pre-activation mask: {len(important_indices['pre_activation'])}/{pre_activation_dim} parameters ({len(important_indices['pre_activation'])/pre_activation_dim*100:.2f}%)")
-        logger.info(f"Input features mask: {len(important_indices['input_features'])}/{input_features_dim} parameters ({len(important_indices['input_features'])/input_features_dim*100:.2f}%)")
+        logger.info(f"Pre-activation mask: {len(important_indices['pre_activation'])}/{pre_activation_dim} "
+                  f"parameters ({len(important_indices['pre_activation'])/pre_activation_dim*100:.2f}%)")
+        logger.info(f"Input features mask: {len(important_indices['input_features'])}/{input_features_dim} "
+                  f"parameters ({len(important_indices['input_features'])/input_features_dim*100:.2f}%)")
         logger.info(f"Effective parameters: {effective_params}/{total_params} ({100-sparsity:.2f}%)")
         logger.info(f"Sparsity achieved: {sparsity:.2f}%")
         logger.info(f"Correlation preserved: {eval_metrics['avg_rank_correlation']:.4f}")
@@ -733,8 +630,9 @@ def main():
 
         # Clear memory
         del train_pre_activations, train_input_features, test_pre_activations, test_input_features
-        del optimizer
+        del optimizer, train_components, test_components
         torch.cuda.empty_cache()
+        gc.collect()
 
     logger.info("Gradient component analysis completed for all layers.")
 

@@ -5,7 +5,7 @@ import numpy as np
 from scipy.stats import spearmanr
 import math
 
-class GradientComponentMaskOptimizer:
+class Localizer:
     def __init__(
             self,
             pre_activation_dim,

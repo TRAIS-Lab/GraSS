@@ -70,6 +70,7 @@ def setup_projection_kwargs(args, device):
             proj_factorize = True
             proj_dim = proj_dim.split("*")
             assert proj_dim[0] == proj_dim[1], "Projection dimension must be the same for factorized projection."
+
             proj_dim = int(proj_dim[0]) # Convert to integer
         else:
             proj_factorize = False
@@ -77,6 +78,7 @@ def setup_projection_kwargs(args, device):
 
     # Compatibility checking
     if proj_method == "Localize":
+        assert args.baseline == "GC", "Localize option only works with GC baseline."
         assert args.layer == "Linear", "Localize option only works with Linear layer."
         assert args.random_drop == 0.0, "Localize option can't be combined with random drop."
 

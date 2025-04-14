@@ -97,8 +97,10 @@ def setup_projection_kwargs(args, device):
 
     # Compatibility checking
     if proj_method == "Localize":
+        assert args.baseline == "GC", "Localize option only works with GC baseline."
         assert args.layer == "Linear", "Localize option only works with Linear layer."
         assert args.random_drop == 0.0, "Localize option can't be combined with random drop."
+        assert proj_factorize, "Localize option only works with factorized projection."
 
     projector_kwargs = {
         "proj_dim": proj_dim,
@@ -117,12 +119,12 @@ def setup_projection_kwargs(args, device):
 def batch_size(baseline, tda):
     if baseline == "GC":
         if tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
-            train_batch_size = 12
-            test_batch_size = 12
+            train_batch_size = 24
+            test_batch_size = 24
     elif baseline == "LoGra":
         if tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
-            train_batch_size = 12
-            test_batch_size = 12
+            train_batch_size = 24
+            test_batch_size = 24
     elif baseline == "LogIX":
         if tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
             train_batch_size = 32

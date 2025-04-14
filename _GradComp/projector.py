@@ -109,14 +109,14 @@ def setup_model_projectors(
                 active_indices = None
                 try:
                     dim = kwargs_copy["proj_dim"]
-                    if proj_factorize:
-                        mask_path = f"../{setting}/Localize/mask_{dim}*{dim}/{module_name}.pt"
-                    else:
-                        mask_path = f"../{setting}/Localize/mask_{dim}/{module_name}.pt"
+                    mask_path = f"../{setting}/Localize/mask_{dim}*{dim}/{module_name}.pt"
                     active_indices = torch.load(mask_path, weights_only=False)
                 except FileNotFoundError:
-                    print(f"Mask file not found for {module_name}. Using default active indices.")
-
+                    print(f"Mask file not found for {module_name}. Random indices are used.")
+                    active_indices = {
+                        "pre_activation": torch.randint(0, layer_outputs[module_name].shape[1], (dim, ), device=device),
+                        "input_features": torch.randint(0, layer_inputs[module_name].shape[1], (dim, ), device=device)
+                    }
                 proj_kwargs = kwargs_copy.copy()
                 proj_kwargs["active_indices"] = active_indices
             else:
