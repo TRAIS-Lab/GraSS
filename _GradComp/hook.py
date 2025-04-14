@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, Callable, Any, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, Callable, Any, Optional, Tuple, List
 if TYPE_CHECKING:
-    from typing import List, Union
+    from typing import Union
 
 import torch
 import torch.nn as nn
@@ -31,16 +31,16 @@ class HookManager:
         self.model = model
         self.layer_names = layer_names
 
-        # Dictionaries to store hooks and layer state
-        self.forward_hooks = {}
-        self.backward_hooks = {}
-        self.projected_grads = {}
-        self.inputs = {}
-        self.pre_activations = {}
-        self.normalized = {}  # For LayerNorm
+        # Create mapping from layer name to index for O(1) lookups
+        self.layer_name_to_idx = {name: idx for idx, name in enumerate(layer_names)}
 
-        # Store projectors for each layer
-        self.projectors = {}
+        self.forward_hooks = [None] * len(layer_names)
+        self.backward_hooks = [None] * len(layer_names)
+        self.projected_grads = [None] * len(layer_names)
+        self.inputs = [None] * len(layer_names)
+        self.pre_activations = [None] * len(layer_names)
+        self.normalized = [None] * len(layer_names)  # For LayerNorm
+        self.projectors = [None] * len(layer_names)
 
         # Register hooks
         self._register_hooks()
@@ -55,14 +55,17 @@ class HookManager:
             inp: Input tensors
             out: Output tensors
         """
+        # Get the index for this layer
+        idx = self.layer_name_to_idx[name]
+
         # Store input
         if isinstance(inp, tuple) and len(inp) > 0:
-            self.inputs[name] = inp[0].detach()
+            self.inputs[idx] = inp[0].detach()
         else:
-            self.inputs[name] = inp.detach()
+            self.inputs[idx] = inp.detach()
 
         # Store pre-activation (output)
-        self.pre_activations[name] = out.detach()
+        self.pre_activations[idx] = out.detach()
 
         # For LayerNorm, also capture the normalized tensor
         if isinstance(mod, nn.LayerNorm):
@@ -70,7 +73,7 @@ class HookManager:
             mean = x.mean(dim=-1, keepdim=True)
             var = x.var(dim=-1, keepdim=True, unbiased=False)
             normalized = (x - mean) / torch.sqrt(var + mod.eps)
-            self.normalized[name] = normalized.detach()
+            self.normalized[idx] = normalized.detach()
 
     def _backward_hook_fn(self, name: str, mod: nn.Module, grad_input: Any, grad_output: Any) -> None:
         """
@@ -82,6 +85,9 @@ class HookManager:
             grad_input: Gradient w.r.t inputs
             grad_output: Gradient w.r.t outputs
         """
+        # Get the index for this layer
+        idx = self.layer_name_to_idx[name]
+
         # Get the gradient of the pre-activation
         grad_pre_activation = grad_output[0]
 
@@ -89,11 +95,11 @@ class HookManager:
         with torch.no_grad():
             if isinstance(mod, nn.Linear):
                 grad = self._linear_grad_from_grad_comp(
-                    mod, name, grad_pre_activation, per_sample=True
+                    mod, idx, name, grad_pre_activation, per_sample=True
                 )
             elif isinstance(mod, nn.LayerNorm):
                 grad = self._layernorm_grad_from_grad_comp(
-                    mod, name, grad_pre_activation, per_sample=True
+                    mod, idx, name, grad_pre_activation, per_sample=True
                 )
             elif isinstance(mod, nn.Embedding):
                 # Embeddings would need their own implementation
@@ -104,11 +110,12 @@ class HookManager:
 
             if grad is not None:
                 # Store the projected gradient
-                self.projected_grads[name] = grad.detach()
+                self.projected_grads[idx] = grad.detach()
 
     def _linear_grad_from_grad_comp(
         self,
         layer: nn.Linear,
+        idx: int,
         name: str,
         grad_pre_activation: Tensor,
         per_sample: bool = True
@@ -118,14 +125,15 @@ class HookManager:
 
         Args:
             layer: Linear layer
-            name: Layer name
+            idx: Layer index
+            name: Layer name (kept for debugging)
             grad_pre_activation: Gradient of the pre-activation
             per_sample: Whether to compute per-sample gradients
 
         Returns:
             Projected gradient tensor
         """
-        input_features = self.inputs[name]
+        input_features = self.inputs[idx]
         is_3d = input_features.dim() == 3
 
         if is_3d:
@@ -155,7 +163,7 @@ class HookManager:
             grad_pre_activation = grad_pre_activation.reshape(batch_size, seq_length, -1)
 
         # Apply projectors if they exist
-        projector = self.projectors.get(name, None)
+        projector = self.projectors[idx]
         if projector and hasattr(projector, 'projector_grad_comp') and projector.projector_grad_comp != (None, None):
             projector_grad_comp_1, projector_grad_comp_2 = projector.projector_grad_comp
 
@@ -189,6 +197,7 @@ class HookManager:
     def _layernorm_grad_from_grad_comp(
         self,
         layer: nn.LayerNorm,
+        idx: int,
         name: str,
         grad_pre_activation: Tensor,
         per_sample: bool = True
@@ -198,7 +207,8 @@ class HookManager:
 
         Args:
             layer: LayerNorm layer
-            name: Layer name
+            idx: Layer index
+            name: Layer name (kept for debugging)
             grad_pre_activation: Gradient of the pre-activation
             per_sample: Whether to compute per-sample gradients
 
@@ -208,7 +218,7 @@ class HookManager:
         if not layer.elementwise_affine:
             return None
 
-        normalized = self.normalized.get(name, None)
+        normalized = self.normalized[idx]
         if normalized is None:
             return None
 
@@ -231,7 +241,7 @@ class HookManager:
                 grad_bias = torch.sum(grad_pre_activation, dim=0)
 
         # Apply projectors if they exist
-        projector = self.projectors.get(name, None)
+        projector = self.projectors[idx]
         if projector and hasattr(projector, 'projector_grad_comp') and projector.projector_grad_comp != (None, None):
             projector_grad_comp_1, projector_grad_comp_2 = projector.projector_grad_comp
             grad_weight = projector_grad_comp_1(grad_weight)
@@ -250,37 +260,56 @@ class HookManager:
         """Register forward and backward hooks to target layers"""
         for name, module in self.model.named_modules():
             if name in self.layer_names:
+                idx = self.layer_name_to_idx[name]
+
                 # Use functools.partial to correctly bind parameters to avoid late binding issues
                 forward_hook = functools.partial(self._forward_hook_fn, name)
                 backward_hook = functools.partial(self._backward_hook_fn, name)
 
                 # Register hooks with properly bound parameters
-                self.forward_hooks[name] = module.register_forward_hook(forward_hook)
-                self.backward_hooks[name] = module.register_full_backward_hook(backward_hook)
+                self.forward_hooks[idx] = module.register_forward_hook(forward_hook)
+                self.backward_hooks[idx] = module.register_full_backward_hook(backward_hook)
 
-    def get_projected_grads(self) -> Dict[str, Tensor]:
+    def get_projected_grads(self) -> List[Tensor]:
         """
         Get all captured projected gradients
 
         Returns:
-            Dictionary mapping layer names to their projected gradients
+            List of projected gradient tensors, ordered by layer_names
         """
         return self.projected_grads
 
+    def get_projected_grad_by_name(self, name: str) -> Optional[Tensor]:
+        """
+        Get projected gradient for a specific layer by name
+
+        Args:
+            name: Layer name
+
+        Returns:
+            Projected gradient tensor for the specified layer
+        """
+        if name in self.layer_name_to_idx:
+            idx = self.layer_name_to_idx[name]
+            return self.projected_grads[idx]
+        return None
+
     def remove_hooks(self) -> None:
         """Remove all hooks"""
-        for hook in self.forward_hooks.values():
-            hook.remove()
-        for hook in self.backward_hooks.values():
-            hook.remove()
-        self.forward_hooks = {}
-        self.backward_hooks = {}
+        for hook in self.forward_hooks:
+            if hook is not None:
+                hook.remove()
+        for hook in self.backward_hooks:
+            if hook is not None:
+                hook.remove()
+        self.forward_hooks = [None] * len(self.layer_names)
+        self.backward_hooks = [None] * len(self.layer_names)
 
-    def set_projectors(self, projectors: Dict[str, Any]) -> None:
+    def set_projectors(self, projectors: List[Any]) -> None:
         """
         Set projector objects for each layer
 
         Args:
-            projectors: Dictionary mapping layer names to projector objects
+            projectors: List of projector objects, ordered by layer_names
         """
         self.projectors = projectors

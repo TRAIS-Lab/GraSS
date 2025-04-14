@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, Any, Optional
+from typing import TYPE_CHECKING, Dict, Any, Optional, List, Tuple
 if TYPE_CHECKING:
-    from typing import List, Union, Tuple
+    from typing import Union
 
 import torch
 import torch.nn as nn
@@ -15,8 +15,9 @@ class ProjectorContainer:
     Container for projector functions associated with a layer.
     Used to store projectors without modifying the original layer.
     """
-    def __init__(self, name: str):
+    def __init__(self, name: str, index: int):
         self.name = name
+        self.index = index  # Add index field to identify position in array
         self.projector_grad = None
         self.projector_grad_comp = (None, None)
 
@@ -26,8 +27,9 @@ def setup_model_projectors(
     layer_names: List[str],
     projector_kwargs: Dict[str, Any],
     train_dataloader: torch.utils.data.DataLoader,
+    setting: str = None,
     device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
-) -> Dict[str, ProjectorContainer]:
+) -> List[ProjectorContainer]:
     """
     Sets up projectors for each layer in the model.
 
@@ -39,10 +41,10 @@ def setup_model_projectors(
         device: Device to run the model on
 
     Returns:
-        Dictionary mapping layer names to their projector containers
+        List of projector containers, ordered by layer_names
     """
     if not projector_kwargs:
-        return {}
+        return []
 
     # Extract configuration parameters
     proj_seed = projector_kwargs.get('proj_seed', 0)
@@ -55,8 +57,11 @@ def setup_model_projectors(
     if 'proj_factorize' in kwargs_copy:
         kwargs_copy.pop("proj_factorize")
 
-    # Initialize projector containers
-    projectors = {}
+    # Initialize projector containers list
+    projectors = [None] * len(layer_names)
+
+    # Create name to index mapping for faster lookup
+    name_to_index = {name: idx for idx, name in enumerate(layer_names)}
 
     # Run a forward pass to initialize model
     train_batch = next(iter(train_dataloader))
@@ -95,7 +100,8 @@ def setup_model_projectors(
     # Create projectors for each layer
     for module_id, (module_name, module) in enumerate(model.named_modules()):
         if module_name in layer_names:
-            projector = ProjectorContainer(module_name)
+            idx = name_to_index[module_name]
+            projector = ProjectorContainer(module_name, idx)
             base_seed = proj_seed + int(1e4) * module_id
 
             # Handle special case for localized projectors
@@ -104,9 +110,9 @@ def setup_model_projectors(
                 try:
                     dim = kwargs_copy["proj_dim"]
                     if proj_factorize:
-                        mask_path = f"../GPT2_wikitext/Localize/mask_{dim}*{dim}/{module_name}.pt"
+                        mask_path = f"../{setting}/Localize/mask_{dim}*{dim}/{module_name}.pt"
                     else:
-                        mask_path = f"../GPT2_wikitext/Localize/mask_{dim}/{module_name}.pt"
+                        mask_path = f"../{setting}/Localize/mask_{dim}/{module_name}.pt"
                     active_indices = torch.load(mask_path, weights_only=False)
                 except FileNotFoundError:
                     print(f"Mask file not found for {module_name}. Using default active indices.")
@@ -138,10 +144,11 @@ def setup_model_projectors(
                     proj_kwargs,
                     proj_factorize
                 )
-            # Add other layer types as needed
+            else:
+                raise ValueError(f"Unsupported layer type: {type(module)}")
 
-            # Store the projector
-            projectors[module_name] = projector
+            # Store the projector in the list at the correct index
+            projectors[idx] = projector
 
     return projectors
 

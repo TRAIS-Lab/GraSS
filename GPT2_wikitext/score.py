@@ -566,6 +566,7 @@ def main():
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
     from GPT2_wikitext.utils import SubsetSampler, batch_size, setup_projection_kwargs, count_total_tokens, result_filename, lds, replace_conv1d_modules
 
+    setting = "GPT2_wikitext"
     device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
 
@@ -622,6 +623,7 @@ def main():
         layer_names = find_layers(model, args.layer, return_type="name")
 
         attributor = IFAttributor(
+            setting=setting,
             model=model,
             layer_names=layer_names,
             hessian=hessian,
@@ -793,7 +795,7 @@ def main():
         throughput_stats["attribute"] = {
             "train_test_pairs": train_test_pairs,
             "duration_seconds": attribute_duration,
-            "throughput_per_second": attribute_throughput
+            "throughput_pair_per_second": attribute_throughput
         }
 
     training_setting = args.output_dir.split("/")[-1]

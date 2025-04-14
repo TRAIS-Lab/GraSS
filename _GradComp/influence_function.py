@@ -22,6 +22,7 @@ class IFAttributor:
 
     def __init__(
         self,
+        setting: str,
         model: nn.Module,
         layer_names: Union[str, List[str]],
         hessian: str = "raw",
@@ -35,6 +36,7 @@ class IFAttributor:
         Optimized Influence Function Attributor.
 
         Args:
+            setting (str): The setting of the experiment
             model (nn.Module): PyTorch model.
             layer_names (List[str]): Names of layers to attribute.
             hessian (str): Type of Hessian approximation ("none", "raw", "kfac", "ekfac"). Defaults to "raw".
@@ -44,6 +46,7 @@ class IFAttributor:
             cpu_offload (bool): Whether to offload the model to CPU. Defaults to False.
             projector_kwargs (Dict): Keyword arguments for projector. Defaults to None.
         """
+        self.setting = setting
         self.model = model
         self.model.to(device)
         self.model.eval()
@@ -54,7 +57,7 @@ class IFAttributor:
         else:
             self.layer_names = layer_names
 
-        self.hessian = hessian  # Currently only raw is supported
+        self.hessian = hessian
         self.damping = damping
         self.profile = profile
         self.device = device
@@ -73,7 +76,6 @@ class IFAttributor:
                 'forward': 0.0,
                 'backward': 0.0,
                 'precondition': 0.0,
-                'data_transfer': 0.0,
             }
 
     def _setup_projectors(self, train_dataloader: torch.utils.data.DataLoader) -> None:
@@ -84,7 +86,7 @@ class IFAttributor:
             train_dataloader: DataLoader for training data
         """
         if not self.projector_kwargs:
-            self.projectors = {}
+            self.projectors = []
             return
 
         self.projectors = setup_model_projectors(
@@ -92,6 +94,7 @@ class IFAttributor:
             self.layer_names,
             self.projector_kwargs,
             train_dataloader,
+            self.setting,
             self.device
         )
 
@@ -112,8 +115,11 @@ class IFAttributor:
         if self.projectors is None:
             self._setup_projectors(train_dataloader)
 
+        # Create name-to-index mapping for layer access
+        layer_name_to_idx = {name: idx for idx, name in enumerate(self.layer_names)}
+
         # Initialize dynamic lists to store gradients for each layer
-        per_layer_gradients = {name: [] for name in self.layer_names}
+        per_layer_gradients = [[] for _ in self.layer_names]
 
         # Create hook manager
         self.hook_manager = HookManager(
@@ -167,9 +173,10 @@ class IFAttributor:
                 projected_grads = self.hook_manager.get_projected_grads()
 
                 # Collect gradients on device first (no immediate CPU transfer)
-                for layer_name, grad in projected_grads.items():
-                    # Keep gradients on GPU and append to the list
-                    per_layer_gradients[layer_name].append(grad.detach())
+                for idx, grad in enumerate(projected_grads):
+                    if grad is not None:
+                        # Keep gradients on GPU and append to the list
+                        per_layer_gradients[idx].append(grad.detach())
 
         # Remove hooks after collecting all gradients
         self.hook_manager.remove_hooks()
@@ -184,27 +191,19 @@ class IFAttributor:
             start_time = time.time()
 
         # Calculate Hessian and prepare gradients for each layer
-        for layer_id, layer_name in enumerate(self.layer_names):
-            if layer_name in per_layer_gradients and per_layer_gradients[layer_name]:
+        for layer_idx in range(len(self.layer_names)):
+            if per_layer_gradients[layer_idx]:
                 # Concatenate all batches for this layer on GPU
-                grads = torch.cat(per_layer_gradients[layer_name], dim=0)
+                grads = torch.cat(per_layer_gradients[layer_idx], dim=0)
 
                 # Compute Hessian on GPU (more efficient)
                 hessian = torch.matmul(grads.t(), grads) / len(train_dataloader.sampler)
 
                 # Store results based on offload preference
                 if self.cpu_offload:
-                    if self.profile:
-                        torch.cuda.synchronize(self.device)
-                        transfer_start = time.time()
-
                     # Move data to CPU only once (not in the batch loop)
                     train_grads.append(grads.cpu())
                     hessians.append(hessian.cpu())
-
-                    if self.profile:
-                        torch.cuda.synchronize(self.device)
-                        self.profiling_stats['data_transfer'] += time.time() - transfer_start
                 else:
                     train_grads.append(grads)
                     hessians.append(hessian)
@@ -215,6 +214,8 @@ class IFAttributor:
         if self.profile:
             torch.cuda.synchronize(self.device)
             self.profiling_stats['precondition'] += time.time() - start_time
+
+        print(f"Computed gradient covariance for {len(self.layer_names)} modules")
 
         # Check if we have any valid gradients
         valid_grads = [grad is not None for grad in train_grads]
@@ -231,6 +232,8 @@ class IFAttributor:
         if self.hessian == "none":
             return train_grads
         elif self.hessian == "raw":
+            print("Computing gradient covariance inverse...")
+
             ifvp_train = []
 
             # Process each layer
@@ -241,16 +244,8 @@ class IFAttributor:
 
                 # Process Hessian inverse and IFVP calculation
                 if self.cpu_offload:
-                    if self.profile:
-                        torch.cuda.synchronize(self.device)
-                        transfer_start = time.time()
-
                     # Move Hessian to GPU for inverse calculation
                     hessian_gpu = hessian.to(device=self.device)
-
-                    if self.profile:
-                        torch.cuda.synchronize(self.device)
-                        self.profiling_stats['data_transfer'] += time.time() - transfer_start
 
                     # Calculate inverse on GPU (more efficient)
                     hessian_inv = stable_inverse(hessian_gpu, damping=self.damping)
@@ -260,30 +255,14 @@ class IFAttributor:
                     results = []
 
                     for i in range(0, grads.shape[0], batch_size):
-                        if self.profile:
-                            torch.cuda.synchronize(self.device)
-                            transfer_start = time.time()
-
                         end_idx = min(i + batch_size, grads.shape[0])
                         grads_batch = grads[i:end_idx].to(device=self.device)
-
-                        if self.profile:
-                            torch.cuda.synchronize(self.device)
-                            self.profiling_stats['data_transfer'] += time.time() - transfer_start
 
                         # Calculate IFVP for this batch
                         result_batch = torch.matmul(hessian_inv, grads_batch.t()).t()
 
-                        if self.profile:
-                            torch.cuda.synchronize(self.device)
-                            transfer_start = time.time()
-
                         # Move result back to CPU
                         results.append(result_batch.cpu())
-
-                        if self.profile:
-                            torch.cuda.synchronize(self.device)
-                            self.profiling_stats['data_transfer'] += time.time() - transfer_start
 
                     # Combine results from all batches
                     ifvp_train.append(torch.cat(results, dim=0) if results else None)
@@ -291,6 +270,8 @@ class IFAttributor:
                     # Calculate IFVP directly on GPU
                     hessian_inv = stable_inverse(hessian, damping=self.damping)
                     ifvp_train.append(torch.matmul(hessian_inv, grads.t()).t())
+
+            print(f"Computed gradient covariance inverse for {len(self.layer_names)} modules")
 
             if self.profile:
                 torch.cuda.synchronize(self.device)
@@ -310,6 +291,7 @@ class IFAttributor:
         Args:
             full_train_dataloader: DataLoader for the full training data
         """
+        print("Extracting information from training data...")
         self.full_train_dataloader = full_train_dataloader
         self.cached_ifvp_train = self._calculate_ifvp(full_train_dataloader)
 
@@ -368,10 +350,11 @@ class IFAttributor:
             self.hook_manager.set_projectors(self.projectors)
 
         # Collect test gradients first (similar to training data approach)
-        per_layer_test_gradients = {name: [] for name in self.layer_names}
+        per_layer_test_gradients = [[] for _ in self.layer_names]
         test_batch_indices = []
 
         # Process each test batch
+        print("Collecting projected gradients from test data...")
         for test_batch_idx, test_batch in enumerate(tqdm(test_dataloader, desc="Collecting test gradients")):
             # Zero gradients
             self.model.zero_grad()
@@ -419,8 +402,9 @@ class IFAttributor:
                 test_batch_indices.append((col_st, col_ed))
 
                 # Collect test gradients
-                for layer_name, grad in projected_grads.items():
-                    per_layer_test_gradients[layer_name].append(grad.detach())
+                for idx, grad in enumerate(projected_grads):
+                    if grad is not None:
+                        per_layer_test_gradients[idx].append(grad.detach())
 
             # Zero gradients for next iteration
             self.model.zero_grad()
@@ -433,11 +417,10 @@ class IFAttributor:
 
         for batch_start in range(0, len(test_batch_indices), batch_size):
             batch_end = min(batch_start + batch_size, len(test_batch_indices))
-            batch_indices = test_batch_indices[batch_start:batch_end]
 
             # Calculate influence for each layer
-            for layer_id, layer_name in enumerate(self.layer_names):
-                if layer_name not in per_layer_test_gradients or not per_layer_test_gradients[layer_name]:
+            for layer_id in range(len(self.layer_names)):
+                if not per_layer_test_gradients[layer_id]:
                     continue
 
                 if ifvp_train[layer_id] is None:
@@ -445,15 +428,11 @@ class IFAttributor:
 
                 # Process test gradients for this batch
                 for batch_idx in range(batch_start, batch_end):
-                    test_grad = per_layer_test_gradients[layer_name][batch_idx]
+                    test_grad = per_layer_test_gradients[layer_id][batch_idx]
                     col_st, col_ed = test_batch_indices[batch_idx]
 
                     # Compute influence scores
                     if self.cpu_offload:
-                        if self.profile:
-                            torch.cuda.synchronize(self.device)
-                            transfer_start = time.time()
-
                         # Move data to GPU in batches
                         ifvp_batch_size = min(1024, ifvp_train[layer_id].shape[0])
 
@@ -470,10 +449,6 @@ class IFAttributor:
                             IF_score_segment = IF_score[i:end_idx, col_st:col_ed].to(device=self.device)
                             IF_score_segment += result
                             IF_score[i:end_idx, col_st:col_ed] = IF_score_segment.cpu()
-
-                        if self.profile:
-                            torch.cuda.synchronize(self.device)
-                            self.profiling_stats['data_transfer'] += time.time() - transfer_start
                     else:
                         # Compute on GPU directly
                         result = torch.matmul(ifvp_train[layer_id], test_grad.t())
