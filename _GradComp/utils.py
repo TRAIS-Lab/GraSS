@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from typing import Any, Dict, Optional, Tuple
 
 import torch
+import torch.nn as nn
 from torch import Tensor
 
 
@@ -199,3 +200,44 @@ def stable_inverse(matrix: torch.Tensor, damping: float = None) -> torch.Tensor:
         inverse = torch.inverse(damped_matrix)
 
     return inverse
+
+def find_layers(model, layer_type="Linear", return_type="instance"):
+    GC_layers = []
+    return_module_name = not (return_type == "instance")
+
+    if return_module_name:
+        for module_name, module in model.named_modules():
+            if isinstance(module, nn.Linear) or isinstance(module, nn.LayerNorm) or isinstance(module, nn.Embedding):
+                GC_layers.append((module_name, module))
+    else:
+        for module in model.modules():
+            if isinstance(module, nn.Linear) or isinstance(module, nn.LayerNorm) or isinstance(module, nn.Embedding):
+                GC_layers.append(module)
+
+    if return_module_name:
+        if layer_type == "Linear":
+            GC_layers = [(name, layer) for name, layer in GC_layers if isinstance(layer, nn.Linear)]
+        elif layer_type == "Linear_LayerNorm":
+            GC_layers = [(name, layer) for name, layer in GC_layers if isinstance(layer, (nn.Linear, nn.LayerNorm))]
+        elif layer_type == "LayerNorm":
+            GC_layers = [(name, layer) for name, layer in GC_layers if isinstance(layer, nn.LayerNorm)]
+        else:
+            raise ValueError("Invalid setting now. Choose from 'Linear', 'LayerNorm', and 'Linear_LayerNorm'.")
+    else:
+        if layer_type == "Linear":
+            GC_layers = [layer for layer in GC_layers if isinstance(layer, nn.Linear)]
+        elif layer_type == "Linear_LayerNorm":
+            GC_layers = [layer for layer in GC_layers if isinstance(layer, nn.Linear) or isinstance(layer, nn.LayerNorm)]
+        elif layer_type == "LayerNorm":
+            GC_layers = [layer for layer in GC_layers if isinstance(layer, nn.LayerNorm)]
+        else:
+            raise ValueError("Invalid setting now. Choose from 'Linear', 'LayerNorm', and 'Linear_LayerNorm'.")
+
+    if return_type == "instance":
+        return GC_layers
+    elif return_type == "name":
+        return [name for name, layer in GC_layers]
+    elif return_type == "name_instance":
+        return [(name, layer) for name, layer in GC_layers]
+    else:
+        raise ValueError("Invalid return_type. Choose from 'instance', 'name', and 'name_instance'.")

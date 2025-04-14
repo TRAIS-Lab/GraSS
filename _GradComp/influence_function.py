@@ -12,10 +12,12 @@ import time
 
 from .hook import HookManager
 from .utils import stable_inverse
+from .projector import setup_model_projectors
 
 class IFAttributor:
     """
     Optimized influence function calculator using hooks for efficient gradient projection.
+    Works with standard PyTorch layers.
     """
 
     def __init__(
@@ -62,6 +64,7 @@ class IFAttributor:
         self.full_train_dataloader = None
         self.hook_manager = None
         self.cached_ifvp_train = None
+        self.projectors = None
 
         # Initialize profiling stats
         if self.profile:
@@ -72,6 +75,25 @@ class IFAttributor:
                 'precondition': 0.0,
                 'data_transfer': 0.0,
             }
+
+    def _setup_projectors(self, train_dataloader: torch.utils.data.DataLoader) -> None:
+        """
+        Set up projectors for the model layers
+
+        Args:
+            train_dataloader: DataLoader for training data
+        """
+        if not self.projector_kwargs:
+            self.projectors = {}
+            return
+
+        self.projectors = setup_model_projectors(
+            self.model,
+            self.layer_names,
+            self.projector_kwargs,
+            train_dataloader,
+            self.device
+        )
 
     def _calculate_ifvp(
         self,
@@ -86,9 +108,9 @@ class IFAttributor:
         Returns:
             List of tensors containing the FIM factors for each layer
         """
-        # Set up the projector if the model has a set_projectors method
-        if hasattr(self.model, 'set_projectors'):
-            self.model.set_projectors(self.layer_names, self.projector_kwargs, train_dataloader)
+        # Set up the projectors
+        if self.projectors is None:
+            self._setup_projectors(train_dataloader)
 
         # Initialize dynamic lists to store gradients for each layer
         per_layer_gradients = {name: [] for name in self.layer_names}
@@ -98,6 +120,10 @@ class IFAttributor:
             self.model,
             self.layer_names,
         )
+
+        # Set projectors in the hook manager
+        if self.projectors:
+            self.hook_manager.set_projectors(self.projectors)
 
         # Iterate through the training data to compute gradients
         for train_batch_idx, train_batch in enumerate(tqdm(train_dataloader, desc="Processing training data")):
@@ -336,6 +362,10 @@ class IFAttributor:
             self.model,
             self.layer_names,
         )
+
+        # Set projectors in the hook manager if available
+        if self.projectors:
+            self.hook_manager.set_projectors(self.projectors)
 
         # Collect test gradients first (similar to training data approach)
         per_layer_test_gradients = {name: [] for name in self.layer_names}

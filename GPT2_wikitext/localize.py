@@ -424,7 +424,7 @@ def main():
         )
 
     if args.model_name_or_path:
-        model = GCGPT2LMHeadModel.from_pretrained(
+        model = AutoModelForCausalLM.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
             config=config,
@@ -433,7 +433,7 @@ def main():
         )
     else:
         logger.info("Training new model from scratch")
-        model = GCGPT2LMHeadModel.from_config(config, trust_remote_code=args.trust_remote_code)
+        model = AutoModelForCausalLM.from_config(config, trust_remote_code=args.trust_remote_code)
 
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
@@ -508,7 +508,9 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from GPT2_wikitext.utils import SubsetSampler, batch_size
+    from GPT2_wikitext.utils import SubsetSampler, batch_size, replace_conv1d_modules
+    from _GradComp.utils import find_layers
+    from _Localizer.localizer import GradientComponentMaskOptimizer
 
     device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
@@ -560,17 +562,15 @@ def main():
 
     model_id = 0
     checkpoint = f"{args.output_dir}/{model_id}"
-
-    check_min_version("4.46.0")
-    from _GradComp.layers.utils import find_GClayers
-
-    model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
-    model.set_projectors(args.layer, projector_kwargs, train_dataloader)
+    model = AutoModelForCausalLM.from_pretrained(checkpoint)
+    model = replace_conv1d_modules(model).cuda(device)
     model.eval()
 
-    layers = find_GClayers(model, args.layer, return_module_name=True)[:-1]
+    check_min_version("4.46.0")
 
-    from _Localizer.localizer import GradientComponentMaskOptimizer
+    model.set_projectors(args.layer, projector_kwargs, train_dataloader)
+
+    layers = find_layers(model, args.layer, return_type="name_instance")[:-1]
 
     # Create output directory for saving masks
     output_dir = f"./Localize/mask_{args.localize}*{args.localize}"

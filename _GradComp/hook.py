@@ -1,21 +1,24 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict
-
+from typing import TYPE_CHECKING, Dict, Callable, Any, Optional, Tuple
 if TYPE_CHECKING:
-    from typing import List
+    from typing import List, Union
 
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
+from torch import Tensor
 import functools
+
 
 class HookManager:
     """
     Manages hooks for efficient gradient component capturing and projection
+    without requiring custom layer implementations.
     """
     def __init__(
-            self, model: nn.Module,
+            self,
+            model: nn.Module,
             layer_names: List[str],
         ) -> None:
         """
@@ -28,47 +31,225 @@ class HookManager:
         self.model = model
         self.layer_names = layer_names
 
-        # Dictionaries to store hooks and projected gradients
+        # Dictionaries to store hooks and layer state
         self.forward_hooks = {}
         self.backward_hooks = {}
         self.projected_grads = {}
         self.inputs = {}
         self.pre_activations = {}
+        self.normalized = {}  # For LayerNorm
+
+        # Store projectors for each layer
+        self.projectors = {}
 
         # Register hooks
         self._register_hooks()
 
-    def _forward_hook_fn(self, name, mod, inp, out):
-        """Forward hook function implementation"""
-        # Store inputs and pre-activations
-        self.inputs[name] = inp[0].detach() if isinstance(inp, tuple) and len(inp) > 0 else inp.detach()
+    def _forward_hook_fn(self, name: str, mod: nn.Module, inp: Any, out: Any) -> None:
+        """
+        Forward hook function that captures inputs and pre-activations
 
-        # For GCLinear and GCLayerNorm, store pre-activation directly
-        if hasattr(mod, 'pre_activation'):
-            mod.pre_activation = out
-            self.pre_activations[name] = out.detach()
+        Args:
+            name: Layer name
+            mod: Module instance
+            inp: Input tensors
+            out: Output tensors
+        """
+        # Store input
+        if isinstance(inp, tuple) and len(inp) > 0:
+            self.inputs[name] = inp[0].detach()
         else:
-            self.pre_activations[name] = out.detach()
+            self.inputs[name] = inp.detach()
 
-    def _backward_hook_fn(self, name, mod, grad_input, grad_output):
-        """Backward hook function implementation"""
-        # Get pre-activation gradient
+        # Store pre-activation (output)
+        self.pre_activations[name] = out.detach()
+
+        # For LayerNorm, also capture the normalized tensor
+        if isinstance(mod, nn.LayerNorm):
+            x = inp[0] if isinstance(inp, tuple) else inp
+            mean = x.mean(dim=-1, keepdim=True)
+            var = x.var(dim=-1, keepdim=True, unbiased=False)
+            normalized = (x - mean) / torch.sqrt(var + mod.eps)
+            self.normalized[name] = normalized.detach()
+
+    def _backward_hook_fn(self, name: str, mod: nn.Module, grad_input: Any, grad_output: Any) -> None:
+        """
+        Backward hook function that computes projected gradients
+
+        Args:
+            name: Layer name
+            mod: Module instance
+            grad_input: Gradient w.r.t inputs
+            grad_output: Gradient w.r.t outputs
+        """
+        # Get the gradient of the pre-activation
         grad_pre_activation = grad_output[0]
 
-        # Project the gradient immediately
-        if hasattr(mod, 'grad_from_grad_comp'):
-            # Calculate gradient components
-            with torch.no_grad():
-                # For GCLinear and GCLayerNorm, use their grad_from_grad_comp method
-                grad = mod.grad_from_grad_comp(grad_pre_activation, per_sample=True)
+        # Calculate the projected gradient based on layer type
+        with torch.no_grad():
+            if isinstance(mod, nn.Linear):
+                grad = self._linear_grad_from_grad_comp(
+                    mod, name, grad_pre_activation, per_sample=True
+                )
+            elif isinstance(mod, nn.LayerNorm):
+                grad = self._layernorm_grad_from_grad_comp(
+                    mod, name, grad_pre_activation, per_sample=True
+                )
+            elif isinstance(mod, nn.Embedding):
+                # Embeddings would need their own implementation
+                grad = None
+            else:
+                # Fallback for other layer types
+                grad = None
 
+            if grad is not None:
                 # Store the projected gradient
                 self.projected_grads[name] = grad.detach()
+
+    def _linear_grad_from_grad_comp(
+        self,
+        layer: nn.Linear,
+        name: str,
+        grad_pre_activation: Tensor,
+        per_sample: bool = True
+    ) -> Tensor:
+        """
+        Compute the gradient for Linear layers
+
+        Args:
+            layer: Linear layer
+            name: Layer name
+            grad_pre_activation: Gradient of the pre-activation
+            per_sample: Whether to compute per-sample gradients
+
+        Returns:
+            Projected gradient tensor
+        """
+        input_features = self.inputs[name]
+        is_3d = input_features.dim() == 3
+
+        if is_3d:
+            batch_size, seq_length, hidden_size = input_features.shape
+            # Reshape 3D tensors to 2D for consistent processing
+            input_features = input_features.reshape(-1, hidden_size)
+            grad_pre_activation = grad_pre_activation.reshape(-1, layer.out_features)
+        else:
+            batch_size = input_features.shape[0]
+
+        # Scale the gradient if we're computing per-sample gradients
+        if per_sample:
+            grad_pre_activation = grad_pre_activation * batch_size
+
+        # Handle bias term by augmenting input with ones
+        if layer.bias is not None:
+            ones = torch.ones(
+                input_features.size(0), 1,
+                device=input_features.device,
+                dtype=input_features.dtype
+            )
+            input_features = torch.cat([input_features, ones], dim=1)
+
+        if is_3d:
+            # Reshape back to 3D
+            input_features = input_features.reshape(batch_size, seq_length, -1)
+            grad_pre_activation = grad_pre_activation.reshape(batch_size, seq_length, -1)
+
+        # Apply projectors if they exist
+        projector = self.projectors.get(name, None)
+        if projector and hasattr(projector, 'projector_grad_comp') and projector.projector_grad_comp != (None, None):
+            projector_grad_comp_1, projector_grad_comp_2 = projector.projector_grad_comp
+
+            # Apply projection to gradient components
+            grad_pre_activation_flatten = grad_pre_activation.view(-1, grad_pre_activation.shape[-1])
+            input_features_flatten = input_features.view(-1, input_features.shape[-1])
+
+            if is_3d:
+                grad_pre_activation = projector_grad_comp_1(grad_pre_activation_flatten).view(
+                    grad_pre_activation.shape[0], grad_pre_activation.shape[1], -1
+                )
+                input_features = projector_grad_comp_2(input_features_flatten).view(
+                    input_features.shape[0], input_features.shape[1], -1
+                )
+            else:
+                grad_pre_activation = projector_grad_comp_1(grad_pre_activation_flatten)
+                input_features = projector_grad_comp_2(input_features_flatten)
+
+        # Compute the outer product to get the gradient
+        if is_3d:
+            grad = torch.einsum('ijk,ijl->ikl', grad_pre_activation, input_features).reshape(batch_size, -1)
+        else:
+            grad = torch.einsum('bi,bj->bij', grad_pre_activation, input_features).reshape(batch_size, -1)
+
+        # Apply final projector if available
+        if projector and hasattr(projector, 'projector_grad') and projector.projector_grad is not None:
+            grad = projector.projector_grad(grad)
+
+        return grad
+
+    def _layernorm_grad_from_grad_comp(
+        self,
+        layer: nn.LayerNorm,
+        name: str,
+        grad_pre_activation: Tensor,
+        per_sample: bool = True
+    ) -> Tensor:
+        """
+        Compute the gradient for LayerNorm layers
+
+        Args:
+            layer: LayerNorm layer
+            name: Layer name
+            grad_pre_activation: Gradient of the pre-activation
+            per_sample: Whether to compute per-sample gradients
+
+        Returns:
+            Projected gradient tensor
+        """
+        if not layer.elementwise_affine:
+            return None
+
+        normalized = self.normalized.get(name, None)
+        if normalized is None:
+            return None
+
+        is_3d = normalized.dim() == 3
+
+        if per_sample:
+            grad_pre_activation = grad_pre_activation * normalized.shape[0]
+            if is_3d:
+                grad_weight = torch.einsum("ijk,ijk->ik", grad_pre_activation, normalized)
+                grad_bias = torch.sum(grad_pre_activation, dim=1)
+            else:
+                grad_weight = grad_pre_activation * normalized
+                grad_bias = grad_pre_activation
+        else:
+            if is_3d:
+                grad_weight = torch.sum(grad_pre_activation * normalized, dim=(0, 1))
+                grad_bias = torch.sum(grad_pre_activation, dim=(0, 1))
+            else:
+                grad_weight = torch.sum(grad_pre_activation * normalized, dim=0)
+                grad_bias = torch.sum(grad_pre_activation, dim=0)
+
+        # Apply projectors if they exist
+        projector = self.projectors.get(name, None)
+        if projector and hasattr(projector, 'projector_grad_comp') and projector.projector_grad_comp != (None, None):
+            projector_grad_comp_1, projector_grad_comp_2 = projector.projector_grad_comp
+            grad_weight = projector_grad_comp_1(grad_weight)
+            grad_bias = projector_grad_comp_2(grad_bias)
+
+        # Concatenate weight and bias gradients
+        grad = torch.cat((grad_weight, grad_bias), dim=1)
+
+        # Apply final projector if available
+        if projector and hasattr(projector, 'projector_grad') and projector.projector_grad is not None:
+            grad = projector.projector_grad(grad)
+
+        return grad
 
     def _register_hooks(self):
         """Register forward and backward hooks to target layers"""
         for name, module in self.model.named_modules():
-            if name in self.layer_names and hasattr(module, 'grad_from_grad_comp'):
+            if name in self.layer_names:
                 # Use functools.partial to correctly bind parameters to avoid late binding issues
                 forward_hook = functools.partial(self._forward_hook_fn, name)
                 backward_hook = functools.partial(self._backward_hook_fn, name)
@@ -77,11 +258,16 @@ class HookManager:
                 self.forward_hooks[name] = module.register_forward_hook(forward_hook)
                 self.backward_hooks[name] = module.register_full_backward_hook(backward_hook)
 
-    def get_projected_grads(self):
-        """Get all projected gradients"""
+    def get_projected_grads(self) -> Dict[str, Tensor]:
+        """
+        Get all captured projected gradients
+
+        Returns:
+            Dictionary mapping layer names to their projected gradients
+        """
         return self.projected_grads
 
-    def remove_hooks(self):
+    def remove_hooks(self) -> None:
         """Remove all hooks"""
         for hook in self.forward_hooks.values():
             hook.remove()
@@ -89,3 +275,12 @@ class HookManager:
             hook.remove()
         self.forward_hooks = {}
         self.backward_hooks = {}
+
+    def set_projectors(self, projectors: Dict[str, Any]) -> None:
+        """
+        Set projector objects for each layer
+
+        Args:
+            projectors: Dictionary mapping layer names to projector objects
+        """
+        self.projectors = projectors

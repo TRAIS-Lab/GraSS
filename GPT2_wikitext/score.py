@@ -60,7 +60,6 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from GradComp.GPT2LMHeadModel import GCGPT2LMHeadModel
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
@@ -481,7 +480,7 @@ def main():
         )
 
     if args.model_name_or_path:
-        model = GCGPT2LMHeadModel.from_pretrained(
+        model = AutoModelForCausalLM.from_pretrained(
             args.model_name_or_path,
             from_tf=bool(".ckpt" in args.model_name_or_path),
             config=config,
@@ -490,7 +489,7 @@ def main():
         )
     else:
         logger.info("Training new model from scratch")
-        model = GCGPT2LMHeadModel.from_config(config, trust_remote_code=args.trust_remote_code)
+        model = AutoModelForCausalLM.from_config(config, trust_remote_code=args.trust_remote_code)
 
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
@@ -565,7 +564,7 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from GPT2_wikitext.utils import SubsetSampler, batch_size, setup_projection_kwargs, count_total_tokens, result_filename, lds
+    from GPT2_wikitext.utils import SubsetSampler, batch_size, setup_projection_kwargs, count_total_tokens, result_filename, lds, replace_conv1d_modules
 
     device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
@@ -587,7 +586,7 @@ def main():
         test_dataset, collate_fn=default_data_collator, batch_size=test_batch_size, shuffle=False
     )
     train_tokens = count_total_tokens(train_dataloader)
-    test_samples = len(test_dataset)
+    train_test_pairs = len(train_dataset) * len(test_dataset)
 
     throughput_stats = {}
 
@@ -605,11 +604,14 @@ def main():
 
     model_id = 0
     checkpoint = f"{args.output_dir}/{model_id}"
+    model = AutoModelForCausalLM.from_pretrained(checkpoint)
+    model = replace_conv1d_modules(model)
 
     profile = None
     if args.baseline == "GC": #TODO: merge GC with IF-RAW
         check_min_version("4.46.0")
-        from _GradComp.layers.utils import find_GClayers
+        from _GradComp.utils import find_layers
+        from _GradComp.influence_function import IFAttributor
 
         # get which Hessian to use
         tda, hessian = args.tda.split("-")
@@ -617,9 +619,8 @@ def main():
         assert tda == "IF", "GradComp only supports Influence Function now."
         assert hessian in ["none", "raw"], "Invalid Hessian type."
 
-        layer_names = find_GClayers(model, args.layer, return_type="name")
+        layer_names = find_layers(model, args.layer, return_type="name")
 
-        from _GradComp.influence_function import IFAttributor
         attributor = IFAttributor(
             model=model,
             layer_names=layer_names,
@@ -654,11 +655,11 @@ def main():
             torch.cuda.synchronize(device)
             attribute_end_time = time.time()
             attribute_duration = attribute_end_time - attribute_start_time
-            attribute_throughput = test_samples / attribute_duration
+            attribute_throughput = train_test_pairs / attribute_duration
             throughput_stats["attribute"] = {
-                "test_samples": test_samples,
+                "train_test_pairs": train_test_pairs,
                 "duration_seconds": attribute_duration,
-                "throughput_test_sample_per_second": attribute_throughput
+                "throughput_per_second": attribute_throughput
             }
             print(f"Attribute throughput: {attribute_throughput:.2f} test samples/sec")
         else:
@@ -667,7 +668,6 @@ def main():
     elif args.baseline == "LoGra":
         check_min_version("4.46.0")
         from _LoGra.influence_function import IFAttributor
-        from LogIX.utils import LoGra_GPT2
 
         # get which Hessian to use
         tda, hessian = args.tda.split("-")
@@ -676,8 +676,6 @@ def main():
         assert hessian in ["none", "raw", "kfac", "ekfac"], "Invalid Hessian type."
         assert args.layer == "Linear", "LoGra only supports Linear setting now."
         assert args.projection is not None, "LoGra requires projection method."
-
-        model = LoGra_GPT2(checkpoint, config, resume=True)
 
         attributor = IFAttributor(
             model=model,
@@ -712,11 +710,11 @@ def main():
             torch.cuda.synchronize(device)
             attribute_end_time = time.time()
             attribute_duration = attribute_end_time - attribute_start_time
-            attribute_throughput = test_samples / attribute_duration
+            attribute_throughput = train_test_pairs / attribute_duration
             throughput_stats["attribute"] = {
-                "test_samples": test_samples,
+                "train_test_pairs": train_test_pairs,
                 "duration_seconds": attribute_duration,
-                "throughput_test_sample_per_second": attribute_throughput
+                "throughput_per_second": attribute_throughput
             }
             print(f"Attribute throughput: {attribute_throughput:.2f} test samples/sec")
         else:
@@ -726,7 +724,6 @@ def main():
     elif args.baseline == "LogIX":
         #check_min_version("4.46.0") # LogIX is built on top of 4.40.0, ignore the checking
         from _LogIX.huggingface import LogIXArguments, patch_trainer
-        from LogIX.utils import LoGra_GPT2
 
         # get which Hessian to use
         tda, hessian = args.tda.split("-")
@@ -739,12 +736,12 @@ def main():
         LogIXTrainer = patch_trainer(transformers.Trainer)
 
         # 1. Computing EK-FAC factors for training data
-        model = LoGra_GPT2(checkpoint, config, resume=True).cuda(device)
+        model = model.to(device)
         model.eval()
 
         logix_args_train = LogIXArguments(
-            project=f"./LogIX/project/{args.projection}",
-            config=f"./LogIX/project/{args.projection}.yaml",
+            project=f"./LogIX/{args.projection}",
+            config=f"./LogIX/{args.projection}.yaml",
             lora=True,
             hessian=hessian,
             save="grad",
@@ -782,11 +779,11 @@ def main():
         print(f"Cache throughput: {cache_throughput:.2f} tokens/sec")
 
         # 2. Computing influence scores for test data
-        model = LoGra_GPT2(checkpoint, config, resume=True).cuda(device) # reinitialize the model
+        model = AutoModelForCausalLM.from_pretrained(checkpoint).cuda(device) # reinitialize the model
         model.eval()
         logix_args_test = LogIXArguments(
-            project=f"./LogIX/project/{args.projection}",
-            config=f"./LogIX/project/{args.projection}.yaml",
+            project=f"./LogIX/{args.projection}",
+            config=f"./LogIX/{args.projection}.yaml",
             lora=True,
             hessian=hessian,
             save="grad",
@@ -818,105 +815,18 @@ def main():
         torch.cuda.synchronize(device)
         attribute_end_time = time.time()
         attribute_duration = attribute_end_time - attribute_start_time
-        attribute_throughput = test_samples / attribute_duration
+        attribute_throughput = train_test_pairs / attribute_duration
         throughput_stats["attribute"] = {
-            "test_samples": test_samples,
+            "train_test_pairs": train_test_pairs,
             "duration_seconds": attribute_duration,
-            "throughput_test_sample_per_second": attribute_throughput
+            "throughput_per_second": attribute_throughput
         }
         print(f"Attribute throughput: {attribute_throughput:.2f} test samples/sec")
 
         score = result["influence"].T
 
-    elif args.baseline == "dattri":
-        from _dattri.task import AttributionTask
-        if args.tda == "GD": #TODO: fix
-            from _dattri.algorithm.tracin import TracInAttributor
-
-            # need to ensure model is in eval before defining f
-            model.eval()
-            def f(params, batch):
-                outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
-                                                    kwargs={"attention_mask": batch["attention_mask"].cuda(device),
-                                                            "labels": batch["labels"].cuda(device)})
-                logp = -outputs.loss
-                return logp - torch.log(1 - torch.exp(logp))
-
-            def checkpoints_load_func(model, checkpoint):
-                model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
-                model.eval()
-                return model
-
-            task = AttributionTask(loss_func=f, model=model,
-                                checkpoints=checkpoint,
-                                checkpoints_load_func=checkpoints_load_func)
-
-            from collections import defaultdict
-
-            # Group parameters by their base layer name
-            layer_groups = defaultdict(list)
-            for name, _ in model.named_parameters():
-                base_name = ".".join(name.split(".")[:-1])  # Remove 'weight' or 'bias' suffix
-                layer_groups[base_name].append(name)
-
-            # Iterate over combined layer names
-            for base_name, param_names in layer_groups.items():
-                print(f"Grouping: {param_names}")
-                attributor = TracInAttributor(
-                    task=task,
-                    weight_list=torch.ones(1) * 1e-3,
-                    normalized_grad=False,  # For Grad-Dot, True if Grad-Cos
-                    projector_kwargs=projector_kwargs,
-                    device=device,
-                    layer_name=param_names,  # Pass the grouped names
-                )
-
-                with torch.no_grad():
-                    score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader, reverse=args.reverse)
-        elif args.tda == "TRAK": #TODO: fix
-            from _dattri.algorithm.trak import TRAKAttributor
-
-            # need to ensure model is in eval before defining f
-            model.eval()
-            def f(params, batch):
-                outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
-                                                    kwargs={"attention_mask": batch["attention_mask"].cuda(device),
-                                                            "labels": batch["labels"].cuda(device)})
-                logp = -outputs.loss
-                return logp - torch.log(1 - torch.exp(logp))
-
-            def m(params, batch):
-                outputs = torch.func.functional_call(model, params, batch["input_ids"].cuda(device),
-                                                    kwargs={"attention_mask": batch["attention_mask"].cuda(device),
-                                                            "labels": batch["labels"].cuda(device)})
-                p = torch.exp(-outputs.loss)
-                return p
-
-            checkpoints = [f"{args.output_dir}/{i}"
-                        for i in range(5)]
-
-            def checkpoints_load_func(model, checkpoint):
-                model = GCGPT2LMHeadModel.from_pretrained(checkpoint).cuda(device)
-                model.eval()
-                return model
-
-            task = AttributionTask(loss_func=f, model=model,
-                            checkpoints=checkpoints,
-                            checkpoints_load_func=checkpoints_load_func)
-
-            attributor = TRAKAttributor(
-                task=task,
-                correct_probability_func=m,
-                device=device,
-                projector_kwargs=projector_kwargs,
-            )
-
-            attributor.cache(train_dataloader)
-            with torch.no_grad():
-                score = attributor.attribute(test_dataloader)
-
     else:
-        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'LoGra', and 'dattri'.")
+        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'LoGra'.")
 
     training_setting = args.output_dir.split("/")[-1]
     lds_score, _, _ = lds(score, training_setting)
