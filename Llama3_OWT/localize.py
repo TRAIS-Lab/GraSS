@@ -206,6 +206,12 @@ def parse_args():
         help="cuda device to be used",
     )
     parser.add_argument(
+        "--cache_dir",
+        type=str,
+        default=None,
+        help="The directory where the downloaded models and datasets will be stored.",
+    )
+    parser.add_argument(
         "--layer",
         type=str,
         default="Linear",
@@ -344,7 +350,7 @@ def main():
     if args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
         raw_datasets = load_dataset(
-            args.dataset_name, args.dataset_config_name, trust_remote_code=args.trust_remote_code
+            args.dataset_name, args.dataset_config_name, cache_dir=args.cache_dir,  trust_remote_code=args.trust_remote_code
         )
         if "validation" not in raw_datasets.keys():
             raw_datasets["validation"] = load_dataset(
