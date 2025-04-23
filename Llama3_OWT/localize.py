@@ -279,12 +279,6 @@ def parse_args():
         if args.output_dir is None:
             raise ValueError("Need an `output_dir` to create a repo when `--push_to_hub` is passed.")
 
-    if args.cache_dir is not None:
-        os.environ["HF_HOME"] = args.cache_dir
-        os.environ["TRANSFORMERS_CACHE"] = os.path.join(args.cache_dir, "transformers")
-        os.environ["HF_DATASETS_CACHE"] = os.path.join(args.cache_dir, "datasets")
-        os.environ["HF_METRICS_CACHE"] = os.path.join(args.cache_dir, "metrics")
-
     return args
 
 
@@ -355,6 +349,7 @@ def main():
     # download the dataset.
     if args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
+        datasets.config.HF_DATASETS_CACHE = args.cache_dir
         raw_datasets = load_dataset(
             args.dataset_name, args.dataset_config_name,  trust_remote_code=args.trust_remote_code
         )
