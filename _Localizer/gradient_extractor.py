@@ -15,13 +15,14 @@ class GradientExtractor:
     """
     Extracts raw gradients and pre-activations from model layers using hooks,
     without requiring custom layer implementations or projections.
-    Processes one layer at a time to save memory.
+    Processes one layer at a time to save memory with optional CPU offloading.
     """
 
     def __init__(
         self,
         model: nn.Module,
         device: str = 'cpu',
+        cpu_offload: bool = False,
     ) -> None:
         """
         Initialize the gradient extractor.
@@ -30,13 +31,13 @@ class GradientExtractor:
             model (nn.Module): PyTorch model.
             device (str): Device to run the model on.
             cpu_offload (bool): Whether to offload data to CPU to save GPU memory.
-            profile (bool): Whether to record timing information.
         """
         self.model = model
         self.model.to(device)
         self.model.eval()
 
         self.device = device
+        self.cpu_offload = cpu_offload
 
     def extract_gradients_for_layer(
         self,
@@ -64,6 +65,7 @@ class GradientExtractor:
         hook_manager = HookManager(
             self.model,
             [layer_name],
+            self.cpu_offload
         )
 
         print(f"Processing layer: {layer_name}")
@@ -111,9 +113,13 @@ class GradientExtractor:
         Returns:
             Dictionary with processed gradient components
         """
-        # Initialize lists to collect gradients, offloaded to CPU
+        # Initialize lists to collect gradients, potentially offloaded to CPU
         pre_activations = []
         input_features = []
+
+        # Store tensor dimensions for later use
+        tensor_dims = None
+        is_3d = None
 
         # Process each batch
         for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"Processing {dataset_type} data")):
@@ -155,36 +161,59 @@ class GradientExtractor:
                 comp_data = hook_manager.get_gradient_components(layer_name)
                 if comp_data:
                     pre_act_grad, input_feat = comp_data
-                    pre_activations.append(pre_act_grad.detach())
-                    input_features.append(input_feat.detach())
+
+                    # Store dimensions for later use if not already stored
+                    if tensor_dims is None:
+                        is_3d = pre_act_grad.dim() == 3
+                        tensor_dims = {
+                            'pre_act_shape': pre_act_grad.shape,
+                            'input_feat_shape': input_feat.shape,
+                            'dtype': pre_act_grad.dtype
+                        }
+
+                    # Offload to CPU if specified to save GPU memory
+                    if self.cpu_offload:
+                        pre_activations.append(pre_act_grad.detach().cpu())
+                        input_features.append(input_feat.detach().cpu())
+                    else:
+                        pre_activations.append(pre_act_grad.detach())
+                        input_features.append(input_feat.detach())
+
+                    # Free memory after each batch
+                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
         # Process collected gradients
         if not pre_activations or not input_features:
             return None
 
-        # Concatenate all batches
-        pre_act_tensor = torch.cat(pre_activations, dim=0).to(self.device)
-        input_feat_tensor = torch.cat(input_features, dim=0).to(self.device)
-
-        # Determine if tensors are 3D (sequence models) or 2D
-        is_3d = pre_act_tensor.dim() == 3
+        # Concatenate all batches while keeping them on CPU initially
+        if self.cpu_offload:
+            pre_act_tensor = torch.cat(pre_activations, dim=0)
+            input_feat_tensor = torch.cat(input_features, dim=0)
+        else:
+            pre_act_tensor = torch.cat(pre_activations, dim=0).to(self.device)
+            input_feat_tensor = torch.cat(input_features, dim=0).to(self.device)
 
         # Handle bias term for linear layers by adding a column of ones
         if is_3d:
             # For 3D tensors (batch_size, seq_length, features)
             batch_size, seq_length, hidden_size = input_feat_tensor.shape
+
+            # Create ones tensor on the same device as input_feat_tensor
             ones = torch.ones(
                 batch_size, seq_length, 1,
-                device=self.device,
+                device=input_feat_tensor.device,
                 dtype=input_feat_tensor.dtype
             )
             input_feat_tensor = torch.cat([input_feat_tensor, ones], dim=2)
         else:
             # For 2D tensors (batch_size, features)
             batch_size = input_feat_tensor.shape[0]
+
+            # Create ones tensor on the same device as input_feat_tensor
             ones = torch.ones(
                 batch_size, 1,
-                device=self.device,
+                device=input_feat_tensor.device,
                 dtype=input_feat_tensor.dtype
             )
             input_feat_tensor = torch.cat([input_feat_tensor, ones], dim=1)
@@ -192,10 +221,17 @@ class GradientExtractor:
         # Scale by batch size for per-sample gradients
         pre_act_tensor = pre_act_tensor * batch_size
 
+        # Move back to GPU only when needed for final processing
+        if self.cpu_offload:
+            # Move tensors to GPU only for final processing
+            pre_act_tensor = pre_act_tensor.to(self.device)
+            input_feat_tensor = input_feat_tensor.to(self.device)
+
         # Clean up individual batch tensors to save memory
         del pre_activations
         del input_features
         gc.collect()
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
 
         return {
             'pre_activation': pre_act_tensor,

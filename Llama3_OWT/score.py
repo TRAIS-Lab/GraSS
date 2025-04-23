@@ -660,8 +660,6 @@ def main():
         assert args.layer == "Linear", "LoGra only supports Linear setting now."
         assert args.projection is not None, "LoGra requires projection method."
 
-        # model = LlamaForCausalLM.from_pretrained(checkpoint).cuda(device)
-
         attributor = IFAttributor(
             model=model,
             layer_type=args.layer, #TODO: fix to match

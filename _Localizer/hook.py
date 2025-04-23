@@ -8,16 +8,19 @@ from torch import Tensor
 
 import functools
 import torch.nn as nn
+import torch
 
 class HookManager:
     """
     Manages hooks for efficient gradient component capturing
     without requiring custom layer implementations.
+    Compatible with CPU offloading for memory efficiency.
     """
     def __init__(
             self,
             model: nn.Module,
             layer_names: List[str],
+            cpu_offload: bool = False,
         ) -> None:
         """
         Initialize the hook manager
@@ -25,9 +28,11 @@ class HookManager:
         Args:
             model: The model to hook
             layer_names: Names of layers to hook
+            cpu_offload: Whether to offload captured tensors to CPU immediately
         """
         self.model = model
         self.layer_names = layer_names
+        self.cpu_offload = cpu_offload
 
         # Create mapping from layer name to index for O(1) lookups
         self.layer_name_to_idx = {name: idx for idx, name in enumerate(layer_names)}
@@ -68,12 +73,21 @@ class HookManager:
         """
         # Store input
         if isinstance(inp, tuple) and len(inp) > 0:
-            self.inputs[idx] = inp[0].detach()
+            tensor = inp[0].detach()
         else:
-            self.inputs[idx] = inp.detach()
+            tensor = inp.detach()
+
+        # Offload to CPU if needed
+        if self.cpu_offload:
+            self.inputs[idx] = tensor.cpu()
+        else:
+            self.inputs[idx] = tensor
 
         # Store pre-activation (output)
-        self.pre_activations[idx] = out.detach()
+        if self.cpu_offload:
+            self.pre_activations[idx] = out.detach().cpu()
+        else:
+            self.pre_activations[idx] = out.detach()
 
         # For LayerNorm, also capture the normalized tensor if needed
         if isinstance(mod, nn.LayerNorm):
@@ -81,7 +95,11 @@ class HookManager:
             mean = x.mean(dim=-1, keepdim=True)
             var = x.var(dim=-1, keepdim=True, unbiased=False)
             normalized = (x - mean) / torch.sqrt(var + mod.eps)
-            self.normalized[idx] = normalized.detach()
+
+            if self.cpu_offload:
+                self.normalized[idx] = normalized.detach().cpu()
+            else:
+                self.normalized[idx] = normalized.detach()
 
     def _backward_hook_fn(self, idx: int, mod: nn.Module, grad_input: Any, grad_output: Any) -> None:
         """
@@ -94,7 +112,10 @@ class HookManager:
             grad_output: Gradient w.r.t outputs
         """
         # Store the gradient of the pre-activation
-        self.grad_pre_activations[idx] = grad_output[0].detach()
+        if self.cpu_offload:
+            self.grad_pre_activations[idx] = grad_output[0].detach().cpu()
+        else:
+            self.grad_pre_activations[idx] = grad_output[0].detach()
 
     def get_gradient_components(self, layer_name: str) -> Optional[Tuple[Tensor, Tensor]]:
         """
@@ -116,16 +137,28 @@ class HookManager:
             self.inputs[idx] is None):
             return None
 
-        # Return the raw gradient components without any projection
+        # Return the raw gradient components
+        # If they were offloaded to CPU, they'll be returned from there
         return self.grad_pre_activations[idx], self.inputs[idx]
 
     def remove_hooks(self) -> None:
-        """Remove all hooks"""
+        """Remove all hooks and clear stored tensors"""
         for hook in self.forward_hooks:
             if hook is not None:
                 hook.remove()
         for hook in self.backward_hooks:
             if hook is not None:
                 hook.remove()
+
+        # Clear all stored tensors to free memory
         self.forward_hooks = [None] * len(self.layer_names)
         self.backward_hooks = [None] * len(self.layer_names)
+        self.inputs = [None] * len(self.layer_names)
+        self.pre_activations = [None] * len(self.layer_names)
+        self.grad_pre_activations = [None] * len(self.layer_names)
+        self.normalized = [None] * len(self.layer_names)
+
+        # Force garbage collection
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
