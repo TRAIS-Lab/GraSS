@@ -585,7 +585,7 @@ def main():
     test_dataloader = DataLoader(
         test_dataset, collate_fn=default_data_collator, batch_size=test_batch_size, shuffle=False
     )
-    train_tokens = count_total_tokens(train_dataloader)
+    train_tokens = block_size * len(train_dataset)
     train_test_pairs = len(train_dataset) * len(test_dataset)
 
     throughput_stats = {}

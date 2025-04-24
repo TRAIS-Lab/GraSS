@@ -518,7 +518,7 @@ def main():
 
     # Dataset
     whole_train_dataset = lm_datasets["train"]
-    train_batch_size, test_batch_size = 8, 8
+    train_batch_size, test_batch_size = 32, 32
 
     # split the train_dataset into train and test further, with 80% for training and 20% for testing
     train_dataset = whole_train_dataset.select(range(int(args.loc_n * 0.8)))
