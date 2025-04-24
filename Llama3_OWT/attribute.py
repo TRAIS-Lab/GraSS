@@ -571,24 +571,17 @@ def main():
 
     # Dataset
     train_dataset = lm_datasets["train"]
-    test_dataset = lm_datasets["validation"]
-    train_batch_size, test_batch_size = batch_size(args.baseline, args.tda)
+    train_batch_size, _ = batch_size(args.baseline, args.tda)
 
     train_dataset = train_dataset.select(range(200))
-    test_dataset = test_dataset.select(range(50))
     if args.debug: # toy dataset
         train_dataset = train_dataset.select(range(200))
-        test_dataset = test_dataset.select(range(20))
 
     train_sampler = SubsetSampler(range(len(train_dataset)))
     train_dataloader = DataLoader(
         train_dataset, collate_fn=default_data_collator, batch_size=train_batch_size, sampler=train_sampler
     )
-    test_dataloader = DataLoader(
-        test_dataset, collate_fn=default_data_collator, batch_size=test_batch_size, shuffle=False
-    )
     train_tokens = count_total_tokens(train_dataloader)
-    train_test_pairs = len(train_dataset) * len(test_dataset)
 
     throughput_stats = {}
 
@@ -596,9 +589,7 @@ def main():
 
     # Logging setting
     logger.info(f"The train dataset length: {len(train_dataset)}.")
-    logger.info(f"The test dataset length: {len(test_dataset)}.")
     logger.info(f"The train batch size: {train_batch_size}")
-    logger.info(f"The test batch size: {test_batch_size}")
     logger.info(f"TDA Method: {args.baseline}-{args.tda}")
     logger.info(f"Projector: {projector_kwargs}")
     logger.info(f"Layer: {args.layer}")
@@ -637,16 +628,8 @@ def main():
             attributor.cache(train_dataloader)
             torch.cuda.synchronize(device)
             cache_end_time = time.time()
-
-
-            # Measure attribute throughput
-            torch.cuda.synchronize(device)
-            attribute_start_time = time.time()
-            score, profile = attributor.attribute(test_dataloader=test_dataloader)
-            torch.cuda.synchronize(device)
-            attribute_end_time = time.time()
         else:
-            score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
+            attributor.cache(train_dataloader)
 
     elif args.baseline == "LoGra":
         check_min_version("4.46.0")
@@ -677,16 +660,8 @@ def main():
             attributor.cache(train_dataloader=train_dataloader)
             torch.cuda.synchronize(device)
             cache_end_time = time.time()
-
-           # Measure attribute throughput
-            torch.cuda.synchronize(device)
-            attribute_start_time = time.time()
-            score, profile = attributor.attribute(test_dataloader=test_dataloader)
-            torch.cuda.synchronize(device)
-            attribute_end_time = time.time()
         else:
             attributor.cache(train_dataloader=train_dataloader)
-            score = attributor.attribute(test_dataloader=test_dataloader)
 
     elif args.baseline == "LogIX":
         #check_min_version("4.46.0") # LogIX is built on top of 4.40.0, ignore the checking
@@ -737,51 +712,6 @@ def main():
         torch.cuda.synchronize(device)
         cache_end_time = time.time(device)
 
-        # 2. Computing influence scores for test data
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model_name_or_path,
-            from_tf=bool(".ckpt" in args.model_name_or_path),
-            config=config,
-            low_cpu_mem_usage=args.low_cpu_mem_usage,
-            trust_remote_code=args.trust_remote_code,
-        ).cuda(device) # reinitialize the model
-        model.eval()
-        logix_args_test = LogIXArguments(
-            project=f"./LogIX/{args.projection}",
-            config=f"./LogIX/{args.projection}.yaml",
-            lora=True,
-            hessian=hessian,
-            save="grad",
-            train_data=False,
-            label_key="input_ids",
-            initialize_from_log=True,
-            log_batch_size=32,
-        )
-        training_args = transformers.TrainingArguments(
-            output_dir=f"./LogIX/",
-            num_train_epochs=1,
-            per_device_train_batch_size=test_batch_size,
-            report_to="none",
-            gradient_accumulation_steps=1,
-        )
-        trainer = LogIXTrainer(
-            model=model,
-            tokenizer=tokenizer,
-            train_dataset=test_dataset,
-            data_collator=default_data_collator,
-            args=training_args,
-            logix_args=logix_args_test,
-        )
-
-        # Measure attribute throughput
-        torch.cuda.synchronize(device)
-        attribute_start_time = time.time()
-        result = trainer.influence()
-        torch.cuda.synchronize(device)
-        attribute_end_time = time.time()
-
-        score = result["influence"].T
-
     else:
         raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'LoGra', and 'dattri'.")
 
@@ -794,17 +724,9 @@ def main():
             "throughput_tokens_per_second": cache_throughput
         }
 
-        attribute_duration = attribute_end_time - attribute_start_time
-        attribute_throughput = train_test_pairs / attribute_duration
-        throughput_stats["attribute"] = {
-            "train_test_pairs": train_test_pairs,
-            "duration_seconds": attribute_duration,
-            "throughput_pair_per_second": attribute_throughput
-        }
-
     logger.info("***** Attribution finished *****")
 
-    result = {"score": score, "profile": profile, "throughput": throughput_stats}
+    result = {"profile": profile, "throughput": throughput_stats}
     logger.info(result)
 
     if not args.debug: # only save the results when not in debug mode
