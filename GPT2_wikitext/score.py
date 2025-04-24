@@ -564,7 +564,7 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from GPT2_wikitext.utils import SubsetSampler, batch_size, replace_conv1d_modules, setup_projection_kwargs, count_total_tokens, result_filename, lds
+    from GPT2_wikitext.utils import SubsetSampler, batch_size, replace_conv1d_modules, setup_projection_kwargs, result_filename, lds
 
     device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
