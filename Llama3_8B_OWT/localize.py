@@ -598,6 +598,8 @@ def main():
             train_input_features=train_input_features,
             test_pre_activation=test_pre_activations,
             test_input_features=test_input_features,
+            batch_size=8,
+            accumulation_steps=5,
             num_epochs=args.epoch,
             log_every=args.log_interval,
             correlation_threshold=args.early_stop,

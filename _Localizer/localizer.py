@@ -4,6 +4,7 @@ import torch.optim as optim
 import numpy as np
 from scipy.stats import spearmanr
 import math
+from torch.utils.data import DataLoader, TensorDataset
 
 class Localizer:
     def __init__(
@@ -55,9 +56,6 @@ class Localizer:
 
         # Use Adam optimizer for both masks
         self.optimizer = optim.Adam([self.S_pre, self.S_input], lr=lr)
-
-        # Cache for efficient computation
-        self.original_ips_cache = None
 
     def _log(self, message, level="info"):
         """Helper method to handle logging"""
@@ -118,71 +116,48 @@ class Localizer:
 
         return grad
 
-    def compute_inner_products(self, test_pre, test_input, train_pre, train_input, apply_mask=False, is_3d=False):
+    def compute_batch_inner_products(self, test_pre_batch, test_input_batch, train_pre_batch, train_input_batch, apply_mask=False, is_3d=False):
         """
-        Compute inner products between constructed test and training gradients.
+        Compute inner products between constructed test and training gradients for a single batch.
 
         Args:
-            test_pre: Test pre-activation gradients
-            test_input: Test input features
-            train_pre: Training pre-activation gradients
-            train_input: Training input features
+            test_pre_batch: Batch of test pre-activation gradients
+            test_input_batch: Batch of test input features
+            train_pre_batch: Batch of training pre-activation gradients
+            train_input_batch: Batch of training input features
             apply_mask: Whether to apply masks to components
             is_3d: Whether inputs are 3D tensors
 
         Returns:
-            Tensor of inner products [n_test, n_train]
+            Tensor of inner products [batch_size_test, batch_size_train]
         """
         # Construct test gradients
-        test_grads = self.construct_gradient(test_pre, test_input, apply_mask, is_3d)
+        test_grads = self.construct_gradient(test_pre_batch, test_input_batch, apply_mask, is_3d)
 
         # Construct training gradients
-        train_grads = self.construct_gradient(train_pre, train_input, apply_mask, is_3d)
+        train_grads = self.construct_gradient(train_pre_batch, train_input_batch, apply_mask, is_3d)
 
         # Compute inner products using matrix multiplication
         return torch.matmul(test_grads, train_grads.T)
 
-    # def correlation_loss(self, original_ips, masked_ips):
-    #     """
-    #     Compute average correlation between original and masked inner products.
-
-    #     Args:
-    #         original_ips: Tensor of original inner products [n_test, n_train]
-    #         masked_ips: Tensor of masked inner products [n_test, n_train]
-
-    #     Returns:
-    #         Average negative correlation (for minimization)
-    #     """
-    #     # Mean center both sets of inner products along train dimension
-    #     orig_centered = original_ips - original_ips.mean(dim=1, keepdim=True)
-    #     masked_centered = masked_ips - masked_ips.mean(dim=1, keepdim=True)
-
-    #     print("orig_centered:", orig_centered)
-    #     print("masked_centered:", masked_centered)
-
-    #     # Compute correlation for each test gradient
-    #     numerator = torch.sum(orig_centered * masked_centered, dim=1)
-    #     denominator = torch.sqrt(torch.sum(orig_centered**2, dim=1) * torch.sum(masked_centered**2, dim=1) + 1e-8)
-    #     correlations = numerator / denominator
-    #     print("cor:", correlations)
-
-    #     # Average correlation across all test gradients
-    #     avg_correlation = correlations.mean()
-
-    #     # Return negative correlation (to minimize)
-    #     return -avg_correlation
-
-    def correlation_loss(self, original_ips, masked_ips):
+    def compute_correlations(self, original_ips_batch, masked_ips_batch):
         """
-        Compute average correlation between original and masked inner products.
+        Compute correlation between original and masked inner products for a batch.
+
+        Args:
+            original_ips_batch: Batch of original inner products
+            masked_ips_batch: Batch of masked inner products
+
+        Returns:
+            Average correlation for the batch
         """
         # Cast to float32 for better numerical stability
-        original_ips = original_ips.float()
-        masked_ips = masked_ips.float()
+        original_ips_batch = original_ips_batch.float()
+        masked_ips_batch = masked_ips_batch.float()
 
         # Mean center both sets of inner products along train dimension
-        orig_centered = original_ips - original_ips.mean(dim=1, keepdim=True)
-        masked_centered = masked_ips - masked_ips.mean(dim=1, keepdim=True)
+        orig_centered = original_ips_batch - original_ips_batch.mean(dim=1, keepdim=True)
+        masked_centered = masked_ips_batch - masked_ips_batch.mean(dim=1, keepdim=True)
 
         # Compute variance (used for stability checks)
         orig_var = torch.sum(orig_centered**2, dim=1)
@@ -208,6 +183,21 @@ class Localizer:
 
         # Calculate mean of valid correlations
         avg_correlation = correlations[valid_samples].mean()
+
+        return avg_correlation
+
+    def correlation_loss(self, original_ips_batch, masked_ips_batch):
+        """
+        Compute correlation loss for a batch.
+
+        Args:
+            original_ips_batch: Batch of original inner products
+            masked_ips_batch: Batch of masked inner products
+
+        Returns:
+            Negative correlation (for minimization)
+        """
+        avg_correlation = self.compute_correlations(original_ips_batch, masked_ips_batch)
 
         # Return negative correlation (for minimization)
         return -avg_correlation
@@ -243,41 +233,43 @@ class Localizer:
 
         return pre_loss + input_loss
 
-    def train_step(self, test_pre, test_input, train_pre, train_input, is_3d=False):
+    def train_step_batch(self, test_pre_batch, test_input_batch, train_pre_batch, train_input_batch,
+                          original_ips_fn=None, is_3d=False, accumulate_grad=False):
         """
-        Perform one optimization step.
+        Perform one optimization step with batched data.
 
         Args:
-            test_pre: Test pre-activation gradients
-            test_input: Test input features
-            train_pre: Training pre-activation gradients
-            train_input: Training input features
+            test_pre_batch: Batch of test pre-activation gradients
+            test_input_batch: Batch of test input features
+            train_pre_batch: Batch of training pre-activation gradients
+            train_input_batch: Batch of training input features
+            original_ips_fn: Function to compute original inner products if needed
             is_3d: Whether inputs are 3D tensors
+            accumulate_grad: Whether to accumulate gradients without optimizer step
 
         Returns:
             Dictionary of metrics
         """
-        self.optimizer.zero_grad()
+        if not accumulate_grad:
+            self.optimizer.zero_grad()
 
-        # Compute original inner products (without masks)
-        # Cache original inner products if not already computed
-        if self.original_ips_cache is None:
-            original_ips = self.compute_inner_products(
-                test_pre, test_input, train_pre, train_input,
+        # Compute original inner products (without masks) if function provided
+        if original_ips_fn is not None:
+            original_ips_batch = original_ips_fn(test_pre_batch, test_input_batch, train_pre_batch, train_input_batch)
+        else:
+            original_ips_batch = self.compute_batch_inner_products(
+                test_pre_batch, test_input_batch, train_pre_batch, train_input_batch,
                 apply_mask=False, is_3d=is_3d
             )
-            self.original_ips_cache = original_ips
-        else:
-            original_ips = self.original_ips_cache
 
         # Compute masked inner products
-        masked_ips = self.compute_inner_products(
-            test_pre, test_input, train_pre, train_input,
+        masked_ips_batch = self.compute_batch_inner_products(
+            test_pre_batch, test_input_batch, train_pre_batch, train_input_batch,
             apply_mask=True, is_3d=is_3d
         )
 
         # Compute correlation loss
-        corr_loss = self.correlation_loss(original_ips, masked_ips)
+        corr_loss = self.correlation_loss(original_ips_batch, masked_ips_batch)
 
         # Compute sparsity loss
         sparse_loss = self.sparsity_loss()
@@ -285,9 +277,15 @@ class Localizer:
         # Total loss
         total_loss = corr_loss + sparse_loss
 
-        # Compute gradients and update parameters
+        # Compute gradients
         total_loss.backward()
-        self.optimizer.step()
+
+        # Update parameters if not accumulating gradients
+        if not accumulate_grad:
+            self.optimizer.step()
+            # Enforce minimum active parameters after optimizer step
+            with torch.no_grad():
+                self._enforce_minimum_active_params()
 
         # Compute sparsity statistics
         mask_pre = self.sigmoid_pre()
@@ -300,8 +298,26 @@ class Localizer:
             'correlation_loss': corr_loss.item(),
             'sparsity_loss': sparse_loss.item(),
             'pre_activation_sparsity': pre_sparsity,
-            'input_features_sparsity': input_sparsity
+            'input_features_sparsity': input_sparsity,
+            'batch_size': test_pre_batch.size(0)
         }
+
+    def _create_dataloader(self, data, batch_size, shuffle=True):
+        """Create a DataLoader from input data"""
+        if isinstance(data, torch.Tensor):
+            dataset = TensorDataset(data)
+        else:
+            data_tensor = self._ensure_tensor(data)
+            dataset = TensorDataset(data_tensor)
+
+        return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
+
+    def _create_paired_dataloader(self, data1, data2, batch_size, shuffle=True):
+        """Create a DataLoader from paired input data"""
+        data1_tensor = self._ensure_tensor(data1)
+        data2_tensor = self._ensure_tensor(data2)
+        dataset = TensorDataset(data1_tensor, data2_tensor)
+        return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
 
     def train(
             self,
@@ -309,19 +325,23 @@ class Localizer:
             train_input_features,
             test_pre_activation,
             test_input_features,
+            batch_size=32,
+            accumulation_steps=1,
             num_epochs=500,
             log_every=50,
             correlation_threshold=0.9,
             is_3d=False
         ):
         """
-        Train the dual mask optimizer for multiple epochs.
+        Train the dual mask optimizer for multiple epochs with mini-batches.
 
         Args:
             train_pre_activation: Training pre-activation gradients
             train_input_features: Training input features
             test_pre_activation: Test pre-activation gradients
             test_input_features: Test input features
+            batch_size: Size of mini-batches
+            accumulation_steps: Number of steps to accumulate gradients
             num_epochs: Maximum number of training epochs
             log_every: Log progress every N epochs
             correlation_threshold: Stop training when correlation drops below this value
@@ -336,8 +356,16 @@ class Localizer:
         test_pre_activation = self._ensure_tensor(test_pre_activation)
         test_input_features = self._ensure_tensor(test_input_features)
 
-        # Reset caches
-        self.original_ips_cache = None
+        # Create data loaders
+        train_loader = self._create_paired_dataloader(
+            train_pre_activation, train_input_features,
+            batch_size=min(batch_size, len(train_pre_activation))
+        )
+
+        test_loader = self._create_paired_dataloader(
+            test_pre_activation, test_input_features,
+            batch_size=min(batch_size, len(test_pre_activation))
+        )
 
         best_correlation = -float('inf')
         best_masks = None
@@ -345,21 +373,62 @@ class Localizer:
         # Track masks that meet sparsity constraints
         candidate_masks = []
 
-        self._log(f"Starting training for {num_epochs} epochs (early stopping threshold: {correlation_threshold})")
+        self._log(f"Starting training for {num_epochs} epochs with batch size {batch_size}")
         self._log(f"Pre-activation dimension: {self.pre_activation_dim}, Input features dimension: {self.input_features_dim}")
 
         for epoch in range(num_epochs):
-            metrics = self.train_step(
-                test_pre_activation, test_input_features,
-                train_pre_activation, train_input_features,
-                is_3d=is_3d
-            )
+            total_loss = 0.0
+            total_corr_loss = 0.0
+            total_sparse_loss = 0.0
+            total_batches = 0
 
-            # Safety check for minimum active parameters
+            # Training loop with mini-batches
+            for step, ((train_pre_batch,), (train_input_batch,)) in enumerate(zip(
+                self._create_dataloader(train_pre_activation, batch_size),
+                self._create_dataloader(train_input_features, batch_size)
+            )):
+                # Use smaller batch from test set for each training step
+                for test_step, ((test_pre_batch,), (test_input_batch,)) in enumerate(zip(
+                    self._create_dataloader(test_pre_activation, min(batch_size, len(test_pre_activation))),
+                    self._create_dataloader(test_input_features, min(batch_size, len(test_input_features)))
+                )):
+                    # Break after processing one test batch to avoid excessive computation
+                    if test_step > 0:
+                        break
+
+                    # Set gradient accumulation flag
+                    accumulate_grad = (step % accumulation_steps != 0)
+
+                    # Perform training step with current batch
+                    metrics = self.train_step_batch(
+                        test_pre_batch, test_input_batch,
+                        train_pre_batch, train_input_batch,
+                        is_3d=is_3d,
+                        accumulate_grad=accumulate_grad
+                    )
+
+                    # Update running statistics
+                    total_loss += metrics['total_loss']
+                    total_corr_loss += metrics['correlation_loss']
+                    total_sparse_loss += metrics['sparsity_loss']
+                    total_batches += 1
+
+                    # Update parameters if accumulation complete
+                    if (step + 1) % accumulation_steps == 0:
+                        self.optimizer.step()
+                        self.optimizer.zero_grad()
+
+                        # Enforce minimum active parameters
+                        with torch.no_grad():
+                            self._enforce_minimum_active_params()
+
+            # Compute average metrics
+            avg_loss = total_loss / max(1, total_batches)
+            avg_corr_loss = total_corr_loss / max(1, total_batches)
+            avg_sparse_loss = total_sparse_loss / max(1, total_batches)
+
+            # Get current masks and count active parameters
             with torch.no_grad():
-                self._enforce_minimum_active_params()
-
-                # Get current masks and count active parameters
                 mask_pre = self.sigmoid_pre()
                 mask_input = self.sigmoid_input()
                 active_pre = torch.sum(mask_pre > 0.5).item()
@@ -368,23 +437,24 @@ class Localizer:
             # Log progress periodically
             if epoch % log_every == 0 or epoch == num_epochs - 1:
                 # Evaluate current mask performance
-                eval_metrics = self.evaluate_masks(
+                eval_metrics = self.evaluate_masks_batched(
                     test_pre_activation, test_input_features,
                     train_pre_activation, train_input_features,
+                    batch_size=min(batch_size, len(test_pre_activation)),
                     is_3d=is_3d,
                     verbose=False  # Don't log individual correlations
                 )
 
                 # Log progress
                 self._log(f"Epoch {epoch}/{num_epochs} - "
-                         f"Loss: {metrics['total_loss']:.4f}, "
-                         f"Corr: {-metrics['correlation_loss']:.4f}, "
+                         f"Loss: {avg_loss:.4f}, "
+                         f"Corr: {-avg_corr_loss:.4f}, "
                          f"Rank Corr: {eval_metrics['avg_rank_correlation']:.4f}, "
                          f"Pre: {active_pre}/{self.pre_activation_dim}, "
                          f"Input: {active_input}/{self.input_features_dim}")
 
                 # Check if masks satisfy constraints and correlation is better
-                correlation_value = -metrics['correlation_loss']
+                correlation_value = -avg_corr_loss
                 meets_constraints = (
                     self.min_active_pre_activation <= active_pre <= self.max_active_pre_activation and
                     self.min_active_input <= active_input <= self.max_active_input
@@ -431,9 +501,10 @@ class Localizer:
 
         # Final evaluation
         self._log("Final mask evaluation:")
-        eval_metrics = self.evaluate_masks(
+        eval_metrics = self.evaluate_masks_batched(
             test_pre_activation, test_input_features,
             train_pre_activation, train_input_features,
+            batch_size=min(batch_size, len(test_pre_activation)),
             is_3d=is_3d,
             verbose=False
         )
@@ -487,15 +558,16 @@ class Localizer:
             self.S_input.data = new_S_input
             self._log(f"Forced {self.min_active_input} input feature parameters to be active", level="warning")
 
-    def evaluate_masks(self, test_pre, test_input, train_pre, train_input, is_3d=False, verbose=False):
+    def evaluate_masks_batched(self, test_pre, test_input, train_pre, train_input, batch_size=32, is_3d=False, verbose=False):
         """
-        Evaluate the current masks' performance in preserving rankings.
+        Evaluate the current masks' performance in preserving rankings, processing data in batches.
 
         Args:
             test_pre: Test pre-activation gradients
             test_input: Test input features
             train_pre: Training pre-activation gradients
             train_input: Training input features
+            batch_size: Size of mini-batches
             is_3d: Whether inputs are 3D tensors
             verbose: Whether to log detailed per-sample correlations
 
@@ -523,33 +595,74 @@ class Localizer:
                 self._log(f"Input Features Mask: {active_input}/{mask_input.numel()} parameters active ({percent_active_input:.2f}%)")
                 self._log(f"Total effective parameters: {total_active}/{total_possible} ({percent_active_total:.2f}%)")
 
-            # Compute inner products
-            original_ips = self.compute_inner_products(
-                test_pre, test_input, train_pre, train_input,
-                apply_mask=False, is_3d=is_3d
-            )
-            masked_ips = self.compute_inner_products(
-                test_pre, test_input, train_pre, train_input,
-                apply_mask=True, is_3d=is_3d
-            )
-
-            # Convert to CPU for Spearman calculation
-            original_ips_np = original_ips.cpu().numpy()
-            masked_ips_np = masked_ips.cpu().numpy()
-
-            # Compute Spearman rank correlation for each test gradient
+            # Process test data in batches
             all_correlations = []
-            n_test = original_ips.shape[0]
 
-            for i in range(n_test):
-                try:
-                    rank_corr, _ = spearmanr(original_ips_np[i], masked_ips_np[i])
-                    all_correlations.append(rank_corr)
-                    if verbose:
-                        self._log(f"Test Sample {i+1}: Spearman Rank Correlation: {rank_corr:.4f}")
-                except:
-                    if verbose:
-                        self._log(f"Test Sample {i+1}: Could not compute correlation.", level="warning")
+            for (test_pre_batch,), (test_input_batch,) in zip(
+                self._create_dataloader(test_pre, batch_size, shuffle=False),
+                self._create_dataloader(test_input, batch_size, shuffle=False)
+            ):
+                # Compute inner products for this test batch against all training data
+                original_ips_batch = []
+                masked_ips_batch = []
+
+                for (train_pre_batch,), (train_input_batch,) in zip(
+                    self._create_dataloader(train_pre, batch_size, shuffle=False),
+                    self._create_dataloader(train_input, batch_size, shuffle=False)
+                ):
+                    # Compute batch inner products
+                    orig_ips = self.compute_batch_inner_products(
+                        test_pre_batch, test_input_batch,
+                        train_pre_batch, train_input_batch,
+                        apply_mask=False, is_3d=is_3d
+                    )
+
+                    mask_ips = self.compute_batch_inner_products(
+                        test_pre_batch, test_input_batch,
+                        train_pre_batch, train_input_batch,
+                        apply_mask=True, is_3d=is_3d
+                    )
+
+                    # Append to batch results
+                    original_ips_batch.append(orig_ips)
+                    masked_ips_batch.append(mask_ips)
+
+                # Concatenate inner products from all training batches
+                if original_ips_batch:
+                    # Handle different batch sizes by padding to max width
+                    max_width = max(ips.size(1) for ips in original_ips_batch)
+
+                    # Concatenate batches along train dimension (column-wise)
+                    original_ips_concat = torch.cat([
+                        torch.nn.functional.pad(ips, (0, max_width - ips.size(1)))
+                        for ips in original_ips_batch
+                    ], dim=1)
+
+                    masked_ips_concat = torch.cat([
+                        torch.nn.functional.pad(ips, (0, max_width - ips.size(1)))
+                        for ips in masked_ips_batch
+                    ], dim=1)
+
+                    # Convert to CPU for Spearman calculation
+                    original_ips_np = original_ips_concat.cpu().numpy()
+                    masked_ips_np = masked_ips_concat.cpu().numpy()
+
+                    # Compute Spearman rank correlation for each test sample in batch
+                    for i in range(original_ips_np.shape[0]):
+                        # Remove padded zeros if any
+                        valid_cols = (original_ips_np[i] != 0).sum() if max_width > train_pre.size(0) else original_ips_np.shape[1]
+
+                        orig_row = original_ips_np[i, :valid_cols]
+                        masked_row = masked_ips_np[i, :valid_cols]
+
+                        try:
+                            rank_corr, _ = spearmanr(orig_row, masked_row)
+                            all_correlations.append(rank_corr)
+                            if verbose:
+                                self._log(f"Test Sample {len(all_correlations)}: Spearman Rank Correlation: {rank_corr:.4f}")
+                        except:
+                            if verbose:
+                                self._log(f"Test Sample {len(all_correlations) + 1}: Could not compute correlation.", level="warning")
 
             # Compute average correlation
             avg_correlation = float('nan')
