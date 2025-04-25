@@ -24,13 +24,11 @@ parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(parent_dir)
 
 import numpy as np
-import random
 import torch
 from torch import Tensor
 
 from _GradComp.utils import _vectorize as vectorize
 from _GradComp.utils import get_parameter_chunk_sizes
-from _GradComp.SJLT.sjlt_cuda import SJLTProjection
 
 
 class ProjectionType(str, Enum):
@@ -353,19 +351,20 @@ class CudaProjector(AbstractProjector):
                 (the fast_jl library)."
                 raise ModuleNotFoundError(msg) from None
         elif self.method == "SJLT":
-            self.c = 1
-            if self.pre_compute:
-                torch.manual_seed(self.seed)
-                active_dim = self.active_indices.numel()
-                rand_indices = torch.randint(proj_dim, (active_dim, self.c), device=device)
-                rand_signs = torch.randint(0, 2, (active_dim, self.c), device=device) * 2 - 1
-                self.sjlt_cuda_module = SJLTProjection(active_dim, proj_dim, self.c, device=device)
-                self.sjlt_cuda_module.rand_indices.copy_(rand_indices)
-                self.sjlt_cuda_module.rand_signs.copy_(rand_signs.to(torch.int8))
-        elif self.method == "SJLT_R":
-            self.c = 2
-            if self.pre_compute:
-                self.backward_indices = backward_SJLT_indices(proj_dim, c=self.c, active_indices=self.active_indices, device=device, seed=self.seed)
+            try:
+                from _GradComp.SJLT.sjlt_cuda import SJLTProjection
+                self.c = 1
+                if self.pre_compute:
+                    torch.manual_seed(self.seed)
+                    active_dim = self.active_indices.numel()
+                    rand_indices = torch.randint(proj_dim, (active_dim, self.c), device=device)
+                    rand_signs = torch.randint(0, 2, (active_dim, self.c), device=device) * 2 - 1
+                    self.sjlt_cuda_module = SJLTProjection(active_dim, proj_dim, self.c, device=device)
+                    self.sjlt_cuda_module.rand_indices.copy_(rand_indices)
+                    self.sjlt_cuda_module.rand_signs.copy_(rand_signs.to(torch.int8))
+            except ImportError:
+                msg = "You should make sure that SJLT CUDA version can be installed correctly."
+                raise ModuleNotFoundError(msg) from None
         elif self.method == "Rademacher":
             if self.pre_compute:
                 active_dim = self.active_indices.numel()
@@ -469,46 +468,24 @@ class CudaProjector(AbstractProjector):
                 with torch.no_grad():
                     result = self.sjlt_cuda_module(features)
             else:
-                torch.manual_seed(self.seed)
-                active_dim = self.active_indices.numel()
-                rand_indices = torch.randint(self.proj_dim, (active_dim, self.c), device=self.device)
-                rand_signs = torch.randint(0, 2, (active_dim, self.c), device=self.device) * 2 - 1
+                try:
+                    from _GradComp.SJLT.sjlt_cuda import SJLTProjection
 
-                sjlt_cuda_module = SJLTProjection(active_dim, self.proj_dim, self.c, device=self.device)
+                    torch.manual_seed(self.seed)
+                    active_dim = self.active_indices.numel()
+                    rand_indices = torch.randint(self.proj_dim, (active_dim, self.c), device=self.device)
+                    rand_signs = torch.randint(0, 2, (active_dim, self.c), device=self.device) * 2 - 1
 
-                sjlt_cuda_module.rand_indices.copy_(rand_indices)
-                sjlt_cuda_module.rand_signs.copy_(rand_signs.to(torch.int8))
+                    sjlt_cuda_module = SJLTProjection(active_dim, self.proj_dim, self.c, device=self.device)
 
-                with torch.no_grad():
-                    result = sjlt_cuda_module(features)
+                    sjlt_cuda_module.rand_indices.copy_(rand_indices)
+                    sjlt_cuda_module.rand_signs.copy_(rand_signs.to(torch.int8))
 
-        elif self.method == "SJLT_R":
-            batch_size, _ = features.size()
-
-            features = features[:, self.active_indices]
-            features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
-
-            batch_vec_p = torch.zeros(batch_size, self.proj_dim, device=self.device)
-
-            if self.pre_compute:
-                pos_local_indices = self.backward_indices['pos_local_indices']
-                neg_local_indices = self.backward_indices['neg_local_indices']
-                pos_output_mapping = self.backward_indices['pos_output_mapping']
-                neg_output_mapping = self.backward_indices['neg_output_mapping']
-            else:
-                raise NotImplementedError
-
-            if pos_local_indices.numel() > 0:
-                pos_values = features[:, pos_local_indices]
-                batch_pos_output_mapping = pos_output_mapping.unsqueeze(0).expand(batch_size, -1)
-                batch_vec_p.scatter_add_(1, batch_pos_output_mapping, pos_values)
-
-            if neg_local_indices.numel() > 0:
-                neg_values = features[:, neg_local_indices]
-                batch_neg_output_mapping = neg_output_mapping.unsqueeze(0).expand(batch_size, -1)
-                batch_vec_p.scatter_add_(1, batch_neg_output_mapping, -neg_values)
-
-            result = batch_vec_p / (self.c ** 0.5)
+                    with torch.no_grad():
+                        result = sjlt_cuda_module(features)
+                except ImportError:
+                    msg = "You should make sure that SJLT CUDA version can be installed correctly."
+                    raise ModuleNotFoundError(msg) from None
         elif self.method == "Rademacher":
             if self.pre_compute:
                 proj_matrix = self.proj_matrix
@@ -814,8 +791,6 @@ def make_random_projector(
             proj_type = ProjectionType.rademacher
         elif method == "SJLT":
             proj_type = ProjectionType.rademacher
-        elif method == "SJLT_R":
-            proj_type = ProjectionType.rademacher
         elif method == "Rademacher":
             proj_type = ProjectionType.rademacher
         elif method == "Gaussian":
@@ -986,120 +961,3 @@ def random_project(
         return projector.project(feature, ensemble_id)
 
     return _random_project_func
-
-def SJLT(vecs, proj_dim, threshold=0, rand_indices_and_signs=None, seed=0, batch_size=32, c=1, blow_up=1):
-    """
-    Batched SJLT implementation that processes input vectors in smaller batches
-
-    Args:
-        vecs (torch.Tensor): Input tensor of shape [num_vectors, original_dim]
-        proj_dim (int): Target projection dimension
-        threshold (float): Threshold for sparsity. Default: 0
-        rand_indices_and_signs (tuple): Precomputed random indices and signs. Default: None
-        seed (int): Random seed for reproducibility. Default: 0
-        batch_size (int): Number of vectors to process at once. Default: 32
-        c (int): Sparsity parameter. Default: 5
-        blow_up (int): Intermediate dimension multiplier. Default: 1
-
-    Returns:
-        torch.Tensor: Projected tensor of shape [num_vectors, proj_dim]
-    """
-    num_vectors, original_dim = vecs.size()
-    device = vecs.device
-
-    if rand_indices_and_signs is None:
-        torch.manual_seed(seed)
-        rand_indices = torch.randint(proj_dim * blow_up, (original_dim, c), device=device)
-        rand_signs = torch.randint(0, 2, (original_dim, c), device=device) * 2 - 1
-    else:
-        rand_indices, rand_signs = rand_indices_and_signs
-        # print(rand_indices.shape, rand_signs.shape)
-        # print(original_dim, c)
-
-        assert rand_indices.shape == (original_dim, c), "Invalid random indices shape"
-        assert rand_signs.shape == (original_dim, c), "Invalid random signs shape"
-
-    # Initialize output tensor
-    output = torch.zeros(num_vectors, proj_dim, device=device)
-
-    # Process in batches
-    for i in range(0, num_vectors, batch_size):
-        end_idx = min(i + batch_size, num_vectors)
-
-        # Process batch using original SJLT function
-        batch_output = sjlt(vecs[i:end_idx], proj_dim, threshold, rand_indices, rand_signs, c, blow_up)
-
-        # Store batch output
-        output[i:end_idx] = batch_output
-
-    return output
-
-def sjlt(vecs, proj_dim, threshold, rand_indices, rand_signs, c, blow_up):
-    batch_size, _ = vecs.size()
-    device = vecs.device
-
-    # Get indices of elements above threshold in a single pass
-    batch_idx, input_idx = torch.nonzero(torch.abs(vecs) >= threshold, as_tuple=True)
-    if input_idx.numel() == 0:
-        return torch.zeros(batch_size, proj_dim, device=device)
-
-    values = vecs[batch_idx, input_idx]
-
-    scaled_vals = values.repeat_interleave(c) * rand_signs[input_idx].flatten()
-    final_indices = batch_idx.repeat_interleave(c) * (proj_dim * blow_up) + rand_indices[input_idx].flatten()
-
-    # Initialize and fill output tensor
-    vecs_p = torch.zeros(batch_size, proj_dim * blow_up, device=device)
-    vecs_p.view(-1).index_add_(0, final_indices, scaled_vals)
-
-    # Sum and normalize
-    vecs_p = vecs_p.view(batch_size, proj_dim, blow_up).sum(dim=2)
-    return vecs_p / (c ** 0.5)
-
-
-def backward_SJLT_indices(proj_dim, c, device, active_indices, seed=0):
-    """
-    Fully vectorized representation for SJLT contribution indices.
-
-    Args:
-        original_dim: Original dimension of the input
-        proj_dim: Target projection dimension
-        c: Sparsity parameter
-        device: Device to create tensors on
-        active_indices: Indices of active input dimensions
-        seed: Random seed for reproducibility
-    """
-    # Get the effective dimensionality
-    active_dim = active_indices.size(0)
-
-    # Generate random indices and signs only for active dimensions
-    torch.manual_seed(seed)
-    rand_indices = torch.randint(proj_dim, (active_dim, c), device=device)
-    rand_signs = torch.randint(0, 2, (active_dim, c), device=device) * 2 - 1
-
-    # Create local indices (0 to active_dim-1) for the active dimensions
-    local_indices = torch.arange(active_dim, device=device)
-
-    # Flatten everything
-    local_input_indices = local_indices.repeat_interleave(c)
-    output_indices = rand_indices.reshape(-1)
-    signs = rand_signs.reshape(-1)
-
-    # Split into positive and negative contributions
-    pos_mask = signs > 0
-    neg_mask = signs < 0
-
-    # Create flat arrays for positive and negative contributions
-    # These are LOCAL indices within the active set
-    pos_local_indices = local_input_indices[pos_mask]
-    pos_output_mapping = output_indices[pos_mask]
-
-    neg_local_indices = local_input_indices[neg_mask]
-    neg_output_mapping = output_indices[neg_mask]
-
-    return {
-        'pos_local_indices': pos_local_indices,
-        'neg_local_indices': neg_local_indices,
-        'pos_output_mapping': pos_output_mapping,
-        'neg_output_mapping': neg_output_mapping,
-    }

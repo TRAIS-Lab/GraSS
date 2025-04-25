@@ -713,7 +713,7 @@ def main():
         cache_end_time = time.time(device)
 
     else:
-        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'LoGra', and 'dattri'.")
+        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'LoGra'.")
 
     if args.profile:
         cache_duration = cache_end_time - cache_start_time
