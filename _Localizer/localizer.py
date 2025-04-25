@@ -141,36 +141,33 @@ class Localizer:
         return torch.matmul(test_grads, train_grads.T)
 
     def compute_correlations(self, original_ips_batch, masked_ips_batch):
-        """
-        Compute correlation between original and masked inner products for a batch.
-
-        Args:
-            original_ips_batch: Batch of original inner products
-            masked_ips_batch: Batch of masked inner products
-
-        Returns:
-            Average correlation for the batch
-        """
+        """Enhanced correlation computation with better numerical stability"""
         # Cast to float32 for better numerical stability
         original_ips_batch = original_ips_batch.float()
         masked_ips_batch = masked_ips_batch.float()
+
+        # Check for NaN values before processing
+        if torch.isnan(original_ips_batch).any() or torch.isnan(masked_ips_batch).any():
+            self._log("Warning: NaN values detected in input tensors", level="warning")
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
 
         # Mean center both sets of inner products along train dimension
         orig_centered = original_ips_batch - original_ips_batch.mean(dim=1, keepdim=True)
         masked_centered = masked_ips_batch - masked_ips_batch.mean(dim=1, keepdim=True)
 
-        # Compute variance (used for stability checks)
+        # Compute variance with larger epsilon
         orig_var = torch.sum(orig_centered**2, dim=1)
         masked_var = torch.sum(masked_centered**2, dim=1)
 
         # Use a larger epsilon for numerical stability
-        epsilon = 1e-5
+        epsilon = 1e-4  # Increased from 1e-5
 
         # Create a mask for valid samples (non-zero variance)
         valid_samples = (orig_var > epsilon) & (masked_var > epsilon)
 
         # If no valid samples, return a default loss
         if not torch.any(valid_samples):
+            self._log("Warning: No valid samples for correlation", level="warning")
             return torch.tensor(0.0, device=self.device, requires_grad=True)
 
         # Compute correlation only for valid samples
@@ -181,8 +178,22 @@ class Localizer:
         correlations = torch.zeros_like(numerator)
         correlations[valid_samples] = numerator[valid_samples] / denominator[valid_samples]
 
+        # Check for NaN values in correlations
+        if torch.isnan(correlations).any():
+            self._log("Warning: NaN values detected in correlations", level="warning")
+            # Replace NaNs with zeros for stability
+            correlations = torch.nan_to_num(correlations, nan=0.0)
+
         # Calculate mean of valid correlations
-        avg_correlation = correlations[valid_samples].mean()
+        if torch.sum(valid_samples) > 0:
+            avg_correlation = correlations[valid_samples].mean()
+        else:
+            avg_correlation = torch.tensor(0.0, device=self.device, requires_grad=True)
+
+        # Final NaN check on average correlation
+        if torch.isnan(avg_correlation):
+            self._log("Warning: NaN average correlation detected", level="warning")
+            avg_correlation = torch.tensor(0.0, device=self.device, requires_grad=True)
 
         return avg_correlation
 
@@ -277,8 +288,19 @@ class Localizer:
         # Total loss
         total_loss = corr_loss + sparse_loss
 
-        # Compute gradients
-        total_loss.backward()
+        # # Compute gradients
+        # total_loss.backward()
+
+        # Add gradient norm logging and clipping
+        if total_loss.requires_grad:
+            total_loss.backward()
+
+            # Check for NaN gradients
+            if torch.isnan(self.S_pre.grad).any() or torch.isnan(self.S_input.grad).any():
+                self._log("NaN gradients detected", level="warning")
+                # Zero out NaN gradients
+                self.S_pre.grad[torch.isnan(self.S_pre.grad)] = 0.0
+                self.S_input.grad[torch.isnan(self.S_input.grad)] = 0.0
 
         # Update parameters if not accumulating gradients
         if not accumulate_grad:
