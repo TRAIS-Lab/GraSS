@@ -564,7 +564,7 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from Llama3_OWT.utils import SubsetSampler, batch_size, setup_projection_kwargs, count_total_tokens, result_filename
+    from Llama3_8B_OWT.utils import SubsetSampler, batch_size, setup_projection_kwargs, result_filename
 
     device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
@@ -573,7 +573,7 @@ def main():
     train_dataset = lm_datasets["train"]
     train_batch_size, _ = batch_size(args.baseline, args.tda)
 
-    train_dataset = train_dataset.select(range(200))
+    train_dataset = train_dataset.select(range(int(1_000_000_000 / block_size)))
     if args.debug: # toy dataset
         train_dataset = train_dataset.select(range(200))
 
@@ -581,7 +581,7 @@ def main():
     train_dataloader = DataLoader(
         train_dataset, collate_fn=default_data_collator, batch_size=train_batch_size, sampler=train_sampler
     )
-    train_tokens = count_total_tokens(train_dataloader)
+    train_tokens = block_size * len(train_dataset)
 
     throughput_stats = {}
 
@@ -611,7 +611,7 @@ def main():
 
         from _GradComp.influence_function import IFAttributor
         attributor = IFAttributor(
-            setting="Llama3_OWT",
+            setting="Llama3_8B_OWT",
             model=model,
             layer_names=layer_names,
             hessian=hessian,

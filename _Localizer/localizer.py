@@ -142,30 +142,74 @@ class Localizer:
         # Compute inner products using matrix multiplication
         return torch.matmul(test_grads, train_grads.T)
 
+    # def correlation_loss(self, original_ips, masked_ips):
+    #     """
+    #     Compute average correlation between original and masked inner products.
+
+    #     Args:
+    #         original_ips: Tensor of original inner products [n_test, n_train]
+    #         masked_ips: Tensor of masked inner products [n_test, n_train]
+
+    #     Returns:
+    #         Average negative correlation (for minimization)
+    #     """
+    #     # Mean center both sets of inner products along train dimension
+    #     orig_centered = original_ips - original_ips.mean(dim=1, keepdim=True)
+    #     masked_centered = masked_ips - masked_ips.mean(dim=1, keepdim=True)
+
+    #     print("orig_centered:", orig_centered)
+    #     print("masked_centered:", masked_centered)
+
+    #     # Compute correlation for each test gradient
+    #     numerator = torch.sum(orig_centered * masked_centered, dim=1)
+    #     denominator = torch.sqrt(torch.sum(orig_centered**2, dim=1) * torch.sum(masked_centered**2, dim=1) + 1e-8)
+    #     correlations = numerator / denominator
+    #     print("cor:", correlations)
+
+    #     # Average correlation across all test gradients
+    #     avg_correlation = correlations.mean()
+
+    #     # Return negative correlation (to minimize)
+    #     return -avg_correlation
+
     def correlation_loss(self, original_ips, masked_ips):
         """
         Compute average correlation between original and masked inner products.
-
-        Args:
-            original_ips: Tensor of original inner products [n_test, n_train]
-            masked_ips: Tensor of masked inner products [n_test, n_train]
-
-        Returns:
-            Average negative correlation (for minimization)
         """
+        # Cast to float32 for better numerical stability
+        original_ips = original_ips.float()
+        masked_ips = masked_ips.float()
+
         # Mean center both sets of inner products along train dimension
         orig_centered = original_ips - original_ips.mean(dim=1, keepdim=True)
         masked_centered = masked_ips - masked_ips.mean(dim=1, keepdim=True)
 
-        # Compute correlation for each test gradient
+        # Compute variance (used for stability checks)
+        orig_var = torch.sum(orig_centered**2, dim=1)
+        masked_var = torch.sum(masked_centered**2, dim=1)
+
+        # Use a larger epsilon for numerical stability
+        epsilon = 1e-5
+
+        # Create a mask for valid samples (non-zero variance)
+        valid_samples = (orig_var > epsilon) & (masked_var > epsilon)
+
+        # If no valid samples, return a default loss
+        if not torch.any(valid_samples):
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+
+        # Compute correlation only for valid samples
         numerator = torch.sum(orig_centered * masked_centered, dim=1)
-        denominator = torch.sqrt(torch.sum(orig_centered**2, dim=1) * torch.sum(masked_centered**2, dim=1) + 1e-8)
-        correlations = numerator / denominator
+        denominator = torch.sqrt(orig_var * masked_var + epsilon)
 
-        # Average correlation across all test gradients
-        avg_correlation = correlations.mean()
+        # Compute correlations with safety checks
+        correlations = torch.zeros_like(numerator)
+        correlations[valid_samples] = numerator[valid_samples] / denominator[valid_samples]
 
-        # Return negative correlation (to minimize)
+        # Calculate mean of valid correlations
+        avg_correlation = correlations[valid_samples].mean()
+
+        # Return negative correlation (for minimization)
         return -avg_correlation
 
     def sparsity_loss(self):

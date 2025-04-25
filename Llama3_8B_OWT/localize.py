@@ -27,7 +27,6 @@ import json
 import logging
 import math
 import os
-# os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import random
 from itertools import chain
 from pathlib import Path
@@ -206,12 +205,6 @@ def parse_args():
         help="cuda device to be used",
     )
     parser.add_argument(
-        "--cache_dir",
-        type=str,
-        default=None,
-        help="The directory where the downloaded models and datasets will be stored.",
-    )
-    parser.add_argument(
         "--layer",
         type=str,
         default="Linear",
@@ -278,12 +271,6 @@ def parse_args():
     if args.push_to_hub:
         if args.output_dir is None:
             raise ValueError("Need an `output_dir` to create a repo when `--push_to_hub` is passed.")
-
-    work_dir = os.environ.get("WORK")
-    cache_dir = os.path.join(work_dir, ".cache")
-    os.environ["HF_HOME"] = os.path.join(cache_dir, "hf_home")
-    os.environ["HF_DATASETS_CACHE"] = os.path.join(cache_dir, "hf_datasets_cache")
-    os.environ["TRANSFORMERS_CACHE"] = os.path.join(cache_dir, "transformers_cache")
 
     return args
 
@@ -441,6 +428,7 @@ def main():
             config=config,
             low_cpu_mem_usage=args.low_cpu_mem_usage,
             trust_remote_code=args.trust_remote_code,
+            torch_dtype=torch.float16,
         )
     else:
         logger.info("Training new model from scratch")
@@ -519,7 +507,7 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from Llama3_OWT.utils import SubsetSampler
+    from Llama3_8B_OWT.utils import SubsetSampler
     from _GradComp.utils import find_layers
     from _Localizer.gradient_extractor import GradientExtractor
     from _Localizer.localizer import Localizer
@@ -530,7 +518,7 @@ def main():
 
     # Dataset
     whole_train_dataset = lm_datasets["train"]
-    train_batch_size, test_batch_size = 1, 1
+    train_batch_size, test_batch_size = 4, 4
 
     # split the train_dataset into train and test further, with 80% for training and 20% for testing
     train_dataset = whole_train_dataset.select(range(int(args.loc_n * 0.8)))

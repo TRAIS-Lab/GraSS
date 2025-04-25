@@ -44,19 +44,6 @@ class SubsetSampler(Sampler):
         """
         return len(self.indices)
 
-def count_total_tokens(dataloader):
-    """Count the total number of tokens in a dataloader."""
-    total_tokens = 0
-    for batch in dataloader:
-        # Count non-padding tokens in input_ids
-        # Assuming attention_mask indicates which tokens are padding (1 for real tokens, 0 for padding)
-        if "attention_mask" in batch:
-            total_tokens += batch["attention_mask"].sum().item()
-        else:
-            # If no attention mask, count all tokens
-            total_tokens += batch["input_ids"].numel()
-    return total_tokens
-
 def setup_projection_kwargs(args, device):
     if args.projection is None:
         proj_method = "Identity"
@@ -99,16 +86,16 @@ def setup_projection_kwargs(args, device):
 def batch_size(baseline, tda):
     if baseline == "GC":
         if tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
-            train_batch_size = 1
-            test_batch_size = 1
+            train_batch_size = 4
+            test_batch_size = 4
     elif baseline == "LoGra":
         if tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
-            train_batch_size = 1
-            test_batch_size = 1
+            train_batch_size = 4
+            test_batch_size = 4
     elif baseline == "LogIX":
         if tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
-            train_batch_size = 32
-            test_batch_size = 32
+            train_batch_size = 4
+            test_batch_size = 4
     else:
         raise ValueError("Invalid baseline and tda combination.")
 
