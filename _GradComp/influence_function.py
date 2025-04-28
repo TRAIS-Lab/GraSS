@@ -21,7 +21,7 @@ from .projector import setup_model_projectors
 
 class IFAttributor:
     """
-    Optimized influence function calculator using hooks for efficient gradient projection.
+    Influence function calculator using hooks for efficient gradient projection.
     Works with standard PyTorch layers with support for different offloading strategies.
     """
 
