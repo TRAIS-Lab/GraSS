@@ -663,57 +663,8 @@ def main():
         else:
             attributor.cache(train_dataloader=train_dataloader)
 
-    elif args.baseline == "LogIX":
-        #check_min_version("4.46.0") # LogIX is built on top of 4.40.0, ignore the checking
-        from _LogIX.huggingface import LogIXArguments, patch_trainer
-
-        # get which Hessian to use
-        tda, hessian = args.tda.split("-")
-        hessian = hessian.lower()
-        assert tda == "IF", "LogIX only supports Influence Function now."
-        assert hessian in ["none", "raw", "kfac", "ekfac"], "Invalid Hessian type."
-        assert args.layer == "Linear", "LogIX only supports Linear setting now."
-        assert args.projection is not None, "LogIX requires projection method."
-
-        LogIXTrainer = patch_trainer(transformers.Trainer)
-
-        # 1. Computing EK-FAC factors for training data
-        model = model.cuda(device)
-        model.eval()
-
-        logix_args_train = LogIXArguments(
-            project=f"./LogIX/{args.projection}",
-            config=f"./LogIX/{args.projection}.yaml",
-            lora=True,
-            hessian=hessian,
-            save="grad",
-            train_data=True,
-            label_key="input_ids",
-        )
-        training_args = transformers.TrainingArguments(
-            output_dir=f"./LogIX/",
-            num_train_epochs=1,
-            per_device_train_batch_size=train_batch_size,
-            report_to="none",
-        )
-        trainer = LogIXTrainer(
-            model=model,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            data_collator=default_data_collator,
-            args=training_args,
-            logix_args=logix_args_train,
-        )
-
-        # Measure cache throughput
-        torch.cuda.synchronize(device)
-        cache_start_time = time.time()
-        trainer.extract_log()
-        torch.cuda.synchronize(device)
-        cache_end_time = time.time(device)
-
     else:
-        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'LoGra'.")
+        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX'.")
 
     if args.profile:
         cache_duration = cache_end_time - cache_start_time

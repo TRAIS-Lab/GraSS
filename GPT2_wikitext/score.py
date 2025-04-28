@@ -635,8 +635,9 @@ def main():
             hessian=hessian,
             profile=args.profile,
             device=device,
-            cpu_offload=True,
+            offload="disk",
             projector_kwargs=projector_kwargs,
+            ifvp_dir="./GradComp/ifvp_cache",
         )
 
         if args.profile:

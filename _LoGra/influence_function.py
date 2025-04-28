@@ -854,7 +854,7 @@ class IFAttributor:
                 Tuple[torch.Tensor, Dict]: The influence scores and profiling statistics
         """
         if self.train_gradients is None:
-            raise ValueError("No training gradients collected. Call collect_gradients first.")
+            raise ValueError("No training gradients collected. Call cache first.")
 
 
         test_gradients = self.collect_gradients(test_dataloader, dataset_type="test")
