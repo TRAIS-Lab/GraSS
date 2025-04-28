@@ -605,7 +605,6 @@ def main():
         tda, hessian = args.tda.split("-")
         hessian = hessian.lower()
         assert tda == "IF", "GradComp only supports Influence Function now."
-        assert hessian in ["none", "raw"], "Invalid Hessian type."
 
         layer_names = find_layers(model, args.layer, return_type="name")
 
@@ -617,8 +616,9 @@ def main():
             hessian=hessian,
             profile=args.profile,
             device=device,
-            cpu_offload=True,
             projector_kwargs=projector_kwargs,
+            offload="disk",
+            cache_dir="./GradComp/cache"
         )
 
         if args.profile:
@@ -630,38 +630,6 @@ def main():
             cache_end_time = time.time()
         else:
             attributor.cache(train_dataloader)
-
-    elif args.baseline == "LoGra":
-        check_min_version("4.46.0")
-        from _LoGra.influence_function import IFAttributor
-
-        # get which Hessian to use
-        tda, hessian = args.tda.split("-")
-        hessian = hessian.lower()
-        assert tda == "IF", "LoGra only supports Influence Function now."
-        assert hessian in ["none", "raw", "kfac", "ekfac"], "Invalid Hessian type."
-        assert args.layer == "Linear", "LoGra only supports Linear setting now."
-        assert args.projection is not None, "LoGra requires projection method."
-
-        attributor = IFAttributor(
-            model=model,
-            layer_type=args.layer, #TODO: fix to match
-            hessian=hessian,
-            profile=args.profile,
-            device=device,
-            cpu_offload=True,
-            projector_kwargs=projector_kwargs,
-        )
-
-        if args.profile:
-            # Measure cache throughput
-            torch.cuda.synchronize(device)
-            cache_start_time = time.time()
-            attributor.cache(train_dataloader=train_dataloader)
-            torch.cuda.synchronize(device)
-            cache_end_time = time.time()
-        else:
-            attributor.cache(train_dataloader=train_dataloader)
 
     else:
         raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX'.")
