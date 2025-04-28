@@ -624,7 +624,6 @@ def main():
         tda, hessian = args.tda.split("-")
         hessian = hessian.lower()
         assert tda == "IF", "GradComp only supports Influence Function now."
-        assert hessian in ["none", "raw"], "Invalid Hessian type."
 
         layer_names = find_layers(model, args.layer, return_type="name")
 
@@ -635,9 +634,9 @@ def main():
             hessian=hessian,
             profile=args.profile,
             device=device,
-            offload="disk",
             projector_kwargs=projector_kwargs,
-            ifvp_dir="./GradComp/ifvp_cache",
+            offload="disk",
+            cache_dir="./GradComp/cache",
         )
 
         if args.profile:
@@ -665,7 +664,6 @@ def main():
         tda, hessian = args.tda.split("-")
         hessian = hessian.lower()
         assert tda == "IF", "LoGra only supports Influence Function now."
-        assert hessian in ["none", "raw", "kfac", "ekfac"], "Invalid Hessian type."
         assert args.layer == "Linear", "LoGra only supports Linear setting now."
         assert args.projection is not None, "LoGra requires projection method."
 

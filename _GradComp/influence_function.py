@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any, Dict, Literal
 import os
 import time
 import threading
@@ -30,13 +30,13 @@ class IFAttributor:
         setting: str,
         model: nn.Module,
         layer_names: Union[str, List[str]],
-        hessian: str = "raw",
+        hessian: Literal["none", "raw", "kfac", "ekfac"] = "raw",
         damping: float = None,
         profile: bool = False,
         device: str = 'cpu',
-        offload: str = "none",
         projector_kwargs: Dict = None,
-        ifvp_dir: str = None,  # New parameter for custom IFVP directory
+        offload: Literal["none", "cpu", "disk"] = "none",
+        cache_dir: str = None,
     ) -> None:
         """
         Optimized Influence Function Attributor.
@@ -51,7 +51,7 @@ class IFAttributor:
             device (str): Device to run the model on. Defaults to 'cpu'.
             offload (str): Memory management strategy ("none", "cpu", "disk"). Defaults to "none".
             projector_kwargs (Dict): Keyword arguments for projector. Defaults to None.
-            ifvp_dir (str): Directory to save final IFVP files. Only used when offload="disk". Defaults to None.
+            cache_dir (str): Directory to save final IFVP files. Only used when offload="disk". Defaults to None.
         """
         self.setting = setting
         self.model = model
@@ -79,7 +79,7 @@ class IFAttributor:
         self.cpu_offload = offload in ["cpu", "disk"]
 
         # Store the IFVP directory
-        self.ifvp_dir = ifvp_dir
+        self.cache_dir = cache_dir
 
         self.projector_kwargs = projector_kwargs or {}
 
@@ -95,9 +95,9 @@ class IFAttributor:
             print(f"Using temporary directory for disk offload: {self.temp_dir}")
 
             # Create IFVP directory if specified and it doesn't exist
-            if self.ifvp_dir is not None:
-                os.makedirs(self.ifvp_dir, exist_ok=True)
-                print(f"Using custom directory for IFVP files: {self.ifvp_dir}")
+            if self.cache_dir is not None:
+                os.makedirs(self.cache_dir, exist_ok=True)
+                print(f"Using custom directory for IFVP files: {self.cache_dir}")
 
             # Add threading support for disk operations
             self.disk_queue = queue.Queue()
@@ -177,8 +177,8 @@ class IFAttributor:
 
         # Determine the directory to use
         # Use custom directory for IFVP files if specified
-        if self.ifvp_dir is not None and filename.startswith("layer_") and filename.endswith("_ifvp.pt"):
-            full_path = os.path.join(self.ifvp_dir, filename)
+        if self.cache_dir is not None and filename.startswith("layer_") and filename.endswith("_ifvp.pt"):
+            full_path = os.path.join(self.cache_dir, filename)
         else:
             full_path = os.path.join(self.temp_dir, filename)
 
@@ -195,8 +195,8 @@ class IFAttributor:
             start_time = time.time()
 
         # Try loading from IFVP directory first if applicable
-        if self.ifvp_dir is not None and filename.startswith("layer_") and filename.endswith("_ifvp.pt"):
-            full_path = os.path.join(self.ifvp_dir, filename)
+        if self.cache_dir is not None and filename.startswith("layer_") and filename.endswith("_ifvp.pt"):
+            full_path = os.path.join(self.cache_dir, filename)
             if not os.path.exists(full_path):
                 # Fall back to temp directory if file not found
                 full_path = os.path.join(self.temp_dir, filename)
@@ -256,7 +256,7 @@ class IFAttributor:
         Move IFVP files to the custom directory if specified.
         Called at the end of the cache method.
         """
-        if self.offload != "disk" or self.ifvp_dir is None:
+        if self.offload != "disk" or self.cache_dir is None:
             return
 
         # Find all IFVP files in the temp directory
@@ -266,7 +266,7 @@ class IFAttributor:
 
             if os.path.exists(temp_path):
                 # Copy to the custom directory
-                target_path = os.path.join(self.ifvp_dir, ifvp_filename)
+                target_path = os.path.join(self.cache_dir, ifvp_filename)
                 print(f"Moving IFVP file to custom directory: {target_path}")
                 shutil.copy2(temp_path, target_path)
 
