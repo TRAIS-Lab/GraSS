@@ -22,7 +22,7 @@ from .projector import setup_model_projectors
 class IFAttributor:
     """
     Optimized influence function calculator using hooks for efficient gradient projection.
-    Works with standard PyTorch layers with support for disk-based offloading.
+    Works with standard PyTorch layers with support for different offloading strategies.
     """
 
     def __init__(
@@ -39,18 +39,18 @@ class IFAttributor:
         cache_dir: str = None,
     ) -> None:
         """
-        Optimized Influence Function Attributor.
+        Influence Function Attributor.
 
         Args:
-            setting (str): The setting of the experiment
+            setting (str): The setting of the experiment. Used for logging and locating the directory.
             model (nn.Module): PyTorch model.
             layer_names (List[str]): Names of layers to attribute.
             hessian (str): Type of Hessian approximation ("none", "raw", "kfac", "ekfac"). Defaults to "raw".
             damping (float): Damping used when calculating the Hessian inverse. Defaults to None.
             profile (bool): Record time used in various parts of the algorithm run. Defaults to False.
             device (str): Device to run the model on. Defaults to 'cpu'.
-            offload (str): Memory management strategy ("none", "cpu", "disk"). Defaults to "none".
             projector_kwargs (Dict): Keyword arguments for projector. Defaults to None.
+            offload (str): Memory management strategy ("none", "cpu", "disk"). Defaults to "none".
             cache_dir (str): Directory to save final IFVP files. Only used when offload="disk". Defaults to None.
         """
         self.setting = setting
@@ -68,20 +68,11 @@ class IFAttributor:
         self.damping = damping
         self.profile = profile
         self.device = device
-
-        # Validate and set offload strategy
-        valid_offload_strategies = ["none", "cpu", "disk"]
-        if offload not in valid_offload_strategies:
-            raise ValueError(f"Invalid offload strategy: {offload}. Must be one of {valid_offload_strategies}")
+        self.projector_kwargs = projector_kwargs or {}
         self.offload = offload
-
-        # Keep cpu_offload for backwards compatibility
         self.cpu_offload = offload in ["cpu", "disk"]
-
-        # Store the IFVP directory
         self.cache_dir = cache_dir
 
-        self.projector_kwargs = projector_kwargs or {}
 
         self.full_train_dataloader = None
         self.hook_manager = None
@@ -102,7 +93,7 @@ class IFAttributor:
             # Add threading support for disk operations
             self.disk_queue = queue.Queue()
             self.disk_threads = []
-            self.disk_thread_count = 4  # Number of threads for parallel disk operations
+            self.disk_thread_count = 16
 
         # Initialize profiling stats
         if self.profile:
