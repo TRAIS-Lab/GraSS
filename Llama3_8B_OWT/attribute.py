@@ -626,7 +626,7 @@ def main():
             device=device,
             projector_kwargs=projector_kwargs,
             offload="disk",
-            cache_dir="/scratch/10367/pbb/Project/Sparse-Influence/Llama3_8B_OWT/GradComp/cache"
+            cache_dir=f"/scratch/10367/pbb/Project/Sparse-Influence/Llama3_8B_OWT/GradComp/{args.projection}/cache"
         )
 
         if args.profile:
