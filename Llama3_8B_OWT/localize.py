@@ -200,9 +200,9 @@ def parse_args():
     # >>>>>>>>>>>>>>>>>>>>> Customize Argument begins here >>>>>>>>>>>>>>>>>>>>>
     parser.add_argument(
         "--device",
-        type=int,
-        default=0,
-        help="cuda device to be used",
+        type=str,
+        default="cuda",
+        help="device to be used",
     )
     parser.add_argument(
         "--layer",
@@ -513,7 +513,15 @@ def main():
     from _Localizer.localizer import Localizer
     import gc
 
-    device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
+    if args.device.startswith("cuda"):
+        # Check if GPU is available
+        if not torch.cuda.is_available():
+            raise ValueError("CUDA is not available. Please check your CUDA installation.")
+        device = torch.device(args.device)
+    else:
+        assert args.device == "cpu", "Invalid device. Choose from 'cuda' or 'cpu'."
+        device = torch.device("cpu")
+
     torch.cuda.set_device(device)
 
     # Dataset
@@ -550,7 +558,6 @@ def main():
     # Process each layer individually to save memory
     for layer_idx, (module_name, layer) in enumerate(layers):
         logger.info(f"Processing layer {layer_idx + 1}/{len(layers)}: {module_name}")
-        print(layer)
 
         # Extract gradients for this specific layer (both train and test)
         train_components, test_components = extractor.extract_gradients_for_layer(
@@ -631,7 +638,6 @@ def main():
         # Save important indices
         output_file = os.path.join(output_dir, f'{module_name}.pt')
         torch.save(important_indices, output_file)
-        print(important_indices)
 
         # Clear memory
         del train_pre_activations, train_input_features, test_pre_activations, test_input_features

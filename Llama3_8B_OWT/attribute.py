@@ -255,9 +255,9 @@ def parse_args():
     # >>>>>>>>>>>>>>>>>>>>> Customize Argument begins here >>>>>>>>>>>>>>>>>>>>>
     parser.add_argument(
         "--device",
-        type=int,
-        default=0,
-        help="cuda device to be used",
+        type=str,
+        default="cuda",
+        help="device to be used",
     )
     parser.add_argument(
         "--profile",
@@ -566,7 +566,15 @@ def main():
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
     from Llama3_8B_OWT.utils import SubsetSampler, setup_projection_kwargs, result_filename
 
-    device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
+    if args.device.startswith("cuda"):
+        # Check if GPU is available
+        if not torch.cuda.is_available():
+            raise ValueError("CUDA is not available. Please check your CUDA installation.")
+        device = torch.device(args.device)
+    else:
+        assert args.device == "cpu", "Invalid device. Choose from 'cuda' or 'cpu'."
+        device = torch.device("cpu")
+
     torch.cuda.set_device(device)
 
     # Dataset

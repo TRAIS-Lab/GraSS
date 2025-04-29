@@ -201,13 +201,15 @@ class GradientExtractor:
             pre_act_tensor = torch.cat(pre_activations, dim=0).to(self.device)
             input_feat_tensor = torch.cat(input_features, dim=0).to(self.device)
 
+        # Get batch size from the tensor shape before potentially adding bias column
+        batch_size = input_feat_tensor.shape[0]
+
         # Only add bias term if the layer has bias
         if has_bias:
             if is_3d:
                 # For 3D tensors (batch_size, seq_length, features)
                 batch_size, seq_length, hidden_size = input_feat_tensor.shape
-
-                # Create ones tensor on the same device as input_feat_tensor
+                
                 ones = torch.ones(
                     batch_size, seq_length, 1,
                     device=input_feat_tensor.device,
@@ -216,9 +218,6 @@ class GradientExtractor:
                 input_feat_tensor = torch.cat([input_feat_tensor, ones], dim=2)
             else:
                 # For 2D tensors (batch_size, features)
-                batch_size = input_feat_tensor.shape[0]
-
-                # Create ones tensor on the same device as input_feat_tensor
                 ones = torch.ones(
                     batch_size, 1,
                     device=input_feat_tensor.device,
@@ -245,5 +244,4 @@ class GradientExtractor:
             'pre_activation': pre_act_tensor,
             'input_features': input_feat_tensor,
             'is_3d': is_3d,
-            'has_bias': has_bias  # Include this in the return dict for reference
         }
