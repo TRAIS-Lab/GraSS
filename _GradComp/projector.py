@@ -100,7 +100,6 @@ def setup_model_projectors(
     # Create projectors for each layer
     for module_id, (module_name, module) in enumerate(model.named_modules()):
         if module_name in layer_names:
-            print("module", module)
             idx = name_to_index[module_name]
             projector = ProjectorContainer(module_name, idx)
             base_seed = proj_seed + int(1e4) * module_id
@@ -112,7 +111,6 @@ def setup_model_projectors(
                     dim = kwargs_copy["proj_dim"]
                     mask_path = f"../{setting}/Localize/mask_{dim}*{dim}/{module_name}.pt"
                     active_indices = torch.load(mask_path, weights_only=False)
-                    print("active_indices", active_indices)
                 except FileNotFoundError:
                     print(f"Mask file not found for {module_name}. Random indices are used.")
                     active_indices = {

@@ -93,7 +93,7 @@ class IFAttributor:
             # Add threading support for disk operations
             self.disk_queue = queue.Queue()
             self.disk_threads = []
-            self.disk_thread_count = 8
+            self.disk_thread_count = 32
 
         # Initialize profiling stats
         if self.profile:

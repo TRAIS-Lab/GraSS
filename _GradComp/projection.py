@@ -526,8 +526,6 @@ class CudaProjector(AbstractProjector):
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
             result = features
         elif self.method == "Localize":
-            print(features.shape)
-            print(self.active_indices)
             features = features[:, self.active_indices]
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
             result = features
