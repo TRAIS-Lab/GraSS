@@ -83,24 +83,6 @@ def setup_projection_kwargs(args, device):
 
     return projector_kwargs
 
-def batch_size(baseline, tda):
-    if baseline == "GC":
-        if tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
-            train_batch_size = 4
-            test_batch_size = 4
-    elif baseline == "LoGra":
-        if tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
-            train_batch_size = 4
-            test_batch_size = 4
-    elif baseline == "LogIX":
-        if tda in ["IF-NONE", "IF-RAW", "IF-KFAC", "IF-EKFAC"]:
-            train_batch_size = 4
-            test_batch_size = 4
-    else:
-        raise ValueError("Invalid baseline and tda combination.")
-
-    return train_batch_size, test_batch_size
-
 def result_filename(args):
     filename_parts = []
 

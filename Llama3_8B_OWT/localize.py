@@ -550,6 +550,7 @@ def main():
     # Process each layer individually to save memory
     for layer_idx, (module_name, layer) in enumerate(layers):
         logger.info(f"Processing layer {layer_idx + 1}/{len(layers)}: {module_name}")
+        print(layer)
 
         # Extract gradients for this specific layer (both train and test)
         train_components, test_components = extractor.extract_gradients_for_layer(
@@ -630,6 +631,7 @@ def main():
         # Save important indices
         output_file = os.path.join(output_dir, f'{module_name}.pt')
         torch.save(important_indices, output_file)
+        print(important_indices)
 
         # Clear memory
         del train_pre_activations, train_input_features, test_pre_activations, test_input_features

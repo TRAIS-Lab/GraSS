@@ -563,7 +563,7 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from GPT2_wikitext.utils import SubsetSampler, batch_size, replace_conv1d_modules, setup_projection_kwargs, result_filename, lds
+    from GPT2_wikitext.utils import SubsetSampler, replace_conv1d_modules, setup_projection_kwargs, result_filename, lds
 
     if args.device.startswith("cuda"):
         # Check if GPU is available
@@ -579,7 +579,7 @@ def main():
     # Dataset
     train_dataset = lm_datasets["train"]
     test_dataset = lm_datasets["validation"]
-    train_batch_size, test_batch_size = batch_size(args.baseline, args.tda)
+    train_batch_size, test_batch_size = 32, 32
 
     if args.debug: # toy dataset
         train_dataset = train_dataset.select(range(200))

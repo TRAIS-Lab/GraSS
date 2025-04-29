@@ -121,6 +121,13 @@ class GradientExtractor:
         tensor_dims = None
         is_3d = None
 
+        # Get the layer from the model to check if it has bias
+        layer = dict(self.model.named_modules())[layer_name]
+        # Check if the layer has bias (works for nn.Linear, nn.Conv2d, etc.)
+        has_bias = hasattr(layer, 'bias') and layer.bias is not None
+
+        print(f"Layer {layer_name} has bias: {has_bias}")
+
         # Process each batch
         for batch_idx, batch in enumerate(tqdm(dataloader, desc=f"Processing {dataset_type} data")):
             # Zero gradients
@@ -194,29 +201,30 @@ class GradientExtractor:
             pre_act_tensor = torch.cat(pre_activations, dim=0).to(self.device)
             input_feat_tensor = torch.cat(input_features, dim=0).to(self.device)
 
-        # Handle bias term for linear layers by adding a column of ones
-        if is_3d:
-            # For 3D tensors (batch_size, seq_length, features)
-            batch_size, seq_length, hidden_size = input_feat_tensor.shape
+        # Only add bias term if the layer has bias
+        if has_bias:
+            if is_3d:
+                # For 3D tensors (batch_size, seq_length, features)
+                batch_size, seq_length, hidden_size = input_feat_tensor.shape
 
-            # Create ones tensor on the same device as input_feat_tensor
-            ones = torch.ones(
-                batch_size, seq_length, 1,
-                device=input_feat_tensor.device,
-                dtype=input_feat_tensor.dtype
-            )
-            input_feat_tensor = torch.cat([input_feat_tensor, ones], dim=2)
-        else:
-            # For 2D tensors (batch_size, features)
-            batch_size = input_feat_tensor.shape[0]
+                # Create ones tensor on the same device as input_feat_tensor
+                ones = torch.ones(
+                    batch_size, seq_length, 1,
+                    device=input_feat_tensor.device,
+                    dtype=input_feat_tensor.dtype
+                )
+                input_feat_tensor = torch.cat([input_feat_tensor, ones], dim=2)
+            else:
+                # For 2D tensors (batch_size, features)
+                batch_size = input_feat_tensor.shape[0]
 
-            # Create ones tensor on the same device as input_feat_tensor
-            ones = torch.ones(
-                batch_size, 1,
-                device=input_feat_tensor.device,
-                dtype=input_feat_tensor.dtype
-            )
-            input_feat_tensor = torch.cat([input_feat_tensor, ones], dim=1)
+                # Create ones tensor on the same device as input_feat_tensor
+                ones = torch.ones(
+                    batch_size, 1,
+                    device=input_feat_tensor.device,
+                    dtype=input_feat_tensor.dtype
+                )
+                input_feat_tensor = torch.cat([input_feat_tensor, ones], dim=1)
 
         # Scale by batch size for per-sample gradients
         pre_act_tensor = pre_act_tensor * batch_size
@@ -236,5 +244,6 @@ class GradientExtractor:
         return {
             'pre_activation': pre_act_tensor,
             'input_features': input_feat_tensor,
-            'is_3d': is_3d
+            'is_3d': is_3d,
+            'has_bias': has_bias  # Include this in the return dict for reference
         }

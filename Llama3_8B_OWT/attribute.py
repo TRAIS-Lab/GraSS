@@ -27,7 +27,7 @@ import json
 import logging
 import math
 import os
-# os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 import random
 from itertools import chain
 from pathlib import Path
@@ -564,14 +564,14 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from Llama3_8B_OWT.utils import SubsetSampler, batch_size, setup_projection_kwargs, result_filename
+    from Llama3_8B_OWT.utils import SubsetSampler, setup_projection_kwargs, result_filename
 
     device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
     torch.cuda.set_device(device)
 
     # Dataset
     train_dataset = lm_datasets["train"]
-    train_batch_size, _ = batch_size(args.baseline, args.tda)
+    train_batch_size = 2
 
     train_dataset = train_dataset.select(range(int(1_000_000_000 / block_size)))
     if args.debug: # toy dataset
@@ -618,7 +618,7 @@ def main():
             device=device,
             projector_kwargs=projector_kwargs,
             offload="disk",
-            cache_dir="./GradComp/cache"
+            cache_dir="/scratch/10367/pbb/Project/Sparse-Influence/Llama3_8B_OWT/GradComp/cache"
         )
 
         if args.profile:
@@ -632,7 +632,7 @@ def main():
             attributor.cache(train_dataloader)
 
     else:
-        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX'.")
+        raise ValueError("Invalid baseline implementation method. Choose from 'GC'.")
 
     if args.profile:
         cache_duration = cache_end_time - cache_start_time
