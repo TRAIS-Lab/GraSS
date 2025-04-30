@@ -244,12 +244,6 @@ def parse_args():
             "If passed, LLM loading time and RAM consumption will be benefited."
         ),
     )
-    parser.add_argument(
-        "--subset_ratio",
-        type=float,
-        default=1.0,
-        help="The ratio used for model training.",
-    )
 
     # >>>>>>>>>>>>>>>>>>>>> Customize Argument begins here >>>>>>>>>>>>>>>>>>>>>
     parser.add_argument(

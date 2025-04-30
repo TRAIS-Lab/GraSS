@@ -364,6 +364,35 @@ def parse_args():
 
     return args
 
+def process_data_in_batches(train_dataloader, num_workers=4):
+    """
+    Process a dataset in batches with custom range sizes.
+    Args:
+        train_dataloader: DataLoader for the training data
+        num_workers: Number of parallel workers to split the data between
+    Returns:
+        List of batch range tuples (start_batch, end_batch, worker_id) for each worker
+    """
+    # Calculate total number of batches
+    total_batches = len(train_dataloader)
+    print(f"Total number of batches: {total_batches}")
+
+    # Calculate batch range size for each worker
+    batch_size_per_worker = total_batches // num_workers
+    remaining_batches = total_batches % num_workers
+
+    # Create batch ranges - use worker_id as batch_id
+    batch_ranges = []
+    start_batch = 0
+    for worker_id in range(num_workers):
+        # Distribute remaining batches evenly
+        worker_batch_size = batch_size_per_worker + (1 if worker_id < remaining_batches else 0)
+        end_batch = start_batch + worker_batch_size
+        batch_ranges.append((start_batch, end_batch, worker_id))  # Include worker_id
+        print(f"Worker {worker_id}: Processing batches {start_batch} to {end_batch-1} (total: {worker_batch_size})")
+        start_batch = end_batch
+
+    return batch_ranges
 
 def main():
     args = parse_args()
