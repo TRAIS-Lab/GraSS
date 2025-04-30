@@ -114,6 +114,9 @@ class IFAttributor:
         # Initialize profiling stats
         self.profiling_stats = ProfilingStats() if self.profile else None
 
+        # Potentially data subset processing for cache_gradients()
+        self.batch_info = {}
+
     def _setup_projectors(self, train_dataloader: DataLoader) -> None:
         """
         Set up projectors for the model layers
@@ -174,8 +177,9 @@ class IFAttributor:
             data_type: str,
             layer_idx: int,
             is_temp: bool = False,
-            batch_idx: Optional[int] = None,
-            is_test: bool = False
+            batch_idx: Optional[int] = None,  # Keep for individual batch files
+            is_test: bool = False,
+            batch_id: Optional[int] = None    # Use for combined files from a worker
         ) -> str:
         """
         Generate a standardized file path for a specific data type and layer.
@@ -184,19 +188,25 @@ class IFAttributor:
             data_type: Type of data ('gradients', 'preconditioners', or 'ifvp')
             layer_idx: Index of the layer
             is_temp: Whether to use the temporary directory (default: False)
-            batch_idx: Optional batch index for batch-specific files
+            batch_idx: Optional batch index for individual batch files
             is_test: Whether this is for test data (default: False)
+            batch_id: Optional identifier for the worker/job processing a batch group
 
         Returns:
             Full path to the file
         """
         # Generate the filename based on data type and context
         if batch_idx is not None:
-            # Batch-specific filename
+            # Individual batch-specific filename
             prefix = "test_" if is_test else ""
             filename = f"{prefix}layer_{layer_idx}_batch_{batch_idx}.pt"
+
+            # Add batch_id if provided (for individual batch files within a worker)
+            if batch_id is not None:
+                base, ext = os.path.splitext(filename)
+                filename = f"{base}_worker_{batch_id}{ext}"
         else:
-            # Map data types to filename patterns
+            # Map data types to filename patterns for combined files
             type_config = {
                 'gradients': f"layer_{layer_idx}_grads.pt",
                 'preconditioners': (f"layer_{layer_idx}_precond.pt"
@@ -208,7 +218,11 @@ class IFAttributor:
             if data_type not in type_config:
                 raise ValueError(f"Unknown data type: {data_type}")
 
+            # Add batch_id if provided (for combined files from a worker)
             filename = type_config[data_type]
+            if batch_id is not None:
+                base, ext = os.path.splitext(filename)
+                filename = f"{base}_worker_{batch_id}{ext}"
 
         # Determine the base directory and path
         if is_temp or self.cache_dir is None:
@@ -283,7 +297,8 @@ class IFAttributor:
             is_temp: bool = True,
             save_async: bool = True,
             batch_idx: Optional[int] = None,
-            is_test: bool = False
+            is_test: bool = False,
+            batch_id: Optional[int] = None
         ) -> str:
         """
         Save a tensor to disk with standardized path handling.
@@ -296,6 +311,7 @@ class IFAttributor:
             save_async: Whether to save asynchronously using worker threads
             batch_idx: Optional batch index for batch-specific files
             is_test: Whether this is for test data (default: False)
+            batch_id: Optional identifier for the batch group when using parallel processing
 
         Returns:
             Path to the saved file
@@ -306,7 +322,8 @@ class IFAttributor:
         # Get the standardized path
         file_path = self._get_file_path(
             data_type, layer_idx, is_temp=is_temp,
-            batch_idx=batch_idx, is_test=is_test
+            batch_idx=batch_idx, is_test=is_test,
+            batch_id=batch_id
         )
 
         # Save the tensor
@@ -487,21 +504,27 @@ class IFAttributor:
         self,
         dataloader: DataLoader,
         is_test: bool = False,
-    ) -> List[List[Union[torch.Tensor, str]]]:
+        batch_range: Optional[Tuple[int, int]] = None,
+    ) -> Tuple[List[List[Union[torch.Tensor, str]]], List[int]]:
         """
         Compute projected gradients for a given dataloader.
 
         Args:
             dataloader: DataLoader for the data
-            is_test_data: Whether this is test data (affects file paths)
+            is_test: Whether this is test data (affects file paths)
+            batch_range: Optional tuple of (start_batch, end_batch) to process only a subset of batches
 
         Returns:
-            List of lists containing gradients (tensors or file paths) for each layer
+            Tuple of (per_layer_gradients, batch_sample_counts)
         """
         if is_test:
             desc = f"Computing gradients for test data"
         else:
             desc = f"Computing gradients for training data"
+
+        if batch_range is not None:
+            start_batch, end_batch = batch_range
+            desc += f" (batches {start_batch} to {end_batch-1})"
 
         # Initialize storage for gradients
         per_layer_gradients = [[] for _ in self.layer_names]
@@ -518,8 +541,32 @@ class IFAttributor:
             if self.projectors:
                 self.hook_manager.set_projectors(self.projectors)
 
-        # Iterate through the data to compute gradients
-        for batch_idx, batch in enumerate(tqdm(dataloader, desc=desc)):
+        # If batch_range is specified, we'll create a filtered iterator
+        if batch_range is not None:
+            start_batch, end_batch = batch_range
+            # Create a list of batches to process
+            batch_indices = list(range(start_batch, end_batch))
+            # Create description that reflects the actual work
+            actual_desc = f"{desc} ({len(batch_indices)} batches)"
+
+            # Prepare to collect batches
+            selected_batches = []
+
+            # First iterate through the dataloader to collect the batches we need
+            for batch_idx, batch in enumerate(dataloader):
+                if batch_idx in batch_indices:
+                    selected_batches.append((batch_idx, batch))
+                if batch_idx >= end_batch - 1:
+                    break  # No need to iterate further
+
+            # Now process only the selected batches with accurate tqdm
+            batch_iterator = tqdm(selected_batches, desc=actual_desc)
+        else:
+            # Process all batches
+            batch_iterator = tqdm(enumerate(dataloader), desc=desc, total=len(dataloader))
+
+        # Iterate through the selected batches
+        for batch_idx, batch in batch_iterator:
             # Zero gradients
             self.model.zero_grad()
 
@@ -581,6 +628,7 @@ class IFAttributor:
                         del grad
                     elif self.offload == "disk":
                         # Save batch to disk and store the path
+                        # Use the actual batch_idx for uniqueness in filenames
                         file_path = self._save_tensor(
                             grad.cpu(),
                             data_type='gradients',
@@ -604,10 +652,201 @@ class IFAttributor:
 
         return per_layer_gradients, batch_sample_counts
 
+    def _is_batched_processing_used(self) -> bool:
+        """
+        Check if the gradients were computed using parallel batch processing.
+
+        Returns:
+            True if batched processing was used, False otherwise
+        """
+        # First check in-memory batch info
+        if hasattr(self, 'batch_info') and self.batch_info:
+            return True
+
+        # Check for batch info files on disk
+        if self.offload == "disk" and self.cache_dir is not None:
+            batch_info_files = [f for f in os.listdir(self.cache_dir)
+                            if f.startswith("batch_info_") and f.endswith(".pt")]
+            return len(batch_info_files) > 0
+
+        return False
+
+    def _merge_batched_gradients(self, save: bool = True) -> List[TensorOrPath]:
+        """
+        Merge gradients that were processed in batches into a single combined gradient.
+
+        Args:
+            save: Whether to save the merged gradients to the cache directory
+
+        Returns:
+            List of merged gradients (tensors or file paths)
+        """
+        # Check if we have batch info in memory
+        if not hasattr(self, 'batch_info') or not self.batch_info:
+            # No batch info in memory, try to load from disk
+            if self.offload == "disk" and self.cache_dir is not None:
+                # Look for batch info files
+                try:
+                    batch_info_files = [f for f in os.listdir(self.cache_dir)
+                                    if f.startswith("batch_info_") and f.endswith(".pt")]
+                except FileNotFoundError:
+                    print(f"Warning: Cache directory {self.cache_dir} not found")
+                    batch_info_files = []
+
+                if not batch_info_files:
+                    # No batching was used, nothing to merge
+                    print("No batch information found. Using cached gradients as is.")
+                    return self.cached_raw_gradients if self.cached_raw_gradients else []
+
+                # Load batch info from files
+                self.batch_info = {}
+                for info_file in batch_info_files:
+                    file_path = os.path.join(self.cache_dir, info_file)
+                    info_data = torch.load(file_path)
+                    # Update batch info
+                    self.batch_info.update(info_data['batch_info'])
+
+                print(f"Loaded batch information for {len(self.batch_info)} batches from disk")
+            else:
+                # No batching was used, nothing to merge
+                print("No batch information found. Using cached gradients as is.")
+                return self.cached_raw_gradients if self.cached_raw_gradients else []
+
+        print(f"Merging gradients from {len(self.batch_info)} parallel batch processes...")
+
+        # Verify all batches are accounted for
+        batch_ids = sorted(self.batch_info.keys())
+        total_batch_ranges = []
+        for batch_id in batch_ids:
+            total_batch_ranges.extend(range(*self.batch_info[batch_id]['batch_range']))
+
+        # Find missing batches
+        min_batch = min(range(*self.batch_info[batch_ids[0]]['batch_range']))
+        max_batch = max(range(*self.batch_info[batch_ids[-1]]['batch_range'])) + 1
+        all_batches = set(range(min_batch, max_batch))
+        missing_batches = all_batches - set(total_batch_ranges)
+
+        if missing_batches:
+            print(f"Warning: Missing batches: {missing_batches}. Proceeding with available data.")
+
+        # Start disk worker threads if using disk offload
+        if self.offload == "disk":
+            self._start_disk_workers()
+
+        merged_gradients: List[Optional[TensorOrPath]] = []
+
+        # Calculate total samples across all batches
+        total_samples = sum(info['total_samples'] for info in self.batch_info.values())
+
+        # Process each layer
+        for layer_idx, layer_name in enumerate(self.layer_names):
+            # Check if any batch is missing this layer
+            layer_missing = False
+            batch_grads = []
+
+            for batch_id in batch_ids:
+                # Get gradient path for this batch - first try cache dir, then temp dir
+                if self.offload == "disk":
+                    # First check in cache dir
+                    if self.cache_dir is not None:
+                        grad_path = self._get_file_path('gradients', layer_idx, is_temp=False, batch_id=batch_id)
+                        if os.path.exists(grad_path):
+                            batch_grads.append((batch_id, grad_path))
+                            continue
+
+                    # Then check in temp dir
+                    grad_path = self._get_file_path('gradients', layer_idx, is_temp=True, batch_id=batch_id)
+                    if os.path.exists(grad_path):
+                        batch_grads.append((batch_id, grad_path))
+                        continue
+
+                    print(f"Warning: Missing gradient for layer {layer_name} in batch {batch_id}")
+                    layer_missing = True
+                else:
+                    # For in-memory storage, we should have the gradients in self.cached_raw_gradients
+                    # This would need to be refactored to support in-memory batching
+                    raise NotImplementedError(
+                        "In-memory merging not implemented. Please use disk offload for batched processing."
+                    )
+
+            if not batch_grads or layer_missing:
+                merged_gradients.append(None)
+                continue
+
+            if self.offload == "disk":
+                # Process and merge batches
+                sample_offset = 0
+                sample_shape = None
+                dtype = None
+
+                # First pass: determine shape and create output tensor
+                for batch_id, grad_path in batch_grads:
+                    # Load a sample to get shape and dtype
+                    batch_grad = self._load_tensor(grad_path)
+                    if sample_shape is None:
+                        sample_shape = batch_grad.shape[1:]
+                        dtype = batch_grad.dtype
+                    sample_offset += batch_grad.shape[0]
+                    del batch_grad
+
+                # Create merged tensor
+                merged_tensor = torch.zeros((total_samples, *sample_shape), dtype=dtype)
+
+                # Second pass: fill the merged tensor
+                sample_offset = 0
+                for batch_id, grad_path in batch_grads:
+                    batch_grad = self._load_tensor(grad_path)
+                    batch_samples = batch_grad.shape[0]
+                    # Get the expected position in the merged tensor
+                    batch_position = sum(
+                        self.batch_info[id]['total_samples']
+                        for id in batch_ids if id < batch_id
+                    )
+                    # Place the batch data in the correct position
+                    merged_tensor[batch_position:batch_position + batch_samples] = batch_grad
+                    del batch_grad
+
+                # Save the merged tensor
+                if save and self.cache_dir is not None:
+                    # Save to permanent cache
+                    file_path = self._save_tensor(
+                        merged_tensor,
+                        data_type='gradients',
+                        layer_idx=layer_idx,
+                        is_temp=False,  # Save to permanent cache
+                        save_async=False
+                    )
+                else:
+                    # Save to temp directory
+                    file_path = self._save_tensor(
+                        merged_tensor,
+                        data_type='gradients',
+                        layer_idx=layer_idx,
+                        is_temp=True,
+                        save_async=False
+                    )
+
+                merged_gradients.append(file_path)
+                del merged_tensor
+
+        # Stop disk workers if they were started
+        if self.offload == "disk":
+            self._stop_disk_workers()
+
+        # Update cached raw gradients
+        self.cached_raw_gradients = cast(List[TensorOrPath], merged_gradients)
+
+        # Clear batch info to indicate merging has been done
+        self.batch_info = {}
+
+        return cast(List[TensorOrPath], merged_gradients)
+
     def cache_gradients(
         self,
         train_dataloader: DataLoader,
-        save: bool = False
+        save: bool = False,
+        batch_range: Optional[Tuple[int, int]] = None,
+        batch_id: Optional[int] = None
     ) -> List[TensorOrPath]:
         """
         Cache raw projected gradients from training data to disk or memory.
@@ -615,11 +854,19 @@ class IFAttributor:
         Args:
             train_dataloader: DataLoader for the training data
             save: Whether to save combined gradients to the cache_dir/grad directory
+            batch_range: Optional tuple of (start_batch, end_batch) to process only a subset of batches
+            batch_id: Optional identifier for the batch group when using parallel processing
 
         Returns:
             List of tensors or filenames containing gradients for each layer
         """
-        print(f"Caching gradients from training data with offload strategy: {self.offload}...")
+        # Handle batch range
+        batch_msg = ""
+        if batch_range is not None:
+            start_batch, end_batch = batch_range
+            batch_msg = f" (processing batches {start_batch} to {end_batch})"
+
+        print(f"Caching gradients from training data with offload strategy: {self.offload}{batch_msg}...")
         self.full_train_dataloader = train_dataloader
 
         # Set up the projectors if not already done
@@ -635,8 +882,12 @@ class IFAttributor:
         if self.offload == "disk":
             self._start_disk_workers()
 
-        # Compute gradients using common function
-        per_layer_gradients, batch_sample_counts = self._compute_gradients(train_dataloader, is_test=False)
+        # Compute gradients using common function with batch range
+        per_layer_gradients, batch_sample_counts = self._compute_gradients(
+            train_dataloader,
+            is_test=False,
+            batch_range=batch_range
+        )
 
         # Process collected gradients
         gradients: List[Optional[TensorOrPath]] = []
@@ -652,12 +903,10 @@ class IFAttributor:
                 # Concatenate all batches for this layer (already on GPU)
                 grads = torch.cat(per_layer_gradients[layer_idx], dim=0)
                 gradients.append(grads)
-
             elif self.offload == "cpu":
                 # Concatenate all batches (on CPU)
                 grads = torch.cat(per_layer_gradients[layer_idx], dim=0)
                 gradients.append(grads.cpu())
-
             elif self.offload == "disk":
                 # Process from disk files (all in temp directory for speed)
                 file_list = per_layer_gradients[layer_idx]
@@ -678,7 +927,11 @@ class IFAttributor:
                         grad = self._load_tensor(file_path)
                         chunk_grads.append(grad)
 
-                    # Save or update combined gradients in temp directory
+                    # Save or update combined gradients
+                    # If save=True and batch_id is provided, save directly to cache_dir
+                    should_save_to_cache = save and batch_id is not None and self.cache_dir is not None
+                    target_is_temp = not should_save_to_cache
+
                     if chunk_start == 0:
                         if chunk_end == len(file_list):
                             # If this is the only chunk, save it directly
@@ -687,8 +940,9 @@ class IFAttributor:
                                 combined_tensor,
                                 data_type='gradients',
                                 layer_idx=layer_idx,
-                                is_temp=True,
-                                save_async=False
+                                is_temp=target_is_temp,
+                                save_async=False,
+                                batch_id=batch_id
                             )
                             combined_saved = True
                         else:
@@ -704,12 +958,18 @@ class IFAttributor:
                                 placeholder,
                                 data_type='gradients',
                                 layer_idx=layer_idx,
-                                is_temp=True,
-                                save_async=False
+                                is_temp=target_is_temp,
+                                save_async=False,
+                                batch_id=batch_id
                             )
                     elif not combined_saved:
                         # Update the placeholder with this chunk
-                        temp_path = self._get_file_path('gradients', layer_idx, is_temp=True)
+                        temp_path = self._get_file_path(
+                            'gradients',
+                            layer_idx,
+                            is_temp=target_is_temp,
+                            batch_id=batch_id
+                        )
                         placeholder = self._load_tensor(temp_path)
                         current_chunk = torch.cat(chunk_grads, dim=0)
                         start_idx = sum(batch_sample_counts[:chunk_start])
@@ -719,8 +979,9 @@ class IFAttributor:
                             placeholder,
                             data_type='gradients',
                             layer_idx=layer_idx,
-                            is_temp=True,
-                            save_async=False
+                            is_temp=target_is_temp,
+                            save_async=False,
+                            batch_id=batch_id
                         )
 
                     # Clean up memory
@@ -730,13 +991,40 @@ class IFAttributor:
                     if 'current_chunk' in locals():
                         del current_chunk
 
+                # Get the appropriate path based on save flag
+                if save and batch_id is not None and self.cache_dir is not None:
+                    file_path = self._get_file_path('gradients', layer_idx, is_temp=False, batch_id=batch_id)
+                else:
+                    file_path = self._get_file_path('gradients', layer_idx, is_temp=True, batch_id=batch_id)
+
                 # Reference the file path
-                gradients.append(self._get_file_path('gradients', layer_idx, is_temp=True))
+                gradients.append(file_path)
 
         print(f"Cached gradients for {len(self.layer_names)} modules")
 
         # Store the raw gradients
         self.cached_raw_gradients = cast(List[TensorOrPath], gradients)
+
+        # Store batch information for later merging
+        if batch_range is not None and batch_id is not None:
+            if not hasattr(self, 'batch_info'):
+                self.batch_info = {}
+
+            self.batch_info[batch_id] = {
+                'batch_range': batch_range,
+                'sample_counts': batch_sample_counts,
+                'total_samples': sum(batch_sample_counts)
+            }
+
+            # Always save batch info to disk when using batching
+            if self.offload == "disk" and self.cache_dir is not None:
+                os.makedirs(self.cache_dir, exist_ok=True)
+                batch_info_path = os.path.join(self.cache_dir, f"batch_info_{batch_id}.pt")
+                torch.save({
+                    'batch_info': {batch_id: self.batch_info[batch_id]},
+                    'layer_names': self.layer_names
+                }, batch_info_path)
+                print(f"Saved batch info to {batch_info_path}")
 
         # Remove hooks after collecting all gradients
         if self.hook_manager:
@@ -748,7 +1036,8 @@ class IFAttributor:
             self._stop_disk_workers()
 
         # Finalize gradients by moving to custom directory if requested
-        if save and self.cache_dir is not None and self.offload == "disk":
+        # Note: This is only needed for non-batched or if we didn't directly save to cache_dir
+        if save and self.cache_dir is not None and self.offload == "disk" and batch_id is None:
             self._finalize_cache(['gradients'])
 
         return cast(List[TensorOrPath], gradients)
@@ -765,17 +1054,18 @@ class IFAttributor:
         Returns:
             List of preconditioners for each layer (could be raw Hessian or inverse depending on type)
         """
-        if self.hessian == "none":
-            print("Skipping preconditioners computation as hessian type is 'none'")
-            return self.cached_raw_gradients if self.cached_raw_gradients else []
-
         print(f"Computing preconditioners with hessian type: {self.hessian}...")
 
-        # Use cached gradients if not provided
-        gradients = []
-        for layer_idx in range(len(self.layer_names)):
-            grad_ref = self._get_cached_data('gradients', layer_idx)
-            gradients.append(grad_ref)
+        # Check if gradients were processed in batches and merge if needed
+        if self._is_batched_processing_used():
+            print("Detected batched gradients. Merging before computing preconditioners...")
+            gradients = self._merge_batched_gradients(save=save)
+        else:
+            # Use cached gradients if not provided
+            gradients = []
+            for layer_idx in range(len(self.layer_names)):
+                grad_ref = self._get_cached_data('gradients', layer_idx)
+                gradients.append(grad_ref)
 
         if not gradients or all(grad is None for grad in gradients):
             raise ValueError("No cached gradients available. Call cache_gradients first.")
@@ -813,7 +1103,7 @@ class IFAttributor:
                         hessian_inv = stable_inverse(hessian, damping=damping)
                         preconditioners.append(hessian_inv)
                     elif self.hessian in ["kfac", "ekfac"]:
-                        preconditioners.append(hessian)
+                        preconditioners.append(hessian) #TODO
                     else:
                         raise ValueError(f"Unsupported Hessian approximation: {self.hessian}")
                 else:
@@ -854,7 +1144,7 @@ class IFAttributor:
                             hessian_inv = stable_inverse(hessian, damping=damping)
                             preconditioners.append(hessian_inv.cpu() if self.cpu_offload else hessian_inv)
                         elif self.hessian in ["kfac", "ekfac"]:
-                            preconditioners.append(hessian.cpu() if self.cpu_offload else hessian)
+                            preconditioners.append(hessian.cpu() if self.cpu_offload else hessian) #TODO
                         else:
                             raise ValueError(f"Unsupported Hessian approximation: {self.hessian}")
 
@@ -918,7 +1208,7 @@ class IFAttributor:
 
                             # Reference the file path
                             preconditioners.append(file_path)
-                        elif self.hessian in ["kfac", "ekfac"]:
+                        elif self.hessian in ["kfac", "ekfac"]: #TODO
                             # Save Hessian to disk
                             file_path = self._save_tensor(
                                 hessian.cpu(),
@@ -977,15 +1267,31 @@ class IFAttributor:
         # Return raw gradients if Hessian type is "none"
         if self.hessian == "none":
             print("Using raw gradients as IFVP since hessian type is 'none'")
-            return self.cached_raw_gradients if self.cached_raw_gradients else []
+
+            # Check if gradients were processed in batches and merge if needed
+            if self._is_batched_processing_used():
+                print("Detected batched gradients. Merging before returning as IFVP...")
+                merged_gradients = self._merge_batched_gradients(save=save)
+                # Explicitly store these as train_gradients
+                self.train_gradients = merged_gradients
+                return merged_gradients
+            else:
+                # Explicitly store cached_raw_gradients as train_gradients
+                self.train_gradients = self.cached_raw_gradients if self.cached_raw_gradients else []
+                return self.cached_raw_gradients if self.cached_raw_gradients else []
 
         print("Computing inverse-Hessian-vector products (IFVP)...")
 
-        # Get gradients
-        gradients = []
-        for layer_idx in range(len(self.layer_names)):
-            grad_ref = self._get_cached_data('gradients', layer_idx)
-            gradients.append(grad_ref)
+        # Check if gradients were processed in batches and merge if needed
+        if self._is_batched_processing_used():
+            print("Detected batched gradients. Merging before computing IFVP...")
+            gradients = self._merge_batched_gradients(save=save)
+        else:
+            # Get gradients
+            gradients = []
+            for layer_idx in range(len(self.layer_names)):
+                grad_ref = self._get_cached_data('gradients', layer_idx)
+                gradients.append(grad_ref)
 
         if not gradients or all(grad is None for grad in gradients):
             raise ValueError("No cached gradients available. Call cache_gradients first.")
@@ -1001,7 +1307,7 @@ class IFAttributor:
                     precond_ref = self._get_cached_data('preconditioners', layer_idx)
                     preconditioners.append(precond_ref)
 
-                if not any(preconditioners is not None for precond in preconditioners):
+                if not any(precond is not None for precond in preconditioners):
                     # Compute them if not found
                     preconditioners = self.compute_preconditioners()
             else:
@@ -1019,6 +1325,7 @@ class IFAttributor:
             torch.cuda.synchronize(self.device)
             start_time = time.time()
 
+        # Process each layer
         for layer_idx, layer_name in enumerate(self.layer_names):
             grads = gradients[layer_idx]
             precond = preconditioners[layer_idx]
@@ -1132,12 +1439,19 @@ class IFAttributor:
         if self.offload == "disk":
             self._stop_disk_workers()
 
-        # Store IFVP results
+        # Store IFVP results - ensure this is always set correctly
         self.train_gradients = cast(List[TensorOrPath], ifvp)
 
         # If we have a cache_dir, move files there if requested
         if save and self.cache_dir is not None and self.offload == "disk":
             self._finalize_cache(['ifvp'])
+
+        # Verify train_gradients is set correctly
+        if any(grad is None for grad in self.train_gradients):
+            print("Warning: Some layers have None gradients in IFVP results.")
+            for layer_idx, (name, grad) in enumerate(zip(self.layer_names, self.train_gradients)):
+                if grad is None:
+                    print(f"  Layer {layer_idx} ({name}): None")
 
         return cast(List[TensorOrPath], ifvp)
 
