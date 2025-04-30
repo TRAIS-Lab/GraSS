@@ -656,14 +656,14 @@ class IFAttributor:
             elif self.offload == "cpu":
                 # Concatenate all batches (on CPU)
                 grads = torch.cat(per_layer_gradients[layer_idx], dim=0)
-                gradients.append(grads)
+                gradients.append(grads.cpu())
 
             elif self.offload == "disk":
                 # Process from disk files (all in temp directory for speed)
                 file_list = per_layer_gradients[layer_idx]
 
                 # Process in chunks to avoid OOM
-                chunk_size = min(1024, len(file_list))
+                chunk_size = min(4096, len(file_list))
 
                 # Track whether we've saved the combined gradients
                 combined_saved = False
@@ -777,7 +777,7 @@ class IFAttributor:
             grad_ref = self._get_cached_data('gradients', layer_idx)
             gradients.append(grad_ref)
 
-        if not any(gradients):
+        if not gradients or all(grad is None for grad in gradients):
             raise ValueError("No cached gradients available. Call cache_gradients first.")
 
         # Use instance damping if not provided
@@ -987,7 +987,7 @@ class IFAttributor:
             grad_ref = self._get_cached_data('gradients', layer_idx)
             gradients.append(grad_ref)
 
-        if not any(gradients):
+        if not gradients or all(grad is None for grad in gradients):
             raise ValueError("No cached gradients available. Call cache_gradients first.")
 
         # First check if we have preconditioners cached in memory
@@ -1001,7 +1001,7 @@ class IFAttributor:
                     precond_ref = self._get_cached_data('preconditioners', layer_idx)
                     preconditioners.append(precond_ref)
 
-                if not any(preconditioners):
+                if not any(preconditioners is not None for precond in preconditioners):
                     # Compute them if not found
                     preconditioners = self.compute_preconditioners()
             else:
@@ -1210,7 +1210,7 @@ class IFAttributor:
                             ifvp_train.append(ifvp_ref)
 
                         # If we couldn't find all layers, compute IFVP
-                        if not any(ifvp_train):
+                        if not any(ifvp is not None for ifvp in ifvp_train):
                             print("No cached IFVP found. Computing from raw gradients...")
                             # Compute IFVP (handles all Hessian types internally)
                             ifvp_train = self.compute_ifvp()
