@@ -252,95 +252,17 @@ def parse_args():
     )
 
     # >>>>>>>>>>>>>>>>>>>>> Customize Argument begins here >>>>>>>>>>>>>>>>>>>>>
-    # Worker specific arguments
     parser.add_argument(
-        "--worker_id",
+        "--num_workers",
         type=int,
-        default=None,
-        help="Worker ID (if provided directly)"
+        default=4,
+        help="Number of workers to divide processing among"
     )
     parser.add_argument(
-        "--start_batch",
-        type=int,
-        default=None,
-        help="Start batch index (if provided directly)"
-    )
-    parser.add_argument(
-        "--end_batch",
-        type=int,
-        default=None,
-        help="End batch index (if provided directly)"
-    )
-    parser.add_argument(
-        "--batch_range_file",
+        "--output_file",
         type=str,
-        default=None,
-        help="JSON file containing batch range info"
-    )
-
-    # General arguments
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda",
-        help="device to be used",
-    )
-    parser.add_argument(
-        "--profile",
-        action="store_true",
-        help="Record profiling results.",
-    )
-    parser.add_argument(
-        "--baseline",
-        type=str,
-        default="GC",
-        help="Specify which baseline library implementation we want to run the data attribution method. Available options: GC, LoGra, dattri.",
-    )
-    parser.add_argument(
-        "--tda",
-        type=str,
-        default="IF-GC",
-        help="Specify which mode we want to run the data attribution method. Available options: IF-{GC,LoGra}, GD-{IF,dattri}, TRAK-{dattri}.",
-    )
-    parser.add_argument(
-        "--layer",
-        type=str,
-        default="Linear",
-        help="Layer used for attribution.",
-    )
-    parser.add_argument(
-        "--cache_dir",
-        type=str,
-        default=None,
-        help="Directory to store cache files"
-    )
-    parser.add_argument(
-        "--reverse",
-        action="store_true",
-        help="Reverse the order of iterating through the training and test set to save memory.",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Debug mode.",
-    )
-    parser.add_argument(
-        "--projection",
-        type=str,
-        default=None,
-        help="The projection method to be used when attributing. Basic format: 'proj_method-proj_dim' for non-factorized gradient and 'proj_method-proj_dim*proj_dim' for factorized gradient.",
-    )
-    parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.0,
-        help="Threshold to be used for projection when attributing.",
-    )
-    parser.add_argument(
-        "--random_drop",
-        type=float,
-        default=0.0,
-        help="Randomly drop the specified percentage of the projection input dimensions.",
+        default="batch_ranges.json",
+        help="File to save batch ranges"
     )
 
     args = parser.parse_args()
@@ -364,6 +286,35 @@ def parse_args():
 
     return args
 
+def process_data_in_batches(train_dataloader, num_workers=4):
+    """
+    Process a dataset in batches with custom range sizes.
+    Args:
+        train_dataloader: DataLoader for the training data
+        num_workers: Number of parallel workers to split the data between
+    Returns:
+        List of batch range tuples (start_batch, end_batch, worker_id) for each worker
+    """
+    # Calculate total number of batches
+    total_batches = len(train_dataloader)
+    print(f"Total number of batches: {total_batches}")
+
+    # Calculate batch range size for each worker
+    batch_size_per_worker = total_batches // num_workers
+    remaining_batches = total_batches % num_workers
+
+    # Create batch ranges - use worker_id as batch_id
+    batch_ranges = []
+    start_batch = 0
+    for worker_id in range(num_workers):
+        # Distribute remaining batches evenly
+        worker_batch_size = batch_size_per_worker + (1 if worker_id < remaining_batches else 0)
+        end_batch = start_batch + worker_batch_size
+        batch_ranges.append((start_batch, end_batch, worker_id))  # Include worker_id
+        print(f"Worker {worker_id}: Processing batches {start_batch} to {end_batch-1} (total: {worker_batch_size})")
+        start_batch = end_batch
+
+    return batch_ranges
 
 def main():
     args = parse_args()
@@ -596,126 +547,38 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from Llama3_8B_OWT.utils import SubsetSampler, setup_projection_kwargs, result_filename
-
-    if args.device.startswith("cuda"):
-        # Check if GPU is available
-        if not torch.cuda.is_available():
-            raise ValueError("CUDA is not available. Please check your CUDA installation.")
-        device = torch.device(args.device)
-    else:
-        assert args.device == "cpu", "Invalid device. Choose from 'cuda' or 'cpu'."
-        device = torch.device("cpu")
-
-    torch.cuda.set_device(device)
+    from Llama3_8B_OWT.utils import SubsetSampler
 
     # Dataset
     train_dataset = lm_datasets["train"]
     train_batch_size = 2
 
     train_dataset = train_dataset.select(range(int(1_000_000_000 / block_size)))
-    if args.debug: # toy dataset
-        train_dataset = train_dataset.select(range(200))
 
     train_sampler = SubsetSampler(range(len(train_dataset)))
     train_dataloader = DataLoader(
         train_dataset, collate_fn=default_data_collator, batch_size=train_batch_size, sampler=train_sampler
     )
-    train_tokens = block_size * len(train_dataset)
+    # Calculate batch ranges
+    batch_ranges = process_data_in_batches(train_dataloader, args.num_workers)
 
-    throughput_stats = {}
+    # Convert batch ranges to serializable format
+    serializable_ranges = [{"start_batch": start, "end_batch": end, "worker_id": wid}
+                           for start, end, wid in batch_ranges]
 
-    projector_kwargs = setup_projection_kwargs(args, device)
+    # Save to JSON file
+    with open(args.output_file, 'w') as f:
+        json.dump(serializable_ranges, f)
 
-     # Configure cache directory
-    if args.cache_dir is None:
-        cache_dir = f"/scratch/10367/pbb/Project/Sparse-Influence/Llama3_8B_OWT/GradComp/{args.projection}/cache"
-    else:
-        cache_dir = args.cache_dir
+    print(f"Batch ranges saved to {args.output_file}")
 
-    # Load batch range information
-    if args.batch_range_file is not None:
-        with open(args.batch_range_file, 'r') as f:
-            batch_info = json.load(f)
-        worker_id = batch_info["worker_id"]
-        start_batch = batch_info["start_batch"]
-        end_batch = batch_info["end_batch"]
-    elif args.worker_id is not None and args.start_batch is not None and args.end_batch is not None:
-        worker_id = args.worker_id
-        start_batch = args.start_batch
-        end_batch = args.end_batch
-    else:
-        raise ValueError("Must provide either batch_range_file or worker_id, start_batch, and end_batch")
+    # Also save as individual files for each worker
+    os.makedirs("batch_ranges", exist_ok=True)
+    for start, end, wid in batch_ranges:
+        with open(f"batch_ranges/worker_{wid}.json", 'w') as f:
+            json.dump({"start_batch": start, "end_batch": end, "worker_id": wid}, f)
 
-    # Logging setting
-    logger.info(f"The train dataset length: {len(train_dataset)}.")
-    logger.info(f"The train batch size: {train_batch_size}")
-    logger.info(f"TDA Method: {args.baseline}-{args.tda}")
-    logger.info(f"Projector: {projector_kwargs}")
-    logger.info(f"Layer: {args.layer}")
-    logger.info(f"Cache directory: {cache_dir}")
-    logger.info("***** Running attribution *****")
-
-    profile = None
-    if args.baseline == "GC":
-        check_min_version("4.46.0")
-        from _GradComp.utils import find_layers
-        from _GradComp.influence_function import IFAttributor
-
-        # get which Hessian to use
-        tda, hessian = args.tda.split("-")
-        hessian = hessian.lower()
-        assert tda == "IF", "GradComp only supports Influence Function now."
-
-        layer_names = find_layers(model, args.layer, return_type="name")
-
-        from _GradComp.influence_function import IFAttributor
-        attributor = IFAttributor(
-            setting="Llama3_8B_OWT",
-            model=model,
-            layer_names=layer_names,
-            hessian=hessian,
-            profile=args.profile,
-            device=device,
-            projector_kwargs=projector_kwargs,
-            offload="disk",
-            cache_dir=cache_dir
-        )
-
-        if args.profile:
-            # Measure cache throughput
-            torch.cuda.synchronize(device)
-            cache_start_time = time.time()
-            attributor.cache_gradients(
-                    train_dataloader,
-                    batch_range=(start_batch, end_batch),
-                    batch_id=worker_id,
-                    save=True,
-                )
-            torch.cuda.synchronize(device)
-            cache_end_time = time.time()
-        else:
-            attributor.cache_gradients(train_dataloader)
-
-    else:
-        raise ValueError("Invalid baseline implementation method. Choose from 'GC'.")
-
-    if args.profile:
-        cache_duration = cache_end_time - cache_start_time
-        cache_throughput = train_tokens / cache_duration
-        throughput_stats["cache"] = {
-            "tokens": train_tokens,
-            "duration_seconds": cache_duration,
-            "throughput_tokens_per_second": cache_throughput
-        }
-
-    logger.info("***** Attribution finished *****")
-
-    result = {"profile": profile, "throughput": throughput_stats}
-    logger.info(result)
-
-    if not args.debug: # only save the results when not in debug mode
-        torch.save(result, result_filename(args))
+    print(f"Individual batch range files saved in batch_ranges/ directory")
 
 if __name__ == "__main__":
     main()
