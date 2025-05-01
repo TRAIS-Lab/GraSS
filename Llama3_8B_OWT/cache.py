@@ -342,6 +342,12 @@ def parse_args():
         default=0.0,
         help="Randomly drop the specified percentage of the projection input dimensions.",
     )
+    parser.add_argument(
+        "--worker",
+        type=str,
+        default="1/1",
+        help="The setup of the worker: format: {worker_id}/{total_workers}.",
+    )
 
     args = parser.parse_args()
 
@@ -363,36 +369,6 @@ def parse_args():
             raise ValueError("Need an `output_dir` to create a repo when `--push_to_hub` is passed.")
 
     return args
-
-def process_data_in_batches(train_dataloader, num_workers=4):
-    """
-    Process a dataset in batches with custom range sizes.
-    Args:
-        train_dataloader: DataLoader for the training data
-        num_workers: Number of parallel workers to split the data between
-    Returns:
-        List of batch range tuples (start_batch, end_batch, worker_id) for each worker
-    """
-    # Calculate total number of batches
-    total_batches = len(train_dataloader)
-    print(f"Total number of batches: {total_batches}")
-
-    # Calculate batch range size for each worker
-    batch_size_per_worker = total_batches // num_workers
-    remaining_batches = total_batches % num_workers
-
-    # Create batch ranges - use worker_id as batch_id
-    batch_ranges = []
-    start_batch = 0
-    for worker_id in range(num_workers):
-        # Distribute remaining batches evenly
-        worker_batch_size = batch_size_per_worker + (1 if worker_id < remaining_batches else 0)
-        end_batch = start_batch + worker_batch_size
-        batch_ranges.append((start_batch, end_batch, worker_id))  # Include worker_id
-        print(f"Worker {worker_id}: Processing batches {start_batch} to {end_batch-1} (total: {worker_batch_size})")
-        start_batch = end_batch
-
-    return batch_ranges
 
 def main():
     args = parse_args()
@@ -625,7 +601,7 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from Llama3_8B_OWT.utils import SubsetSampler, setup_projection_kwargs, result_filename
+    from Llama3_8B_OWT.utils import SubsetSampler, get_worker_batch_range, setup_projection_kwargs, result_filename
 
     if args.device.startswith("cuda"):
         # Check if GPU is available
@@ -662,19 +638,8 @@ def main():
     else:
         cache_dir = args.cache_dir
 
-    # Load batch range information
-    if args.batch_range_file is not None:
-        with open(args.batch_range_file, 'r') as f:
-            batch_info = json.load(f)
-        worker_id = batch_info["worker_id"]
-        start_batch = batch_info["start_batch"]
-        end_batch = batch_info["end_batch"]
-    elif args.worker_id is not None and args.start_batch is not None and args.end_batch is not None:
-        worker_id = args.worker_id
-        start_batch = args.start_batch
-        end_batch = args.end_batch
-    else:
-        raise ValueError("Must provide either batch_range_file or worker_id, start_batch, and end_batch")
+    # Get the batch range for this worker
+    batch_id, batch_range = get_worker_batch_range(train_dataloader, args.worker)
 
     # Logging setting
     logger.info(f"The train dataset length: {len(train_dataset)}.")
@@ -717,8 +682,8 @@ def main():
             cache_start_time = time.time()
             attributor.cache_gradients(
                     train_dataloader,
-                    batch_range=(start_batch, end_batch),
-                    batch_id=worker_id,
+                    batch_range=batch_range,
+                    batch_id=batch_id,
                     save=True,
                 )
             torch.cuda.synchronize(device)
