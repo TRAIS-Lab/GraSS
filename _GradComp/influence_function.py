@@ -671,6 +671,36 @@ class IFAttributor:
 
         return False
 
+    def _should_merge_gradients(self) -> bool:
+        """
+        Check if gradients need to be merged.
+
+        Returns:
+            True if batched processing was used and merged files don't exist yet
+        """
+        # First check if batched processing was used
+        if not self._is_batched_processing_used():
+            return False
+
+        # Then check if merged files already exist
+        for layer_idx in range(len(self.layer_names)):
+            # Try to find merged gradient file in cache dir first
+            if self.cache_dir is not None:
+                merged_path = self._get_file_path('gradients', layer_idx, is_temp=False)
+                if os.path.exists(merged_path):
+                    # Found merged file in cache dir, no need to merge
+                    return False
+
+            # Then check temp dir
+            if self.offload == "disk":
+                merged_path = self._get_file_path('gradients', layer_idx, is_temp=True)
+                if os.path.exists(merged_path):
+                    # Found merged file in temp dir, no need to merge
+                    return False
+
+        # If we got here, we need to merge
+        return True
+
     def _merge_batched_gradients(self, save: bool = True) -> List[TensorOrPath]:
         """
         Merge gradients that were processed in batches into a single combined gradient.
@@ -1057,8 +1087,8 @@ class IFAttributor:
         print(f"Computing preconditioners with hessian type: {self.hessian}...")
 
         # Check if gradients were processed in batches and merge if needed
-        if self._is_batched_processing_used():
-            print("Detected batched gradients. Merging before computing preconditioners...")
+        if self._should_merge_gradients():
+            print("Detected unmerged batched gradients. Merging before computing preconditioners...")
             gradients = self._merge_batched_gradients(save=save)
         else:
             # Use cached gradients if not provided
@@ -1269,8 +1299,8 @@ class IFAttributor:
             print("Using raw gradients as IFVP since hessian type is 'none'")
 
             # Check if gradients were processed in batches and merge if needed
-            if self._is_batched_processing_used():
-                print("Detected batched gradients. Merging before returning as IFVP...")
+            if self._should_merge_gradients():
+                print("Detected unmerged batched gradients. Merging before returning as IFVP...")
                 merged_gradients = self._merge_batched_gradients(save=save)
                 # Explicitly store these as train_gradients
                 self.train_gradients = merged_gradients
@@ -1283,8 +1313,8 @@ class IFAttributor:
         print("Computing inverse-Hessian-vector products (IFVP)...")
 
         # Check if gradients were processed in batches and merge if needed
-        if self._is_batched_processing_used():
-            print("Detected batched gradients. Merging before computing IFVP...")
+        if self._should_merge_gradients():
+            print("Detected unmerged batched gradients. Merging before computing IFVP...")
             gradients = self._merge_batched_gradients(save=save)
         else:
             # Get gradients
