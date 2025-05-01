@@ -601,7 +601,7 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from Llama3_8B_OWT.utils import SubsetSampler, get_worker_batch_range, setup_projection_kwargs, result_filename
+    from Llama3_8B_OWT.utils import SubsetSampler, FilePromptDataset, get_worker_batch_range, prompt_collate_fn, generate_text, setup_projection_kwargs, find_top_k_influential, result_filename
 
     if args.device.startswith("cuda"):
         # Check if GPU is available
@@ -616,7 +616,9 @@ def main():
 
     # Dataset
     train_dataset = lm_datasets["train"]
-    train_batch_size = 2
+    prompt_dataset = FilePromptDataset("./prompts/", tokenizer, block_size)
+
+    train_batch_size, test_batch_size = 2, 2
 
     train_dataset = train_dataset.select(range(int(1_000_000_000 / block_size)))
     if args.debug: # toy dataset
@@ -626,7 +628,15 @@ def main():
     train_dataloader = DataLoader(
         train_dataset, collate_fn=default_data_collator, batch_size=train_batch_size, sampler=train_sampler
     )
+    test_dataloader = DataLoader(
+        prompt_dataset,
+        collate_fn=lambda batch: prompt_collate_fn(batch, tokenizer),
+        batch_size=test_batch_size,
+        shuffle=False
+    )
     train_tokens = block_size * len(train_dataset)
+
+    train_test_pairs = len(train_dataset) * len(prompt_dataset)
 
     throughput_stats = {}
 
@@ -649,6 +659,26 @@ def main():
     logger.info(f"Layer: {args.layer}")
     logger.info(f"Cache directory: {cache_dir}")
     logger.info("***** Running attribution *****")
+
+    # Generate text for each prompt and save to files
+    generated_texts = []
+    model.eval()
+    for i in range(len(prompt_dataset)):
+        prompt = prompt_dataset.get_raw_prompt(i)
+        file_idx = prompt_dataset.get_file_index(i)
+
+        # Generate response
+        generated_text = generate_text(model, tokenizer, prompt, max_new_tokens=200, device=device)
+        generated_texts.append(generated_text)
+
+        # Save response to file
+        response_file = os.path.join("./results/", f"response_{file_idx}.txt")
+        with open(response_file, 'w', encoding='utf-8') as f:
+            f.write(generated_text)
+
+        logger.info(f"Prompt {file_idx}: {prompt[:100]}...")
+        logger.info(f"Generated: {generated_text[:100]}...")
+        logger.info("-" * 50)
 
     profile = None
     if args.baseline == "GC":
@@ -686,8 +716,16 @@ def main():
                     batch_id=batch_id,
                     save=True,
                 )
+            attributor.compute_ifvp(save=True)
             torch.cuda.synchronize(device)
             cache_end_time = time.time()
+
+            # Measure attribute throughput
+            torch.cuda.synchronize(device)
+            attribute_start_time = time.time()
+            score, profile = attributor.attribute(test_dataloader=test_dataloader)
+            torch.cuda.synchronize(device)
+            attribute_end_time = time.time()
         else:
             attributor.cache_gradients(train_dataloader)
 
@@ -703,10 +741,32 @@ def main():
             "throughput_tokens_per_second": cache_throughput
         }
 
+        attribute_duration = attribute_end_time - attribute_start_time
+        attribute_throughput = train_test_pairs / attribute_duration
+        throughput_stats["attribute"] = {
+            "train_test_pairs": train_test_pairs,
+            "duration_seconds": attribute_duration,
+            "throughput_pair_per_second": attribute_throughput
+        }
+
     logger.info("***** Attribution finished *****")
 
-    result = {"profile": profile, "throughput": throughput_stats}
+    result = {"score": score, "profile": profile, "throughput": throughput_stats}
     logger.info(result)
+
+    # Find top 100 influential examples
+    top_100_influential = find_top_k_influential(score, k=100)
+
+    # Save to file
+    influential_file = os.path.join("./results/", "influential.json")
+    with open(influential_file, 'w', encoding='utf-8') as f:
+        json.dump({
+            "top_influential": [{"train_idx": idx, "score": float(score)} for idx, score in top_100_influential],
+            "prompts": {i: prompt_dataset.get_raw_prompt(i) for i in range(len(prompt_dataset))},
+            "file_indices": [prompt_dataset.get_file_index(i) for i in range(len(prompt_dataset))]
+        }, f, indent=2)
+
+    logger.info(f"Saved top 100 influential training examples to {influential_file}")
 
     if not args.debug: # only save the results when not in debug mode
         torch.save(result, result_filename(args))

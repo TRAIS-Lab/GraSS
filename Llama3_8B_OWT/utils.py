@@ -6,11 +6,14 @@ if TYPE_CHECKING:
     from typing import Iterator, List
 
 import torch
-from torch.utils.data import Sampler
+from torch.utils.data import Sampler, Dataset, DataLoader
+
+import os
+import json
 
 import numpy as np
-from scipy.stats import spearmanr
-import csv
+from collections import defaultdict
+import heapq
 
 class SubsetSampler(Sampler):
     """Samples elements from a predefined list of indices.
@@ -43,6 +46,49 @@ class SubsetSampler(Sampler):
             The number of indices in the sampler.
         """
         return len(self.indices)
+
+class FilePromptDataset(Dataset):
+    def __init__(self, prompt_dir, tokenizer, block_size):
+        self.tokenized_prompts = []
+        self.raw_prompts = []
+        self.file_indices = []
+
+        # Read all prompt files from the directory
+        for filename in sorted(os.listdir(prompt_dir)):
+            if filename.isdigit() or (filename.endswith('.txt') and filename[:-4].isdigit()):
+                file_index = int(filename.split('.')[0])
+                file_path = os.path.join(prompt_dir, filename)
+
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    prompt = f.read().strip()
+
+                # Store the raw prompt and its file index
+                self.raw_prompts.append(prompt)
+                self.file_indices.append(file_index)
+
+                # Tokenize the prompt
+                inputs = tokenizer(prompt, return_tensors="pt", padding=False, truncation=True,
+                                  max_length=block_size)
+
+                # Create a dictionary with input_ids and attention_mask
+                self.tokenized_prompts.append({
+                    "input_ids": inputs["input_ids"][0],
+                    "attention_mask": inputs["attention_mask"][0] if "attention_mask" in inputs else None
+                })
+
+    def __len__(self):
+        return len(self.tokenized_prompts)
+
+    def __getitem__(self, idx):
+        return self.tokenized_prompts[idx]
+
+    def get_raw_prompt(self, idx):
+        """Returns the raw text of the prompt at the given index."""
+        return self.raw_prompts[idx]
+
+    def get_file_index(self, idx):
+        """Returns the file index of the prompt at the given index."""
+        return self.file_indices[idx]
 
 def get_worker_batch_range(train_dataloader, worker_arg="1/1"):
     """
@@ -133,6 +179,104 @@ def setup_projection_kwargs(args, device):
     }
 
     return projector_kwargs
+
+# Function to generate text from prompts
+def generate_text(model, tokenizer, prompt, max_new_tokens=100, temperature=0.7, device="cuda"):
+    """Generate text from a given prompt using the model."""
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+
+    # Generate text
+    with torch.no_grad():
+        output = model.generate(
+            inputs["input_ids"],
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            do_sample=True,
+            pad_token_id=tokenizer.eos_token_id
+        )
+
+    # Decode and return the generated text
+    generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
+
+    return generated_text
+
+# Custom collate function to handle variable length inputs
+def prompt_collate_fn(batch, tokenizer):
+    """
+    Custom collate function that handles variable length inputs.
+
+    Args:
+        batch: List of items from the dataset
+        tokenizer: The tokenizer object for padding
+    """
+    max_length = max(item["input_ids"].size(0) for item in batch)
+
+    input_ids = []
+    attention_mask = []
+
+    for item in batch:
+        padding_length = max_length - item["input_ids"].size(0)
+
+        # Pad input_ids
+        padded_input_ids = torch.cat([
+            item["input_ids"],
+            torch.ones(padding_length, dtype=torch.long) * tokenizer.pad_token_id
+        ])
+        input_ids.append(padded_input_ids)
+
+        # Pad attention_mask if it exists
+        if item["attention_mask"] is not None:
+            padded_attention_mask = torch.cat([
+                item["attention_mask"],
+                torch.zeros(padding_length, dtype=torch.long)
+            ])
+            attention_mask.append(padded_attention_mask)
+
+    batch_dict = {
+        "input_ids": torch.stack(input_ids),
+        "labels": torch.stack(input_ids).clone()  # Use the same input_ids as labels for attribution
+    }
+
+    if attention_mask:
+        batch_dict["attention_mask"] = torch.stack(attention_mask)
+
+    return batch_dict
+
+# Function to find top k influential training examples
+def find_top_k_influential(scores, k=100):
+    """
+    Find the top k most influential training examples based on attribution scores.
+
+    Args:
+        scores: Dictionary or tensor of attribution scores
+        k: Number of top examples to return
+
+    Returns:
+        List of tuples (train_idx, score) for the top k influential examples
+    """
+    if isinstance(scores, dict):
+        # If scores is a dictionary mapping test_idx -> (train_idx -> score)
+        # We need to aggregate across all test examples
+        aggregated_scores = defaultdict(float)
+
+        for test_idx, train_scores in scores.items():
+            for train_idx, score in train_scores.items():
+                aggregated_scores[train_idx] += abs(score)  # Use absolute value for influence
+
+    elif isinstance(scores, torch.Tensor):
+        # If scores is a tensor of shape [num_test, num_train]
+        aggregated_scores = {}
+        for train_idx in range(scores.size(1)):
+            # Sum absolute influence across all test examples
+            aggregated_scores[train_idx] = torch.sum(torch.abs(scores[:, train_idx])).item()
+
+    else:
+        raise ValueError("Unsupported score format")
+
+    # Get the top k indices
+    top_k = heapq.nlargest(k, aggregated_scores.items(), key=lambda x: x[1])
+
+    return top_k
 
 def result_filename(args):
     filename_parts = []
