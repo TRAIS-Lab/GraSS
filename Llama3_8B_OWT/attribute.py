@@ -677,7 +677,6 @@ def main():
 
     # Generate text for each prompt and save to files
     generated_texts = []
-    model.eval()
     for i in range(len(prompt_dataset)):
         prompt = prompt_dataset.get_raw_prompt(i)
         file_idx = prompt_dataset.get_file_index(i)
@@ -687,7 +686,7 @@ def main():
         generated_texts.append(generated_text)
 
         # Save response to file
-        response_file = os.path.join("./results/", f"response_{file_idx}.txt")
+        response_file = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/", f"response_{file_idx}.txt")
         with open(response_file, 'w', encoding='utf-8') as f:
             f.write(generated_text)
 
@@ -776,7 +775,7 @@ def main():
     top_100_influential = find_top_k_influential(score, k=100)
 
     # Save to file
-    influential_file = os.path.join("./results/", "influential.json")
+    influential_file = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/", "influential.json")
     with open(influential_file, 'w', encoding='utf-8') as f:
         json.dump({
             "top_influential": [{"train_idx": idx, "score": float(score)} for idx, score in top_100_influential],

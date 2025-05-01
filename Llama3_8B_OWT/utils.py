@@ -183,6 +183,8 @@ def setup_projection_kwargs(args, device):
 # Function to generate text from prompts
 def generate_text(model, tokenizer, prompt, max_new_tokens=100, temperature=0.7, device="cuda"):
     """Generate text from a given prompt using the model."""
+    model.eval()
+    model.to(device)
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
 
     # Generate text
