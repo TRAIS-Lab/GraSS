@@ -592,8 +592,6 @@ def main():
     test_dataloader = DataLoader(
         test_dataset, collate_fn=default_data_collator, batch_size=test_batch_size, shuffle=False
     )
-    train_tokens = block_size * len(train_dataset)
-    train_test_pairs = len(train_dataset) * len(test_dataset)
 
     throughput_stats = {}
 
@@ -639,23 +637,23 @@ def main():
             cache_dir="./GradComp/cache",
         )
 
-        if args.profile:
-            # Measure cache throughput
-            torch.cuda.synchronize(device)
-            cache_start_time = time.time()
-            attributor.cache_gradients(train_dataloader, save=True)
-            attributor.compute_ifvp(save=True)
-            torch.cuda.synchronize(device)
-            cache_end_time = time.time()
+        # Measure cache throughput
+        torch.cuda.synchronize(device)
+        cache_start_time = time.time()
+        attributor.cache_gradients(train_dataloader, save=True)
+        attributor.compute_ifvp(save=True)
+        torch.cuda.synchronize(device)
+        cache_end_time = time.time()
 
-            # Measure attribute throughput
-            torch.cuda.synchronize(device)
-            attribute_start_time = time.time()
+        # Measure attribute throughput
+        torch.cuda.synchronize(device)
+        attribute_start_time = time.time()
+        if args.profile:
             score, profile = attributor.attribute(test_dataloader=test_dataloader)
-            torch.cuda.synchronize(device)
-            attribute_end_time = time.time()
         else:
-            score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
+            score = attributor.attribute(test_dataloader=test_dataloader)
+        torch.cuda.synchronize(device)
+        attribute_end_time = time.time()
 
     elif args.baseline == "LoGra":
         check_min_version("4.46.0")
@@ -678,22 +676,22 @@ def main():
             projector_kwargs=projector_kwargs,
         )
 
-        if args.profile:
-            # Measure cache throughput
-            torch.cuda.synchronize(device)
-            cache_start_time = time.time()
-            attributor.cache(train_dataloader=train_dataloader)
-            torch.cuda.synchronize(device)
-            cache_end_time = time.time()
+        # Measure cache throughput
+        torch.cuda.synchronize(device)
+        cache_start_time = time.time()
+        attributor.cache(train_dataloader=train_dataloader)
+        torch.cuda.synchronize(device)
+        cache_end_time = time.time()
 
-           # Measure attribute throughput
-            torch.cuda.synchronize(device)
-            attribute_start_time = time.time()
+        # Measure attribute throughput
+        torch.cuda.synchronize(device)
+        attribute_start_time = time.time()
+        if args.profile:
             score, profile = attributor.attribute(test_dataloader=test_dataloader)
-            torch.cuda.synchronize(device)
-            attribute_end_time = time.time()
         else:
-            score = attributor.attribute(train_dataloader=train_dataloader, test_dataloader=test_dataloader)
+            score = attributor.attribute(test_dataloader=test_dataloader)
+        torch.cuda.synchronize(device)
+        attribute_end_time = time.time()
 
     elif args.baseline == "LogIX":
         #check_min_version("4.46.0") # LogIX is built on top of 4.40.0, ignore the checking
@@ -786,22 +784,25 @@ def main():
     else:
         raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'LoGra'.")
 
-    if args.profile:
-        cache_duration = cache_end_time - cache_start_time
-        cache_throughput = train_tokens / cache_duration
-        throughput_stats["cache"] = {
-            "tokens": train_tokens,
-            "duration_seconds": cache_duration,
-            "throughput_tokens_per_second": cache_throughput
-        }
+    # Calculate throughput
+    train_tokens = block_size * len(train_dataset)
+    train_test_pairs = len(train_dataset) * len(test_dataset)
 
-        attribute_duration = attribute_end_time - attribute_start_time
-        attribute_throughput = train_test_pairs / attribute_duration
-        throughput_stats["attribute"] = {
-            "train_test_pairs": train_test_pairs,
-            "duration_seconds": attribute_duration,
-            "throughput_pair_per_second": attribute_throughput
-        }
+    cache_duration = cache_end_time - cache_start_time
+    cache_throughput = train_tokens / cache_duration
+    throughput_stats["cache"] = {
+        "tokens": train_tokens,
+        "duration_seconds": cache_duration,
+        "throughput_tokens_per_second": cache_throughput
+    }
+
+    attribute_duration = attribute_end_time - attribute_start_time
+    attribute_throughput = train_test_pairs / attribute_duration
+    throughput_stats["attribute"] = {
+        "train_test_pairs": train_test_pairs,
+        "duration_seconds": attribute_duration,
+        "throughput_pair_per_second": attribute_throughput
+    }
 
     training_setting = args.output_dir.split("/")[-1]
     lds_score, _, _ = lds(score, training_setting)

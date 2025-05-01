@@ -649,9 +649,6 @@ def main():
         batch_size=test_batch_size,
         shuffle=False
     )
-    train_tokens = block_size * len(train_dataset)
-
-    train_test_pairs = len(train_dataset) * len(prompt_dataset)
 
     throughput_stats = {}
 
@@ -720,36 +717,154 @@ def main():
             cache_dir=cache_dir
         )
 
-        if args.profile:
+        if args.cache:
             # Measure cache throughput
             torch.cuda.synchronize(device)
             cache_start_time = time.time()
-            if args.cache:
-                attributor.cache_gradients(
-                        train_dataloader,
-                        batch_range=batch_range,
-                        batch_id=batch_id,
-                        save=True,
-                    )
-            if args.precondition:
-                attributor.compute_ifvp(save=True)
+            attributor.cache_gradients(
+                    train_dataloader,
+                    batch_range=batch_range,
+                    batch_id=batch_id,
+                    save=True,
+                )
             torch.cuda.synchronize(device)
             cache_end_time = time.time()
+
+        if args.precondition:
+            # Measure precondition throughput
+            torch.cuda.synchronize(device)
+            precondition_start_time = time.time()
+            attributor.compute_ifvp(save=True)
+            torch.cuda.synchronize(device)
+            precondition_end_time = time.time()
+
+        if args.attribute:
+            # Measure attribute throughput
+            torch.cuda.synchronize(device)
+            attribute_start_time = time.time()
+            if args.profile:
+                score, profile = attributor.attribute(test_dataloader=test_dataloader)
+            else:
+                score = attributor.attribute(test_dataloader=test_dataloader)
+            torch.cuda.synchronize(device)
+            attribute_end_time = time.time()
+
+        if args.attribute:
+            logger.info(f"Retrieving the top 100 influential examples for each prompt.")
+            # Find top 100 influential examples
+            top_100_influential = find_top_k_influential(score, k=100)
+
+            # Save to file
+            influential_file = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/", "influential.json")
+            with open(influential_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "top_influential": [{"train_idx": idx, "score": float(score)} for idx, score in top_100_influential],
+                    "prompts": {i: prompt_dataset.get_raw_prompt(i) for i in range(len(prompt_dataset))},
+                    "file_indices": [prompt_dataset.get_file_index(i) for i in range(len(prompt_dataset))]
+                }, f, indent=2)
+
+            logger.info(f"Saved top 100 influential training examples to {influential_file}")
+
+    elif args.baseline == "LogIX": #Only used for comparing the throughput, so some of the code are sloppy (specifically, how we get the subset of dataloader)
+        from _LogIX.huggingface import LogIXArguments, patch_trainer
+
+        # get which Hessian to use
+        tda, hessian = args.tda.split("-")
+        hessian = hessian.lower()
+        assert tda == "IF", "LogIX only supports Influence Function now."
+        assert hessian in ["none", "raw", "kfac", "ekfac"], "Invalid Hessian type."
+        assert args.layer == "Linear", "LogIX only supports Linear setting now."
+        assert args.projection is not None, "LogIX requires projection method."
+
+        model_cpy = model
+        if args.cache:
+            LogIXTrainer = patch_trainer(transformers.Trainer)
+
+            model = model.to(device)
+            model.eval()
+
+            logix_args_train = LogIXArguments(
+                project=f"./LogIX/{args.projection}",
+                config=f"./LogIX/{args.projection}.yaml",
+                lora=True,
+                hessian=hessian,
+                save="grad",
+                train_data=True,
+                label_key="input_ids",
+            )
+            training_args = transformers.TrainingArguments(
+                output_dir=f"./LogIX/",
+                num_train_epochs=1,
+                per_device_train_batch_size=train_batch_size,
+                report_to="none",
+            )
+            trainer = LogIXTrainer(
+                model=model,
+                tokenizer=tokenizer,
+                train_dataset=train_dataset,
+                data_collator=default_data_collator,
+                args=training_args,
+                logix_args=logix_args_train,
+            )
+            # Measure cache throughput
+            torch.cuda.synchronize(device)
+            cache_start_time = time.time()
+            trainer.extract_log()
+            torch.cuda.synchronize(device)
+            cache_end_time = time.time(device)
+
+        model = model_cpy # Reset the model to the original one (removing LoRA)
+        if args.precondition:
+            raise NotImplementedError("Standalone Precondition is not implemented for LogIX.")
+
+        model = model_cpy # Reset the model to the original one (removing LoRA)
+        if args.attribute:
+            model = model.to(device)
+            model.eval()
+            logix_args_test = LogIXArguments(
+                project=f"./LogIX/{args.projection}",
+                config=f"./LogIX/{args.projection}.yaml",
+                lora=True,
+                hessian=hessian,
+                save="grad",
+                train_data=False,
+                label_key="input_ids",
+                initialize_from_log=True,
+                log_batch_size=32,
+            )
+            training_args = transformers.TrainingArguments(
+                output_dir=f"./LogIX/",
+                num_train_epochs=1,
+                per_device_train_batch_size=test_batch_size,
+                report_to="none",
+                gradient_accumulation_steps=1,
+            )
+            trainer = LogIXTrainer(
+                model=model,
+                tokenizer=tokenizer,
+                train_dataset=prompt_dataset,
+                data_collator=default_data_collator,
+                args=training_args,
+                logix_args=logix_args_test,
+            )
 
             # Measure attribute throughput
             torch.cuda.synchronize(device)
             attribute_start_time = time.time()
-            if args.attribute:
-                score, profile = attributor.attribute(test_dataloader=test_dataloader)
+            result = trainer.influence()
             torch.cuda.synchronize(device)
             attribute_end_time = time.time()
-        else:
-            attributor.cache_gradients(train_dataloader)
+
+            score = result["influence"].T
 
     else:
-        raise ValueError("Invalid baseline implementation method. Choose from 'GC'.")
+        raise ValueError("Invalid baseline implementation method. Choose from 'GC' and 'LogIX'.")
 
-    if args.profile:
+    # Calculate throughput
+    train_tokens = block_size * len(train_dataset) / int(args.worker.split("/")[1])
+    train_test_pairs = len(train_dataset) * len(prompt_dataset)
+
+    if args.cache:
         cache_duration = cache_end_time - cache_start_time
         cache_throughput = train_tokens / cache_duration
         throughput_stats["cache"] = {
@@ -758,6 +873,16 @@ def main():
             "throughput_tokens_per_second": cache_throughput
         }
 
+    if args.precondition:
+        precondition_duration = precondition_end_time - precondition_start_time
+        precondition_throughput = train_test_pairs / precondition_duration
+        throughput_stats["precondition"] = {
+            "train_test_pairs": train_test_pairs,
+            "duration_seconds": precondition_duration,
+            "throughput_pair_per_second": precondition_throughput
+        }
+
+    if args.attribute:
         attribute_duration = attribute_end_time - attribute_start_time
         attribute_throughput = train_test_pairs / attribute_duration
         throughput_stats["attribute"] = {
@@ -770,20 +895,6 @@ def main():
 
     result = {"score": score, "profile": profile, "throughput": throughput_stats}
     logger.info(result)
-
-    # Find top 100 influential examples
-    top_100_influential = find_top_k_influential(score, k=100)
-
-    # Save to file
-    influential_file = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/", "influential.json")
-    with open(influential_file, 'w', encoding='utf-8') as f:
-        json.dump({
-            "top_influential": [{"train_idx": idx, "score": float(score)} for idx, score in top_100_influential],
-            "prompts": {i: prompt_dataset.get_raw_prompt(i) for i in range(len(prompt_dataset))},
-            "file_indices": [prompt_dataset.get_file_index(i) for i in range(len(prompt_dataset))]
-        }, f, indent=2)
-
-    logger.info(f"Saved top 100 influential training examples to {influential_file}")
 
     if not args.debug: # only save the results when not in debug mode
         torch.save(result, result_filename(args))

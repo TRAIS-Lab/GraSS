@@ -739,7 +739,7 @@ class IFAttributor:
         total_samples = sum(info['total_samples'] for info in self.batch_info.values())
 
         # Process each layer
-        for layer_idx, layer_name in enumerate(self.layer_names):
+        for layer_idx, layer_name in tqdm(enumerate(self.layer_names), desc="Merging gradients"):
             # Check if any batch is missing this layer
             layer_missing = False
             batch_grads = []
