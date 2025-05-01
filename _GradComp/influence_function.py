@@ -769,7 +769,7 @@ class IFAttributor:
         total_samples = sum(info['total_samples'] for info in self.batch_info.values())
 
         # Process each layer
-        for layer_idx, layer_name in tqdm(enumerate(self.layer_names), desc="Merging gradients"):
+        for layer_idx, layer_name in tqdm(enumerate(self.layer_names), desc="Merging gradients", total=len(self.layer_names)):
             # Check if any batch is missing this layer
             layer_missing = False
             batch_grads = []
@@ -1115,7 +1115,7 @@ class IFAttributor:
             torch.cuda.synchronize(self.device)
             start_time = time.time()
 
-        for layer_idx, layer_name in enumerate(self.layer_names):
+        for layer_idx, layer_name in tqdm(enumerate(self.layer_names), desc="Processing layers", total=len(self.layer_names)):
             grads = gradients[layer_idx]
 
             if grads is None:
@@ -1199,7 +1199,7 @@ class IFAttributor:
                     hessian_accumulator = None
 
                     # Process in chunks
-                    chunk_size = min(64, grads_tensor.shape[0])
+                    chunk_size = min(1024, grads_tensor.shape[0])
                     for chunk_start in range(0, grads_tensor.shape[0], chunk_size):
                         chunk_end = min(chunk_start + chunk_size, grads_tensor.shape[0])
 
@@ -1221,7 +1221,7 @@ class IFAttributor:
 
                     # Finalize Hessian
                     if hessian_accumulator is not None:
-                        hessian = hessian_accumulator / len(self.full_train_dataloader.sampler)
+                        hessian = hessian_accumulator / grads_tensor.shape[0]
 
                         # Process based on Hessian type
                         if self.hessian == "raw":
@@ -1595,7 +1595,7 @@ class IFAttributor:
             self.hook_manager.remove_hooks()
             self.hook_manager = None
 
-        for layer_idx in tqdm(range(len(self.layer_names)), desc="Processing layers"):
+        for layer_idx, layer_name in tqdm(enumerate(self.layer_names), desc="Processing layers", total=len(self.layer_names)):
             # Skip if no test gradients for this layer
             if not per_layer_test_gradients[layer_idx]:
                 continue
