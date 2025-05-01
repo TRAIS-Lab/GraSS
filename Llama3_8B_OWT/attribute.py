@@ -348,6 +348,21 @@ def parse_args():
         default="1/1",
         help="The setup of the worker: format: {worker_id}/{total_workers}.",
     )
+    parser.add_argument(
+        "--cache",
+        action="store_true",
+        help="Caching Gradient.",
+    )
+    parser.add_argument(
+        "--precondition",
+        action="store_true",
+        help="Precondition.",
+    )
+    parser.add_argument(
+        "--attribute",
+        action="store_true",
+        help="Attributing.",
+    )
 
     args = parser.parse_args()
 
@@ -680,7 +695,7 @@ def main():
         logger.info(f"Generated: {generated_text[:100]}...")
         logger.info("-" * 50)
 
-    profile = None
+    score, profile = None, None
     if args.baseline == "GC":
         check_min_version("4.46.0")
         from _GradComp.utils import find_layers
@@ -710,20 +725,23 @@ def main():
             # Measure cache throughput
             torch.cuda.synchronize(device)
             cache_start_time = time.time()
-            attributor.cache_gradients(
-                    train_dataloader,
-                    batch_range=batch_range,
-                    batch_id=batch_id,
-                    save=True,
-                )
-            attributor.compute_ifvp(save=True)
+            if args.cache:
+                attributor.cache_gradients(
+                        train_dataloader,
+                        batch_range=batch_range,
+                        batch_id=batch_id,
+                        save=True,
+                    )
+            if args.precondition:
+                attributor.compute_ifvp(save=True)
             torch.cuda.synchronize(device)
             cache_end_time = time.time()
 
             # Measure attribute throughput
             torch.cuda.synchronize(device)
             attribute_start_time = time.time()
-            score, profile = attributor.attribute(test_dataloader=test_dataloader)
+            if args.attribute:
+                score, profile = attributor.attribute(test_dataloader=test_dataloader)
             torch.cuda.synchronize(device)
             attribute_end_time = time.time()
         else:
