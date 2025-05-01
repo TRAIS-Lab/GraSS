@@ -1309,7 +1309,7 @@ class IFAttributor:
 
                 if not any(precond is not None for precond in preconditioners):
                     # Compute them if not found
-                    preconditioners = self.compute_preconditioners()
+                    preconditioners = self.compute_preconditioners(save=True)
             else:
                 # Compute them if not found
                 preconditioners = self.compute_preconditioners()

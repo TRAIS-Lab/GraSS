@@ -311,7 +311,7 @@ def parse_args():
     parser.add_argument(
         "--cache_dir",
         type=str,
-        default=None,
+        default="./cache/",
         help="Directory to store cache files"
     )
     parser.add_argument(
@@ -654,12 +654,6 @@ def main():
 
     projector_kwargs = setup_projection_kwargs(args, device)
 
-     # Configure cache directory
-    if args.cache_dir is None:
-        cache_dir = f"/scratch/10367/pbb/Project/Sparse-Influence/Llama3_8B_OWT/GradComp/{args.projection}/cache"
-    else:
-        cache_dir = args.cache_dir
-
     # Get the batch range for this worker
     batch_id, batch_range = get_worker_batch_range(train_dataloader, args.worker)
 
@@ -669,27 +663,8 @@ def main():
     logger.info(f"TDA Method: {args.baseline}-{args.tda}")
     logger.info(f"Projector: {projector_kwargs}")
     logger.info(f"Layer: {args.layer}")
-    logger.info(f"Cache directory: {cache_dir}")
+    logger.info(f"Cache directory: {args.cache_dir}")
     logger.info("***** Running attribution *****")
-
-    # Generate text for each prompt and save to files
-    generated_texts = []
-    for i in range(len(prompt_dataset)):
-        prompt = prompt_dataset.get_raw_prompt(i)
-        file_idx = prompt_dataset.get_file_index(i)
-
-        # Generate response
-        generated_text = generate_text(model, tokenizer, prompt, max_new_tokens=200, device=device)
-        generated_texts.append(generated_text)
-
-        # Save response to file
-        response_file = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/", f"response_{file_idx}.txt")
-        with open(response_file, 'w', encoding='utf-8') as f:
-            f.write(generated_text)
-
-        logger.info(f"Prompt {file_idx}: {prompt[:100]}...")
-        logger.info(f"Generated: {generated_text[:100]}...")
-        logger.info("-" * 50)
 
     score, profile = None, None
     if args.baseline == "GC":
@@ -714,7 +689,7 @@ def main():
             device=device,
             projector_kwargs=projector_kwargs,
             offload="disk",
-            cache_dir=cache_dir
+            cache_dir=args.cache_dir
         )
 
         if args.cache:
@@ -749,8 +724,27 @@ def main():
             torch.cuda.synchronize(device)
             attribute_end_time = time.time()
 
-        if args.attribute:
-            logger.info(f"Retrieving the top 100 influential examples for each prompt.")
+            logger.info("Generating the response for each prompt...")
+            # Generate text for each prompt and save to files
+            generated_texts = []
+            for i in range(len(prompt_dataset)):
+                prompt = prompt_dataset.get_raw_prompt(i)
+                file_idx = prompt_dataset.get_file_index(i)
+
+                # Generate response
+                generated_text = generate_text(model, tokenizer, prompt, max_new_tokens=200, device=device)
+                generated_texts.append(generated_text)
+
+                # Save response to file
+                response_file = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/response/", f"{file_idx}.txt")
+                with open(response_file, 'w', encoding='utf-8') as f:
+                    f.write(generated_text)
+
+                logger.info(f"Prompt {file_idx}: {prompt[:100]}...")
+                logger.info(f"Generated: {generated_text[:100]}...")
+                logger.info("-" * 50)
+
+            logger.info(f"Retrieving the top 100 influential examples for each prompt...")
             # Find top 100 influential examples
             top_100_influential = find_top_k_influential(score, k=100)
 
@@ -893,7 +887,7 @@ def main():
 
     logger.info("***** Attribution finished *****")
 
-    result = {"score": score, "profile": profile, "throughput": throughput_stats}
+    result = {"score": score, "profile": profile, "throughput": throughput_stats} #TODO: Change file name for different mode (otherwise they'll collapse)
     logger.info(result)
 
     if not args.debug: # only save the results when not in debug mode

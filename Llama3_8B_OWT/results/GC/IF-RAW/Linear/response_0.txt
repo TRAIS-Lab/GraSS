@@ -1,4 +1,0 @@
-Question:
-What is the cube root of 1296 to the nearest integer?
-Answer:
-11
