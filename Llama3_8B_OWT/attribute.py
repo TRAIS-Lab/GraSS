@@ -725,32 +725,26 @@ def main():
             attribute_end_time = time.time()
 
             logger.info("Generating the response for each prompt...")
-            # Define response output directory
             response_output_dir = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/response/")
-
             generated_texts = generate_and_save_responses(
                 model,
                 tokenizer,
                 prompt_dataset,
                 response_output_dir,
                 device=device,
-                max_new_tokens=200
+                max_new_tokens=500
             )
 
             logger.info(f"Retrieving the top 100 influential examples for each prompt...")
-            # Find top 100 influential examples
-            top_100_influential = find_top_k_influential(score, k=100)
-
-            # Save to file
-            influential_file = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/", "influential.json")
-            with open(influential_file, 'w', encoding='utf-8') as f:
-                json.dump({
-                    "top_influential": [{"train_idx": idx, "score": float(score)} for idx, score in top_100_influential],
-                    "prompts": {i: prompt_dataset.get_raw_prompt(i) for i in range(len(prompt_dataset))},
-                    "file_indices": [prompt_dataset.get_file_index(i) for i in range(len(prompt_dataset))]
-                }, f, indent=2)
-
-            logger.info(f"Saved top 100 influential training examples to {influential_file}")
+            topk_output_dir = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/topk/")
+            top_influential_per_prompt = find_top_k_influential(
+                score,
+                k=5,
+                prompt_dataset=prompt_dataset,
+                train_dataset=train_dataset,
+                tokenizer=tokenizer,
+                output_dir=topk_output_dir
+            )
 
     elif args.baseline == "LogIX": #Only used for comparing the throughput, so some of the code are sloppy (specifically, how we get the subset of dataloader)
         from _LogIX.huggingface import LogIXArguments, patch_trainer

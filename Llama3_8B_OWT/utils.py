@@ -283,40 +283,93 @@ def prompt_collate_fn(batch, tokenizer):
 
     return batch_dict
 
-def find_top_k_influential(scores, k=100):
+def find_top_k_influential(scores, k=100, prompt_dataset=None, train_dataset=None, tokenizer=None, output_dir=None):
     """
-    Find the top k most influential training examples based on attribution scores.
+    Find the top k most influential training examples for each test prompt based on attribution scores.
+    Optionally save the results to individual files.
 
     Args:
-        scores: Dictionary or tensor of attribution scores
-        k: Number of top examples to return
+        scores: Tensor of attribution scores with shape [num_test, num_train]
+        k: Number of top examples to return per test prompt
+        prompt_dataset: Optional dataset containing the prompts (required if output_dir is specified)
+        train_dataset: Optional dataset containing the training examples (required if output_dir is specified and you want to include training text)
+        tokenizer: Optional tokenizer to decode training examples (required if train_dataset is provided)
+        output_dir: Optional directory to save the results to individual files
 
     Returns:
-        List of tuples (train_idx, score) for the top k influential examples
+        List of lists, where each inner list contains tuples (train_idx, score) for the top k
+        influential examples for each test prompt
     """
-    if isinstance(scores, dict):
-        # If scores is a dictionary mapping test_idx -> (train_idx -> score)
-        # We need to aggregate across all test examples
-        aggregated_scores = defaultdict(float)
+    if not isinstance(scores, torch.Tensor):
+        raise ValueError("Scores must be a tensor with shape [num_test, num_train]")
 
-        for test_idx, train_scores in scores.items():
-            for train_idx, score in train_scores.items():
-                aggregated_scores[train_idx] += abs(score)  # Use absolute value for influence
+    # Ensure scores is shaped correctly [num_test, num_train]
+    if len(scores.shape) != 2:
+        raise ValueError(f"Scores tensor must be 2D, got shape {scores.shape}")
 
-    elif isinstance(scores, torch.Tensor):
-        # If scores is a tensor of shape [num_test, num_train]
-        aggregated_scores = {}
-        for train_idx in range(scores.size(1)):
-            # Sum absolute influence across all test examples
-            aggregated_scores[train_idx] = torch.sum(torch.abs(scores[:, train_idx])).item()
+    # Convert to correct orientation if needed (should be [num_test, num_train])
+    if scores.shape[0] > scores.shape[1]:  # If it's in the form [num_train, num_test]
+        scores = scores.T
 
-    else:
-        raise ValueError("Unsupported score format")
+    num_test, num_train = scores.shape
 
-    # Get the top k indices
-    top_k = heapq.nlargest(k, aggregated_scores.items(), key=lambda x: x[1])
+    # For each test prompt, find the top k most influential training examples
+    top_k_per_prompt = []
 
-    return top_k
+    # Create output directory if specified
+    if output_dir is not None:
+        if prompt_dataset is None:
+            raise ValueError("prompt_dataset must be provided if output_dir is specified")
+        os.makedirs(output_dir, exist_ok=True)
+
+    # Check if we have training text capability
+    include_training_text = (train_dataset is not None and tokenizer is not None)
+
+    for test_idx in range(num_test):
+        # Get scores for this test prompt
+        test_scores = scores[test_idx].abs().cpu().numpy()  # Use absolute value for influence
+
+        # Get indices of top k training examples
+        top_indices = heapq.nlargest(min(k, num_train), range(num_train), key=lambda i: test_scores[i])
+
+        # Create list of (train_idx, score) tuples
+        prompt_top_k = [(train_idx, float(test_scores[train_idx])) for train_idx in top_indices]
+
+        top_k_per_prompt.append(prompt_top_k)
+
+        # Save to file if output_dir is specified
+        if output_dir is not None:
+            # Get the file index corresponding to this prompt
+            file_idx = prompt_dataset.get_file_index(test_idx)
+
+            # Create a JSON file for this prompt
+            influential_file = os.path.join(output_dir, f"{file_idx}.json")
+
+            # Create the influential examples with optional training text
+            influential_examples = []
+            for train_idx, score in prompt_top_k:
+                example_dict = {"train_idx": train_idx, "score": float(score)}
+
+                # Include training text if possible
+                if include_training_text:
+                    try:
+                        example = train_dataset[train_idx]
+                        training_text = tokenizer.decode(example["input_ids"], skip_special_tokens=True)
+                        example_dict["training_text"] = training_text
+                    except Exception as e:
+                        print(f"Error decoding training example {train_idx}: {e}")
+
+                influential_examples.append(example_dict)
+
+            with open(influential_file, 'w', encoding='utf-8') as f:
+                json.dump({
+                    "prompt_idx": test_idx,
+                    "prompt_text": prompt_dataset.get_raw_prompt(test_idx),
+                    "file_index": file_idx,
+                    "influential_examples": influential_examples
+                }, f, indent=2)
+
+    return top_k_per_prompt
 
 def result_filename(args):
     filename_parts = []
