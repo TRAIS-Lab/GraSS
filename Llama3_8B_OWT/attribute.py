@@ -714,6 +714,16 @@ def main():
             precondition_end_time = time.time()
 
         if args.attribute:
+            # Measure attribute throughput
+            torch.cuda.synchronize(device)
+            attribute_start_time = time.time()
+            if args.profile:
+                score, profile = attributor.attribute(test_dataloader=test_dataloader)
+            else:
+                score = attributor.attribute(test_dataloader=test_dataloader)
+            torch.cuda.synchronize(device)
+            attribute_end_time = time.time()
+
             logger.info("Generating the response for each prompt...")
             # Define response output directory
             response_output_dir = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/response/")
@@ -726,16 +736,6 @@ def main():
                 device=device,
                 max_new_tokens=200
             )
-
-            # Measure attribute throughput
-            torch.cuda.synchronize(device)
-            attribute_start_time = time.time()
-            if args.profile:
-                score, profile = attributor.attribute(test_dataloader=test_dataloader)
-            else:
-                score = attributor.attribute(test_dataloader=test_dataloader)
-            torch.cuda.synchronize(device)
-            attribute_end_time = time.time()
 
             logger.info(f"Retrieving the top 100 influential examples for each prompt...")
             # Find top 100 influential examples

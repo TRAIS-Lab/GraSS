@@ -283,7 +283,6 @@ def prompt_collate_fn(batch, tokenizer):
 
     return batch_dict
 
-# Function to find top k influential training examples
 def find_top_k_influential(scores, k=100):
     """
     Find the top k most influential training examples based on attribution scores.

@@ -1487,6 +1487,8 @@ class IFAttributor:
             batch_range=(0, len(test_dataloader))
         )
 
+        torch.cuda.empty_cache()
+
         # Calculate total training samples
         num_train = 0
         if self.batch_info:
@@ -1530,26 +1532,26 @@ class IFAttributor:
             batch_row_indices[worker_id] = (row_offset, row_offset + batch_size)
             row_offset += batch_size
 
-        # Process each layer
-        for layer_idx, layer_name in tqdm(enumerate(self.layer_names), desc="Processing layers", total=len(self.layer_names)):
-            # Skip if no test gradients for this layer
-            if not per_layer_test_gradients[layer_idx]:
+        # Process each worker batch
+        for worker_id in tqdm(sorted(batch_row_indices.keys()), desc="Processing batches", total=len(batch_row_indices)):
+            # Skip if this batch doesn't have row indices
+            if worker_id not in batch_row_indices:
                 continue
 
-            # Skip if no train gradients for this layer
-            if not ifvp_train[layer_idx]:
-                continue
+            # Get row indices for this batch
+            row_st, row_ed = batch_row_indices[worker_id]
 
-            # Process each batch separately
-            for worker_id in sorted(ifvp_train[layer_idx].keys()):
-                # Skip if this batch doesn't have gradient data
-                if worker_id not in batch_row_indices:
+            # Process each layer
+            for layer_idx, layer_name in enumerate(self.layer_names):
+                # Skip if no test gradients for this layer
+                if not per_layer_test_gradients[layer_idx]:
                     continue
 
-                # Get row indices for this batch
-                row_st, row_ed = batch_row_indices[worker_id]
+                # Skip if no train gradients for this layer or this worker
+                if not ifvp_train[layer_idx] or worker_id not in ifvp_train[layer_idx]:
+                    continue
 
-                # Load train gradients for this batch
+                # Load train gradients for this batch and layer
                 train_grads = None
                 if self.offload in ["none", "cpu"]:
                     # Direct tensor access
@@ -1560,7 +1562,7 @@ class IFAttributor:
                 elif self.offload == "disk":
                     # Load from disk
                     if isinstance(ifvp_train[layer_idx][worker_id], str):
-                        train_grads = self._load_tensor(ifvp_train[layer_idx][worker_id]).to(self.device)
+                        train_grads = self._load_tensor(ifvp_train[layer_idx][worker_id]).cpu()
 
                 if train_grads is None:
                     continue
@@ -1585,32 +1587,32 @@ class IFAttributor:
                     col_st, col_ed = test_batch_indices[test_batch_idx]
 
                     # Compute influence for this batch
-                    try:
-                        result = torch.matmul(train_grads, test_grad.t())
-                        # Update influence scores for this batch's rows
-                        IF_score[row_st:row_ed, col_st:col_ed] += result.cpu()
-                    except Exception as e:
-                        print(f"Error computing influence: {e}")
-                        # Fall back to smaller chunks
-                        train_batch_size = min(1024, train_grads.shape[0])
-                        for i in range(0, train_grads.shape[0], train_batch_size):
-                            end_idx = min(i + train_batch_size, train_grads.shape[0])
-                            train_chunk = train_grads[i:end_idx]
+                    # try:
+                    #     result = torch.matmul(train_grads, test_grad.t())
+                    #     # Update influence scores for this batch's rows
+                    #     IF_score[row_st:row_ed, col_st:col_ed] += result.cpu()
+                    # except Exception as e:
+                    #     print(f"Error computing influence: {e}")
+                    #     # Fall back to smaller chunks
+                    train_batch_size = min(1024, train_grads.shape[0])
+                    for i in range(0, train_grads.shape[0], train_batch_size):
+                        end_idx = min(i + train_batch_size, train_grads.shape[0])
+                        train_chunk = train_grads[i:end_idx].to(self.device)
 
-                            result = torch.matmul(train_chunk, test_grad.t())
-                            # Map local chunk indices to global row indices
-                            global_start = row_st + i
-                            global_end = row_st + end_idx
-                            IF_score[global_start:global_end, col_st:col_ed] += result.cpu()
+                        result = torch.matmul(train_chunk, test_grad.t())
+                        # Map local chunk indices to global row indices
+                        global_start = row_st + i
+                        global_end = row_st + end_idx
+                        IF_score[global_start:global_end, col_st:col_ed] += result.cpu()
 
-                            del train_chunk, result
-                            torch.cuda.empty_cache()
+                        del train_chunk, result
+                        torch.cuda.empty_cache()
 
                     # Clean up test gradient
                     del test_grad
                     torch.cuda.empty_cache()
 
-                # Clean up train gradients for this batch
+                # Clean up train gradients for this batch and layer
                 del train_grads
                 torch.cuda.empty_cache()
 
