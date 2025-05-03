@@ -1308,7 +1308,7 @@ class IFAttributor:
         """
         Attribute influence of training examples on test examples.
         Works with batched training gradients.
-        Enhanced with better async I/O operations.
+        Enhanced with better async I/O operations and improved disk cache checking.
 
         Args:
             test_dataloader: DataLoader for test data
@@ -1318,8 +1318,36 @@ class IFAttributor:
         Returns:
             Tensor of influence scores (and profiling stats if profile=True)
         """
+        # Load batch information - do this once at the start
+        if not hasattr(self, 'batch_info') or not self.batch_info:
+            # No batch info in memory, try to load from disk
+            if self.offload == "disk" and self.cache_dir is not None:
+                # Look for batch info files
+                try:
+                    batch_info_files = [f for f in os.listdir(self.cache_dir)
+                                    if f.startswith("batch_info_") and f.endswith(".pt")]
+                except FileNotFoundError:
+                    print(f"Warning: Cache directory {self.cache_dir} not found")
+                    batch_info_files = []
+
+                if batch_info_files:
+                    # Load batch info from files
+                    self.batch_info = {}
+                    for info_file in batch_info_files:
+                        file_path = os.path.join(self.cache_dir, info_file)
+                        info_data = torch.load(file_path)
+                        # Update batch info
+                        self.batch_info.update(info_data['batch_info'])
+
+                    print(f"Loaded batch information for {len(self.batch_info)} batches from disk")
+                else:
+                    if train_dataloader is None:
+                        raise ValueError("No batch information found and no training dataloader provided.")
+            elif train_dataloader is None:
+                raise ValueError("No batch information found and no training dataloader provided.")
+
         # Validate input
-        if train_dataloader is None and self.full_train_dataloader is None:
+        if train_dataloader is None and self.full_train_dataloader is None and not self.batch_info:
             raise ValueError("No training data provided or cached.")
 
         # Start disk worker threads if using disk offload
@@ -1327,59 +1355,130 @@ class IFAttributor:
             self._start_disk_workers()
 
         # Get cached IFVP or calculate new ones
-        if train_dataloader is not None and self.full_train_dataloader is None:
-            # New train data, cache everything
-            self.full_train_dataloader = train_dataloader
+        ifvp_train = None
 
-            # Cache gradients first
-            self.cache_gradients(train_dataloader)
+        # First check for cached IFVP on disk if using disk offload
+        if use_cached_ifvp and self.offload == "disk" and self.cache_dir is not None:
+            # Try to find IFVP files on disk
+            ifvp_train = [{} for _ in self.layer_names]
+            ifvp_files_found = False
 
-            # Compute IFVP (handles all Hessian types internally)
-            ifvp_train = self.compute_ifvp()
-        else:
-            # Use cached data
-            if use_cached_ifvp:
-                # Try to use cached IFVP
-                if hasattr(self, 'train_gradients') and self.train_gradients is not None:
-                    ifvp_train = self.train_gradients
-                else:
-                    # No cached IFVP in memory, compute it
-                    ifvp_train = self.compute_ifvp()
+            # Get worker IDs from batch info
+            worker_ids = sorted(self.batch_info.keys()) if self.batch_info else []
+
+            for layer_idx in range(len(self.layer_names)):
+                for worker_id in worker_ids:
+                    # Check cache dir first
+                    ifvp_path = self._get_file_path('ifvp', layer_idx, is_temp=False, worker_id=worker_id)
+                    if os.path.exists(ifvp_path):
+                        ifvp_train[layer_idx][worker_id] = ifvp_path
+                        ifvp_files_found = True
+
+                    # Also check temp dir if needed
+                    elif self.temp_dir:
+                        ifvp_path = self._get_file_path('ifvp', layer_idx, is_temp=True, worker_id=worker_id)
+                        if os.path.exists(ifvp_path):
+                            ifvp_train[layer_idx][worker_id] = ifvp_path
+                            ifvp_files_found = True
+
+            if ifvp_files_found:
+                print("Found cached IFVP files on disk. Using them for attribution.")
+                self.train_gradients = ifvp_train
             else:
-                # Force recomputation from raw gradients
-                print("Recomputing IFVP from raw gradients as requested...")
+                ifvp_train = None
+
+        # If no IFVP files found on disk, check in-memory cache
+        if ifvp_train is None and use_cached_ifvp:
+            if hasattr(self, 'train_gradients') and self.train_gradients:
+                ifvp_train = self.train_gradients
+                print("Using in-memory cached IFVP for attribution.")
+
+        # If still no IFVP, try to compute from cached raw gradients and preconditioners
+        if ifvp_train is None:
+            print("No cached IFVP found. Attempting to compute from cached gradients...")
+
+            # Check for cached preconditioners
+            preconditioners_found = False
+
+            if self.offload == "disk" and self.cache_dir is not None:
+                # Check for preconditioner files on disk
+                preconditioners = [None] * len(self.layer_names)
+
+                for layer_idx in range(len(self.layer_names)):
+                    # Check cache dir first
+                    precond_path = self._get_file_path('preconditioners', layer_idx, is_temp=False)
+                    if os.path.exists(precond_path):
+                        preconditioners[layer_idx] = precond_path
+                        preconditioners_found = True
+
+                    # Also check temp dir if needed
+                    elif hasattr(self, 'temp_dir') and self.temp_dir:
+                        precond_path = self._get_file_path('preconditioners', layer_idx, is_temp=True)
+                        if os.path.exists(precond_path):
+                            preconditioners[layer_idx] = precond_path
+                            preconditioners_found = True
+
+                if preconditioners_found:
+                    print("Found cached preconditioners on disk.")
+                    self.preconditioners = preconditioners
+            elif hasattr(self, 'preconditioners') and self.preconditioners:
+                preconditioners_found = True
+                print("Using in-memory cached preconditioners.")
+
+            # Check for cached raw gradients
+            raw_gradients_found = False
+
+            if self.offload == "disk" and self.cache_dir is not None:
+                # Try to find gradient files on disk
+                if not hasattr(self, 'cached_raw_gradients') or not self.cached_raw_gradients:
+                    self.cached_raw_gradients = [{} for _ in self.layer_names]
+
+                # Get worker IDs from batch info
+                worker_ids = sorted(self.batch_info.keys()) if self.batch_info else []
+
+                for layer_idx in range(len(self.layer_names)):
+                    for worker_id in worker_ids:
+                        # Check cache dir first
+                        grad_path = self._get_file_path('gradients', layer_idx, is_temp=False, worker_id=worker_id)
+                        if os.path.exists(grad_path):
+                            self.cached_raw_gradients[layer_idx][worker_id] = grad_path
+                            raw_gradients_found = True
+
+                        # Also check temp dir if needed
+                        elif hasattr(self, 'temp_dir') and self.temp_dir:
+                            grad_path = self._get_file_path('gradients', layer_idx, is_temp=True, worker_id=worker_id)
+                            if os.path.exists(grad_path):
+                                self.cached_raw_gradients[layer_idx][worker_id] = grad_path
+                                raw_gradients_found = True
+
+                if raw_gradients_found:
+                    print("Found cached raw gradients on disk.")
+            elif hasattr(self, 'cached_raw_gradients') and self.cached_raw_gradients:
+                raw_gradients_found = True
+                print("Using in-memory cached raw gradients.")
+
+            # Compute IFVP if we have both gradients and preconditioners (or hessian is "none")
+            if (raw_gradients_found and (preconditioners_found or self.hessian == "none")):
+                print("Computing IFVP from cached gradients and preconditioners...")
                 ifvp_train = self.compute_ifvp()
+            elif train_dataloader is not None:
+                # New train data, cache everything
+                print("No complete cached data found. Caching gradients from provided dataloader...")
+                self.full_train_dataloader = train_dataloader
+                self.cache_gradients(train_dataloader)
 
-        # Get batch information
-        batch_info = {}
-        if hasattr(self, 'batch_info') and self.batch_info:
-            batch_info = self.batch_info
-        elif self.offload == "disk" and self.cache_dir is not None:
-            # Try to load batch info from disk
-            try:
-                batch_info_files = [f for f in os.listdir(self.cache_dir)
-                                if f.startswith("batch_info_") and f.endswith(".pt")]
-            except FileNotFoundError:
-                print(f"Warning: Cache directory {self.cache_dir} not found")
-                batch_info_files = []
+                if self.hessian != "none" and not preconditioners_found:
+                    print("Computing preconditioners...")
+                    self.compute_preconditioners()
 
-            if batch_info_files:
-                batch_info = {}
-                for info_file in batch_info_files:
-                    file_path = os.path.join(self.cache_dir, info_file)
-                    info_data = torch.load(file_path)
-                    batch_info.update(info_data['batch_info'])
+                print("Computing IFVP...")
+                ifvp_train = self.compute_ifvp()
             else:
-                raise ValueError("No batch information found. Call cache_gradients first.")
+                raise ValueError("No training data provided and insufficient cached data found.")
 
-        # Calculate total training samples
-        num_train = 0
-        for worker_id in batch_info:
-            num_train += batch_info[worker_id]['total_samples']
-
-        # Initialize influence scores in memory
-        num_test = len(test_dataloader.sampler)
-        IF_score = torch.zeros(num_train, num_test, device="cpu")
+        # Set up the projectors if not already done
+        if self.projectors is None:
+            self._setup_projectors(test_dataloader)
 
         # Compute test gradients using common function with full range
         per_layer_test_gradients, _ = self._compute_gradients(
@@ -1387,6 +1486,22 @@ class IFAttributor:
             is_test=True,
             batch_range=(0, len(test_dataloader))
         )
+
+        # Calculate total training samples
+        num_train = 0
+        if self.batch_info:
+            for worker_id in self.batch_info:
+                num_train += self.batch_info[worker_id]['total_samples']
+        else:
+            # Handle case if batch_info is missing - this is a fallback
+            # but should rarely happen with proper cache handling
+            num_train = sum(len(batch) for batch in train_dataloader) if train_dataloader else 0
+            if num_train == 0:
+                raise ValueError("Cannot determine number of training samples")
+
+        # Initialize influence scores in memory
+        num_test = len(test_dataloader.sampler)
+        IF_score = torch.zeros(num_train, num_test, device="cpu")
 
         # Get batch indices for mapping
         test_batch_indices = []
@@ -1410,8 +1525,8 @@ class IFAttributor:
         # Get mapping of worker_id to row indices in the final influence matrix
         batch_row_indices = {}
         row_offset = 0
-        for worker_id in sorted(batch_info.keys()):
-            batch_size = batch_info[worker_id]['total_samples']
+        for worker_id in sorted(self.batch_info.keys()):
+            batch_size = self.batch_info[worker_id]['total_samples']
             batch_row_indices[worker_id] = (row_offset, row_offset + batch_size)
             row_offset += batch_size
 
@@ -1426,7 +1541,7 @@ class IFAttributor:
                 continue
 
             # Process each batch separately
-            for worker_id in tqdm(sorted(ifvp_train[layer_idx].keys()), desc=f"Processing batches for layer {layer_name}"):
+            for worker_id in sorted(ifvp_train[layer_idx].keys()):
                 # Skip if this batch doesn't have gradient data
                 if worker_id not in batch_row_indices:
                     continue
@@ -1450,12 +1565,9 @@ class IFAttributor:
                 if train_grads is None:
                     continue
 
-                # Use async loading for test gradients when possible
-                pending_loads = []
-
                 # Process each test batch
                 for test_batch_idx in range(len(per_layer_test_gradients[layer_idx])):
-                    # Get test gradient using async loading if possible
+                    # Get test gradient
                     test_grad = None
 
                     if self.offload in ["none", "cpu"]:
@@ -1464,8 +1576,6 @@ class IFAttributor:
                             test_grad = test_grad.to(self.device)
                     elif self.offload == "disk":
                         if isinstance(per_layer_test_gradients[layer_idx][test_batch_idx], str):
-                            # Instead of blocking load, we could use async loading here
-                            # But for now, the simple approach
                             test_grad = self._load_tensor(per_layer_test_gradients[layer_idx][test_batch_idx]).to(self.device)
 
                     if test_grad is None:

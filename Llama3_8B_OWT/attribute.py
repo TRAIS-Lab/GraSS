@@ -616,7 +616,7 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from Llama3_8B_OWT.utils import SubsetSampler, FilePromptDataset, get_worker_batch_range, prompt_collate_fn, generate_text, setup_projection_kwargs, find_top_k_influential, result_filename
+    from Llama3_8B_OWT.utils import SubsetSampler, FilePromptDataset, get_worker_batch_range, prompt_collate_fn, generate_and_save_responses, setup_projection_kwargs, find_top_k_influential, result_filename
 
     if args.device.startswith("cuda"):
         # Check if GPU is available
@@ -714,6 +714,19 @@ def main():
             precondition_end_time = time.time()
 
         if args.attribute:
+            logger.info("Generating the response for each prompt...")
+            # Define response output directory
+            response_output_dir = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/response/")
+
+            generated_texts = generate_and_save_responses(
+                model,
+                tokenizer,
+                prompt_dataset,
+                response_output_dir,
+                device=device,
+                max_new_tokens=200
+            )
+
             # Measure attribute throughput
             torch.cuda.synchronize(device)
             attribute_start_time = time.time()
@@ -723,26 +736,6 @@ def main():
                 score = attributor.attribute(test_dataloader=test_dataloader)
             torch.cuda.synchronize(device)
             attribute_end_time = time.time()
-
-            logger.info("Generating the response for each prompt...")
-            # Generate text for each prompt and save to files
-            generated_texts = []
-            for i in range(len(prompt_dataset)):
-                prompt = prompt_dataset.get_raw_prompt(i)
-                file_idx = prompt_dataset.get_file_index(i)
-
-                # Generate response
-                generated_text = generate_text(model, tokenizer, prompt, max_new_tokens=200, device=device)
-                generated_texts.append(generated_text)
-
-                # Save response to file
-                response_file = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/response/", f"{file_idx}.txt")
-                with open(response_file, 'w', encoding='utf-8') as f:
-                    f.write(generated_text)
-
-                logger.info(f"Prompt {file_idx}: {prompt[:100]}...")
-                logger.info(f"Generated: {generated_text[:100]}...")
-                logger.info("-" * 50)
 
             logger.info(f"Retrieving the top 100 influential examples for each prompt...")
             # Find top 100 influential examples

@@ -180,29 +180,57 @@ def setup_projection_kwargs(args, device):
 
     return projector_kwargs
 
-# Function to generate text from prompts
-def generate_text(model, tokenizer, prompt, max_new_tokens=100, temperature=0.7, device="cuda"):
-    """Generate text from a given prompt using the model."""
+def generate_and_save_responses(model, tokenizer, prompt_dataset, output_dir, device="cuda", max_new_tokens=200, temperature=0.7):
+    """
+    Generate text responses for each prompt in the dataset and save to files.
+
+    Args:
+        model: The language model to use for generation
+        tokenizer: The tokenizer associated with the model
+        prompt_dataset: Dataset containing prompts
+        output_dir: Directory to save responses
+        device: Device to run generation on ("cuda" or "cpu")
+        max_new_tokens: Maximum number of new tokens to generate
+        temperature: Temperature for sampling during generation
+
+    Returns:
+        List of generated texts
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Ensure model is in evaluation mode and on the correct device
     model.eval()
     model.to(device)
-    inputs = tokenizer(prompt, return_tensors="pt").to(device)
 
-    # Generate text
-    with torch.no_grad():
-        output = model.generate(
-            inputs["input_ids"],
-            max_new_tokens=max_new_tokens,
-            temperature=temperature,
-            do_sample=True,
-            pad_token_id=tokenizer.eos_token_id
-        )
+    # Generate text for each prompt and save to files
+    generated_texts = []
+    for i in range(len(prompt_dataset)):
+        prompt = prompt_dataset.get_raw_prompt(i)
+        file_idx = prompt_dataset.get_file_index(i)
 
-    # Decode and return the generated text
-    generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
+        # Prepare inputs
+        inputs = tokenizer(prompt, return_tensors="pt").to(device)
 
-    return generated_text
+        # Generate text
+        with torch.no_grad():
+            output = model.generate(
+                inputs["input_ids"],
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id
+            )
 
-# Custom collate function to handle variable length inputs
+        # Decode generated text
+        generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
+        generated_texts.append(generated_text)
+
+        # Save response to file
+        response_file = os.path.join(output_dir, f"{file_idx}.txt")
+        with open(response_file, 'w', encoding='utf-8') as f:
+            f.write(generated_text)
+    return generated_texts
+
 def prompt_collate_fn(batch, tokenizer):
     """
     Custom collate function that handles variable length inputs.
@@ -213,6 +241,17 @@ def prompt_collate_fn(batch, tokenizer):
     """
     max_length = max(item["input_ids"].size(0) for item in batch)
 
+    # If no pad_token_id is set, use a default value (usually 0)
+    pad_token_id = tokenizer.pad_token_id
+    if pad_token_id is None:
+        # Check if eos_token_id is available and use it
+        if hasattr(tokenizer, 'eos_token_id') and tokenizer.eos_token_id is not None:
+            pad_token_id = tokenizer.eos_token_id
+        else:
+            # Default to 0 if no other tokens are available
+            pad_token_id = 0
+        print(f"Warning: pad_token_id is None. Using {pad_token_id} as a replacement.")
+
     input_ids = []
     attention_mask = []
 
@@ -222,7 +261,7 @@ def prompt_collate_fn(batch, tokenizer):
         # Pad input_ids
         padded_input_ids = torch.cat([
             item["input_ids"],
-            torch.ones(padding_length, dtype=torch.long) * tokenizer.pad_token_id
+            torch.ones(padding_length, dtype=torch.long) * pad_token_id
         ])
         input_ids.append(padded_input_ids)
 
