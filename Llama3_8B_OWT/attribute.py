@@ -345,7 +345,7 @@ def parse_args():
     parser.add_argument(
         "--worker",
         type=str,
-        default="1/1",
+        default="0/1",
         help="The setup of the worker: format: {worker_id}/{total_workers}.",
     )
     parser.add_argument(
@@ -637,7 +637,7 @@ def main():
 
     train_dataset = train_dataset.select(range(int(1_000_000_000 / block_size)))
     if args.debug: # toy dataset
-        train_dataset = train_dataset.select(range(200))
+        train_dataset = train_dataset.select(range(1_000_000))
 
     train_sampler = SubsetSampler(range(len(train_dataset)))
     train_dataloader = DataLoader(
@@ -655,7 +655,7 @@ def main():
     projector_kwargs = setup_projection_kwargs(args, device)
 
     # Get the batch range for this worker
-    batch_id, batch_range = get_worker_batch_range(train_dataloader, args.worker)
+    worker_id, batch_range = get_worker_batch_range(train_dataloader, args.worker)
 
     # Logging setting
     logger.info(f"The train dataset length: {len(train_dataset)}.")
@@ -696,33 +696,41 @@ def main():
             # Measure cache throughput
             torch.cuda.synchronize(device)
             cache_start_time = time.time()
-            attributor.cache_gradients(
+            result = attributor.cache_gradients(
                     train_dataloader,
                     batch_range=batch_range,
-                    batch_id=batch_id,
+                    worker_id=worker_id,
                     save=True,
                 )
             torch.cuda.synchronize(device)
             cache_end_time = time.time()
 
+            if args.profile:
+                profile = result[1]
+
         if args.precondition:
             # Measure precondition throughput
             torch.cuda.synchronize(device)
             precondition_start_time = time.time()
-            attributor.compute_ifvp(save=True)
+            result = attributor.compute_ifvp(save=True)
             torch.cuda.synchronize(device)
             precondition_end_time = time.time()
+
+            if args.profile:
+                profile = result[1]
 
         if args.attribute:
             # Measure attribute throughput
             torch.cuda.synchronize(device)
             attribute_start_time = time.time()
-            if args.profile:
-                score, profile = attributor.attribute(test_dataloader=test_dataloader)
-            else:
-                score = attributor.attribute(test_dataloader=test_dataloader)
+            result = attributor.attribute(test_dataloader=test_dataloader)
             torch.cuda.synchronize(device)
             attribute_end_time = time.time()
+
+            if args.profile:
+                score, profile = result
+            else:
+                score = result
 
             logger.info("Generating the response for each prompt...")
             response_output_dir = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/response/")

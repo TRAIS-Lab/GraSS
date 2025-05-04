@@ -252,6 +252,13 @@ def parse_args():
         default=0.9,
         help="The correlation threshold for early stopping.",
     )
+    # >>>>>>>>>>>>>>>>>>>>> Worker parallelization argument >>>>>>>>>>>>>>>>>>>>>
+    parser.add_argument(
+        "--worker",
+        type=str,
+        default="0/1",
+        help="Worker ID and total workers in format WORKER_ID/TOTAL_WORKER",
+    )
 
     args = parser.parse_args()
 
@@ -428,7 +435,7 @@ def main():
             config=config,
             low_cpu_mem_usage=args.low_cpu_mem_usage,
             trust_remote_code=args.trust_remote_code,
-            torch_dtype=torch.float16,
+            torch_dtype=torch.bfloat16,
         )
     else:
         logger.info("Training new model from scratch")
@@ -543,6 +550,31 @@ def main():
     # Extract the layers we want to analyze
     layers = find_layers(model, args.layer, return_type="name_instance")
 
+    # Parse worker configuration
+    worker_config = args.worker.split("/")
+    if len(worker_config) != 2:
+        raise ValueError("Worker argument must be in format 'WORKER_ID/TOTAL_WORKER'")
+
+    worker_id = int(worker_config[0])
+    total_workers = int(worker_config[1])
+
+    if worker_id >= total_workers:
+        raise ValueError(f"Worker ID {worker_id} must be less than total workers {total_workers}")
+
+    logger.info(f"Running as worker {worker_id} of {total_workers}")
+
+    # Divide layers among workers
+    layers_per_worker = (len(layers) + total_workers - 1) // total_workers  # Ceiling division
+    start_idx = worker_id * layers_per_worker
+    end_idx = min((worker_id + 1) * layers_per_worker, len(layers))
+
+    logger.info(f"Worker {worker_id} processing layers {start_idx} to {end_idx-1} (inclusive)")
+    layers_to_process = layers[start_idx:end_idx]
+
+    if not layers_to_process:
+        logger.info(f"No layers assigned to worker {worker_id}. Exiting.")
+        return
+
     # Create output directory for saving masks
     output_dir = f"./Localize/mask_{args.localize}*{args.localize}"
     os.makedirs(output_dir, exist_ok=True)
@@ -556,8 +588,9 @@ def main():
     )
 
     # Process each layer individually to save memory
-    for layer_idx, (module_name, layer) in enumerate(layers):
-        logger.info(f"Processing layer {layer_idx + 1}/{len(layers)}: {module_name}")
+    for layer_idx, (module_name, layer) in enumerate(layers_to_process):
+        global_layer_idx = start_idx + layer_idx
+        logger.info(f"Processing layer {global_layer_idx + 1}/{len(layers)}: {module_name}")
 
         # Extract gradients for this specific layer (both train and test)
         train_components, test_components = extractor.extract_gradients_for_layer(
@@ -581,10 +614,10 @@ def main():
         pre_activation_dim = train_pre_activations.shape[-1]
         input_features_dim = train_input_features.shape[-1]
 
-        logger.info(f"Layer {layer_idx + 1} - Pre-activation dimension: {pre_activation_dim}, "
+        logger.info(f"Layer {global_layer_idx + 1} - Pre-activation dimension: {pre_activation_dim}, "
                    f"Input features dimension: {input_features_dim}")
 
-        logger.info(f"Training the dual component mask optimizer for layer {layer_idx + 1}...")
+        logger.info(f"Training the dual component mask optimizer for layer {global_layer_idx + 1}...")
 
         # Initialize the optimizer for this layer
         optimizer = Localizer(
@@ -626,7 +659,7 @@ def main():
         effective_params = len(important_indices['pre_activation']) * len(important_indices['input_features'])
         sparsity = 100 - (effective_params / total_params * 100)
 
-        logger.info(f"Results for Layer {layer_idx + 1}:")
+        logger.info(f"Results for Layer {global_layer_idx + 1}:")
         logger.info(f"Pre-activation mask: {len(important_indices['pre_activation'])}/{pre_activation_dim} "
                   f"parameters ({len(important_indices['pre_activation'])/pre_activation_dim*100:.2f}%)")
         logger.info(f"Input features mask: {len(important_indices['input_features'])}/{input_features_dim} "
@@ -645,7 +678,7 @@ def main():
         torch.cuda.empty_cache()
         gc.collect()
 
-    logger.info("Gradient component analysis completed for all layers.")
+    logger.info(f"Worker {worker_id} has completed processing all assigned layers ({start_idx}-{end_idx-1}).")
 
 
 if __name__ == "__main__":
