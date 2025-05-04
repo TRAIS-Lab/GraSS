@@ -51,4 +51,6 @@ dist
 **/checkpoints*/
 *.json
 
+$SCRATCH
+
 visualization.ipynb
