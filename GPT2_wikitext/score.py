@@ -640,7 +640,10 @@ def main():
         # Measure cache throughput
         torch.cuda.synchronize(device)
         cache_start_time = time.time()
-        attributor.cache_gradients(train_dataloader, save=True)
+        for start_range in range(0, len(train_dataloader), 50):
+            end_range = min(start_range + 50, len(train_dataloader))
+            attributor.cache_gradients(train_dataloader, batch_range=(start_range, end_range), force_cleanup=True)
+
         attributor.compute_ifvp(save=True)
         torch.cuda.synchronize(device)
         cache_end_time = time.time()
