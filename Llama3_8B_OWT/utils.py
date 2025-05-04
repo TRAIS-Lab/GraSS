@@ -87,14 +87,14 @@ class FilePromptDataset(Dataset):
         """Returns the file index of the prompt at the given index."""
         return self.file_indices[idx]
 
-def get_worker_batch_range(train_dataloader, worker_arg="1/1"):
+def get_worker_batch_range(train_dataloader, worker_arg="0/1"):
     """
     Parse the worker argument in format "{worker_id}/{total_workers}" and
     get the batch range for the specified worker.
 
     Args:
         train_dataloader: DataLoader for the training data
-        worker_arg: String in format "{worker_id}/{total_workers}" (default: "1/1")
+        worker_arg: String in format "{worker_id}/{total_workers}" (default: "0/1")
 
     Returns:
         Tuple of (worker_id, (start_batch, end_batch)) for the specified worker
@@ -105,12 +105,12 @@ def get_worker_batch_range(train_dataloader, worker_arg="1/1"):
         if len(parts) != 2:
             raise ValueError("Worker argument must be in format 'worker_id/total_workers'")
 
-        worker_id = int(parts[0]) - 1  # Convert to 0-indexed
+        worker_id = int(parts[0])
         num_workers = int(parts[1])
 
         # Validate parsed values
-        if worker_id < 0 or worker_id >= num_workers:
-            raise ValueError(f"worker_id must be between 1 and {num_workers}")
+        if worker_id < 0 or worker_id > num_workers:
+            raise ValueError(f"worker_id must be between 0 and {num_workers-1}")
         if num_workers <= 0:
             raise ValueError("total_workers must be greater than 0")
 
