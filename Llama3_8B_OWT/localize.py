@@ -435,7 +435,7 @@ def main():
             config=config,
             low_cpu_mem_usage=args.low_cpu_mem_usage,
             trust_remote_code=args.trust_remote_code,
-            torch_dtype=torch.bfloat16,
+            torch_dtype=torch.bfloat16, #Add
         )
     else:
         logger.info("Training new model from scratch")

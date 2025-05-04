@@ -538,6 +538,7 @@ def main():
             config=config,
             low_cpu_mem_usage=args.low_cpu_mem_usage,
             trust_remote_code=args.trust_remote_code,
+            torch_dtype=torch.bfloat16, #Add
         )
     else:
         logger.info("Training new model from scratch")
@@ -633,7 +634,7 @@ def main():
     train_dataset = lm_datasets["train"]
     prompt_dataset = FilePromptDataset("./prompts/", tokenizer, block_size)
 
-    train_batch_size, test_batch_size = 2, 2
+    train_batch_size, test_batch_size = 7, 7
 
     train_dataset = train_dataset.select(range(int(1_000_000_000 / block_size)))
     if args.debug: # toy dataset
@@ -699,8 +700,6 @@ def main():
             result = attributor.cache_gradients(
                     train_dataloader,
                     batch_range=batch_range,
-                    worker_id=worker_id,
-                    save=True,
                 )
             torch.cuda.synchronize(device)
             cache_end_time = time.time()
@@ -712,7 +711,7 @@ def main():
             # Measure precondition throughput
             torch.cuda.synchronize(device)
             precondition_start_time = time.time()
-            result = attributor.compute_ifvp(save=True)
+            result = attributor.compute_ifvp()
             torch.cuda.synchronize(device)
             precondition_end_time = time.time()
 
