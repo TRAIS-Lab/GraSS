@@ -6,13 +6,10 @@ if TYPE_CHECKING:
     from typing import Iterator, List
 
 import torch
-from torch.utils.data import Sampler, Dataset, DataLoader
+from torch.utils.data import Sampler, Dataset
 
 import os
 import json
-
-import numpy as np
-from collections import defaultdict
 import heapq
 
 class SubsetSampler(Sampler):
@@ -180,57 +177,6 @@ def setup_projection_kwargs(args, device):
 
     return projector_kwargs
 
-def generate_and_save_responses(model, tokenizer, prompt_dataset, output_dir, device="cuda", max_new_tokens=200, temperature=0.7):
-    """
-    Generate text responses for each prompt in the dataset and save to files.
-
-    Args:
-        model: The language model to use for generation
-        tokenizer: The tokenizer associated with the model
-        prompt_dataset: Dataset containing prompts
-        output_dir: Directory to save responses
-        device: Device to run generation on ("cuda" or "cpu")
-        max_new_tokens: Maximum number of new tokens to generate
-        temperature: Temperature for sampling during generation
-
-    Returns:
-        List of generated texts
-    """
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Ensure model is in evaluation mode and on the correct device
-    model.eval()
-    model.to(device)
-
-    # Generate text for each prompt and save to files
-    generated_texts = []
-    for i in range(len(prompt_dataset)):
-        prompt = prompt_dataset.get_raw_prompt(i)
-        file_idx = prompt_dataset.get_file_index(i)
-
-        # Prepare inputs
-        inputs = tokenizer(prompt, return_tensors="pt").to(device)
-
-        # Generate text
-        with torch.no_grad():
-            output = model.generate(
-                inputs["input_ids"],
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                do_sample=True,
-                pad_token_id=tokenizer.eos_token_id
-            )
-
-        # Decode generated text
-        generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
-        generated_texts.append(generated_text)
-
-        # Save response to file
-        response_file = os.path.join(output_dir, f"{file_idx}.txt")
-        with open(response_file, 'w', encoding='utf-8') as f:
-            f.write(generated_text)
-    return generated_texts
-
 def prompt_collate_fn(batch, tokenizer):
     """
     Custom collate function that handles variable length inputs.
@@ -283,7 +229,58 @@ def prompt_collate_fn(batch, tokenizer):
 
     return batch_dict
 
-def find_top_k_influential(scores, k=100, prompt_dataset=None, train_dataset=None, tokenizer=None, output_dir=None):
+def generate_responses(model, tokenizer, prompt_dataset, output_dir, device="cuda", max_new_tokens=200, temperature=0.7):
+    """
+    Generate text responses for each prompt in the dataset and save to files.
+
+    Args:
+        model: The language model to use for generation
+        tokenizer: The tokenizer associated with the model
+        prompt_dataset: Dataset containing prompts
+        output_dir: Directory to save responses
+        device: Device to run generation on ("cuda" or "cpu")
+        max_new_tokens: Maximum number of new tokens to generate
+        temperature: Temperature for sampling during generation
+
+    Returns:
+        List of generated texts
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Ensure model is in evaluation mode and on the correct device
+    model.eval()
+    model.to(device)
+
+    # Generate text for each prompt and save to files
+    generated_texts = []
+    for i in range(len(prompt_dataset)):
+        prompt = prompt_dataset.get_raw_prompt(i)
+        file_idx = prompt_dataset.get_file_index(i)
+
+        # Prepare inputs
+        inputs = tokenizer(prompt, return_tensors="pt").to(device)
+
+        # Generate text
+        with torch.no_grad():
+            output = model.generate(
+                inputs["input_ids"],
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id
+            )
+
+        # Decode generated text
+        generated_text = tokenizer.decode(output[0], skip_special_tokens=True)
+        generated_texts.append(generated_text)
+
+        # Save response to file
+        response_file = os.path.join(output_dir, f"{file_idx}.txt")
+        with open(response_file, 'w', encoding='utf-8') as f:
+            f.write(generated_text)
+    return generated_texts
+
+def retrieve_top_k(scores, k=10, prompt_dataset=None, train_dataset=None, tokenizer=None, output_dir=None):
     """
     Find the top k most influential training examples for each test prompt based on attribution scores.
     Optionally save the results to individual files.
@@ -376,7 +373,6 @@ def result_filename(args):
 
     if args.projection is not None:
         filename_parts.append(args.projection)
-
 
     filename_parts.append(f"thrd-{args.threshold}")
     filename_parts.append(f"rdp-{args.random_drop}")

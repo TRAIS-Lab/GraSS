@@ -616,7 +616,7 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from Llama3_8B_OWT.utils import SubsetSampler, FilePromptDataset, get_worker_batch_range, prompt_collate_fn, generate_and_save_responses, setup_projection_kwargs, find_top_k_influential, result_filename
+    from Llama3_8B_OWT.utils import SubsetSampler, FilePromptDataset, get_worker_batch_range, prompt_collate_fn, generate_responses, setup_projection_kwargs, retrieve_top_k, result_filename
 
     if args.device.startswith("cuda"):
         # Check if GPU is available
@@ -726,7 +726,7 @@ def main():
 
             logger.info("Generating the response for each prompt...")
             response_output_dir = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/response/")
-            generated_texts = generate_and_save_responses(
+            generate_responses(
                 model,
                 tokenizer,
                 prompt_dataset,
@@ -737,7 +737,7 @@ def main():
 
             logger.info(f"Retrieving the top 100 influential examples for each prompt...")
             topk_output_dir = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/topk/")
-            top_influential_per_prompt = find_top_k_influential(
+            retrieve_top_k(
                 score,
                 k=5,
                 prompt_dataset=prompt_dataset,
