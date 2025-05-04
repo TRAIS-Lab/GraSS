@@ -16,6 +16,119 @@ import torch.nn as nn
 from torch import Tensor
 
 
+@dataclass
+class BatchInfo:
+    """Data structure for batch processing information."""
+    batch_range: Tuple[int, int]
+    sample_counts: List[int]
+    total_samples: int
+
+class MetadataManager:
+    """
+    Manages metadata about batches, layers, and processing state.
+    """
+
+    def __init__(self, cache_dir: str, layer_names: List[str]):
+        """
+        Initialize the MetadataManager.
+
+        Args:
+            cache_dir: Directory for metadata storage
+            layer_names: Names of neural network layers
+        """
+        self.cache_dir = cache_dir
+        self.layer_names = layer_names
+        self.batch_info = {}
+
+        if cache_dir:
+            os.makedirs(cache_dir, exist_ok=True)
+
+            # Check for existing metadata
+            self._load_metadata_if_exists()
+
+    def _get_metadata_path(self) -> str:
+        """Get the path to the metadata file."""
+        return os.path.join(self.cache_dir, "batch_metadata.json")
+
+    def _load_metadata_if_exists(self) -> None:
+        """Load metadata from disk if it exists."""
+        metadata_path = self._get_metadata_path()
+        if os.path.exists(metadata_path):
+            try:
+                with open(metadata_path, 'r') as f:
+                    metadata = json.load(f)
+                    # Convert string keys back to integers
+                    self.batch_info = {
+                        int(batch_idx): BatchInfo(**info)
+                        for batch_idx, info in metadata['batch_info'].items()
+                    }
+            except Exception as e:
+                print(f"Error loading metadata: {e}")
+
+    def save_batch_info(self, batch_idx: int, batch_range: Tuple[int, int],
+                       sample_counts: List[int], total_samples: int) -> None:
+        """
+        Save information about a processed batch.
+
+        Args:
+            batch_idx: Index of the batch
+            batch_range: Tuple of (start_batch, end_batch)
+            sample_counts: Sample counts for each mini-batch
+            total_samples: Total number of samples in the batch
+        """
+        self.batch_info[batch_idx] = BatchInfo(
+            batch_range=batch_range,
+            sample_counts=sample_counts,
+            total_samples=total_samples
+        )
+
+        # Save to disk if cache directory is set
+        if self.cache_dir:
+            metadata_path = self._get_metadata_path()
+
+            # Convert to serializable format
+            serializable_info = {
+                str(idx): {
+                    "batch_range": info.batch_range,
+                    "sample_counts": info.sample_counts,
+                    "total_samples": info.total_samples
+                }
+                for idx, info in self.batch_info.items()
+            }
+
+            metadata = {
+                'batch_info': serializable_info,
+                'layer_names': self.layer_names,
+            }
+
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+
+    def get_batch_indices(self) -> List[int]:
+        """Get all batch indices."""
+        return sorted(self.batch_info.keys())
+
+    def get_total_samples(self) -> int:
+        """Get total number of samples across all batches."""
+        return sum(info.total_samples for _, info in self.batch_info.items())
+
+    def get_batch_to_sample_mapping(self) -> Dict[int, Tuple[int, int]]:
+        """
+        Get mapping from batch indices to sample ranges.
+
+        Returns:
+            Dictionary mapping batch index to (start_sample, end_sample) tuple
+        """
+        mapping = {}
+        current_sample = 0
+
+        for batch_idx in sorted(self.batch_info.keys()):
+            info = self.batch_info[batch_idx]
+            mapping[batch_idx] = (current_sample, current_sample + info.total_samples)
+            current_sample += info.total_samples
+
+        return mapping
+
 def _vectorize(
     g: Dict[str, Tensor],
     batch_dim: Optional[bool] = True,
