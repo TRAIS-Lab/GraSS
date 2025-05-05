@@ -52,5 +52,3 @@ dist
 *.json
 
 $SCRATCH
-
-visualization.ipynb
