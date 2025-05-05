@@ -1,15 +1,30 @@
 from __future__ import annotations
 
-from typing import Dict, Literal, List, Optional
+from typing import TYPE_CHECKING, List, Dict, Optional, Literal
+
 import os
 from concurrent.futures import ThreadPoolExecutor
 import glob
-
+import contextlib
 import torch
 
-# Type hints
-HessianOptions = Literal["none", "raw", "kfac", "ekfac"]
 DataTypeOptions = Literal["gradients", "preconditioners", "ifvp"]
+HessianOptions = Literal["none", "raw", "kfac", "ekfac"]
+
+@contextlib.contextmanager
+def async_stream():
+    """
+    Context manager for asynchronous CUDA stream operations.
+    All operations within this context will be executed asynchronously.
+    """
+    if torch.cuda.is_available():
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            yield stream
+        # Ensure stream operations complete before returning
+        stream.synchronize()
+    else:
+        yield None
 
 class DiskIOManager:
     """
@@ -295,4 +310,3 @@ class DiskIOManager:
         for future in self.futures:
             future.result()
         self.futures = []
-

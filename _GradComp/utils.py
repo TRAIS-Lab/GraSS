@@ -3,26 +3,15 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Dict, Optional, Tuple
 
 import numpy as np
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
-    from typing import Any, Dict, Optional, Tuple
-
+import time
+import json
 import torch
 import torch.nn as nn
 from torch import Tensor
-
-
-@dataclass
-class BatchInfo:
-    """Data structure for batch processing information."""
-    batch_range: Tuple[int, int]
-    sample_counts: List[int]
-    total_samples: int
 
 class MetadataManager:
     """
@@ -40,6 +29,7 @@ class MetadataManager:
         self.cache_dir = cache_dir
         self.layer_names = layer_names
         self.batch_info = {}
+        self.total_samples = 0
 
         if cache_dir:
             os.makedirs(cache_dir, exist_ok=True)
@@ -58,52 +48,106 @@ class MetadataManager:
             try:
                 with open(metadata_path, 'r') as f:
                     metadata = json.load(f)
-                    # Convert string keys back to integers
+                    # Convert string keys back to integers for batch info
                     self.batch_info = {
-                        int(batch_idx): BatchInfo(**info)
+                        int(batch_idx): {
+                            "sample_count": info["sample_count"],
+                            "start_idx": info["start_idx"]
+                        }
                         for batch_idx, info in metadata['batch_info'].items()
                     }
+                    self.total_samples = metadata.get('total_samples', 0)
+
+                print(f"Loaded metadata for {len(self.batch_info)} batches from {metadata_path}")
             except Exception as e:
                 print(f"Error loading metadata: {e}")
 
-    def save_batch_info(self, batch_idx: int, batch_range: Tuple[int, int],
-                       sample_counts: List[int], total_samples: int) -> None:
+    def add_batch_info(self, batch_idx: int, sample_count: int) -> None:
         """
-        Save information about a processed batch.
-
-        Args:
-            batch_idx: Index of the batch
-            batch_range: Tuple of (start_batch, end_batch)
-            sample_counts: Sample counts for each mini-batch
-            total_samples: Total number of samples in the batch
+        Add information about a processed batch without assuming sample order.
+        Only stores the sample count; start indices are computed when saving metadata.
         """
-        self.batch_info[batch_idx] = BatchInfo(
-            batch_range=batch_range,
-            sample_counts=sample_counts,
-            total_samples=total_samples
-        )
+        # Only store the sample count; don't calculate start_idx yet
+        self.batch_info[batch_idx] = {
+            "sample_count": sample_count,
+            "start_idx": 0  # Placeholder, will be properly set when saving
+        }
 
-        # Save to disk if cache directory is set
-        if self.cache_dir:
-            metadata_path = self._get_metadata_path()
+    def save_metadata(self) -> None:
+        """Save all metadata to disk with file locking, supporting out-of-order batch processing."""
+        if not self.cache_dir:
+            return
 
-            # Convert to serializable format
-            serializable_info = {
-                str(idx): {
-                    "batch_range": info.batch_range,
-                    "sample_counts": info.sample_counts,
-                    "total_samples": info.total_samples
+        metadata_path = self._get_metadata_path()
+        lock_path = metadata_path + ".lock"
+
+        # Try to acquire a lock
+        try:
+            # Simple file-based lock
+            with open(lock_path, 'x') as lock_file:
+                # First, load any existing metadata to merge with our updates
+                existing_batch_info = {}
+                if os.path.exists(metadata_path):
+                    try:
+                        with open(metadata_path, 'r') as f:
+                            metadata = json.load(f)
+                            # Convert string keys back to integers
+                            existing_batch_info = {
+                                int(batch_idx): info
+                                for batch_idx, info in metadata.get('batch_info', {}).items()
+                            }
+                    except Exception as e:
+                        print(f"Error loading existing metadata: {e}")
+
+                # Merge our batch info with existing batch info
+                merged_batch_info = {**existing_batch_info, **self.batch_info}
+
+                # Recompute all start indices based on batch order
+                sorted_batches = sorted(merged_batch_info.keys())
+                current_idx = 0
+
+                for batch_idx in sorted_batches:
+                    merged_batch_info[batch_idx]["start_idx"] = current_idx
+                    current_idx += merged_batch_info[batch_idx]["sample_count"]
+
+                # Calculate total samples from the merged data
+                total_samples = current_idx
+
+                # Prepare serializable format
+                serializable_info = {
+                    str(idx): info for idx, info in merged_batch_info.items()
                 }
-                for idx, info in self.batch_info.items()
-            }
 
-            metadata = {
-                'batch_info': serializable_info,
-                'layer_names': self.layer_names,
-            }
+                metadata = {
+                    'batch_info': serializable_info,
+                    'layer_names': self.layer_names,
+                    'total_samples': total_samples
+                }
 
-            with open(metadata_path, 'w') as f:
-                json.dump(metadata, f, indent=2)
+                # Write to temporary file then rename (atomic operation)
+                temp_path = metadata_path + ".tmp"
+                with open(temp_path, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+
+                os.replace(temp_path, metadata_path)
+
+                # Update our in-memory state to match what we saved
+                self.batch_info = merged_batch_info
+                self.total_samples = total_samples
+
+                print(f"Saved metadata for {len(self.batch_info)} batches to {metadata_path}")
+        except FileExistsError:
+            # Lock already exists, wait and retry
+            print("Metadata is being updated by another process, waiting...")
+            time.sleep(1)
+            self.save_metadata()  # Recursive retry
+        finally:
+            # Remove lock file if it exists and we created it
+            if os.path.exists(lock_path):
+                try:
+                    os.remove(lock_path)
+                except:
+                    pass
 
     def get_batch_indices(self) -> List[int]:
         """Get all batch indices."""
@@ -111,7 +155,7 @@ class MetadataManager:
 
     def get_total_samples(self) -> int:
         """Get total number of samples across all batches."""
-        return sum(info.total_samples for _, info in self.batch_info.items())
+        return self.total_samples
 
     def get_batch_to_sample_mapping(self) -> Dict[int, Tuple[int, int]]:
         """
@@ -121,12 +165,12 @@ class MetadataManager:
             Dictionary mapping batch index to (start_sample, end_sample) tuple
         """
         mapping = {}
-        current_sample = 0
 
         for batch_idx in sorted(self.batch_info.keys()):
             info = self.batch_info[batch_idx]
-            mapping[batch_idx] = (current_sample, current_sample + info.total_samples)
-            current_sample += info.total_samples
+            start_idx = info["start_idx"]
+            end_idx = start_idx + info["sample_count"]
+            mapping[batch_idx] = (start_idx, end_idx)
 
         return mapping
 

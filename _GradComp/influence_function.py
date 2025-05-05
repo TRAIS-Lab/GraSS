@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, Literal, List, Optional, Union, Tuple, TypedDict, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, Tuple, Literal
 import os
 import time
-import json
+
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-import glob
-import contextlib
 
 if TYPE_CHECKING:
     from torch.utils.data import DataLoader
@@ -17,14 +15,12 @@ import torch
 from tqdm import tqdm
 
 from .hook import HookManager
-from .utils import stable_inverse
+from .utils import stable_inverse, MetadataManager
 from .projector import setup_model_projectors
+from .IOManager import DiskIOManager
 
-# Type hints
 OffloadOptions = Literal["none", "cpu", "disk"]
 HessianOptions = Literal["none", "raw", "kfac", "ekfac"]
-DataTypeOptions = Literal["gradients", "preconditioners", "ifvp"]
-
 
 @dataclass
 class ProfilingStats:
@@ -34,479 +30,6 @@ class ProfilingStats:
     backward: float = 0.0
     precondition: float = 0.0
     disk_io: float = 0.0
-
-
-@dataclass
-class BatchInfo:
-    """Data structure for batch processing information."""
-    batch_range: Tuple[int, int]
-    sample_counts: List[int]
-    total_samples: int
-
-
-@contextlib.contextmanager
-def async_stream():
-    """
-    Context manager for asynchronous CUDA stream operations.
-    All operations within this context will be executed asynchronously.
-    """
-    if torch.cuda.is_available():
-        stream = torch.cuda.Stream()
-        with torch.cuda.stream(stream):
-            yield stream
-        # Ensure stream operations complete before returning
-        stream.synchronize()
-    else:
-        yield None
-
-
-class DiskIOManager:
-    """
-    Manager for disk I/O operations with thread pool for parallel processing.
-    Handles standardized paths, async reading/writing, and metadata management.
-
-    File organization:
-    cache_dir/
-      ├── grad/
-      │   ├── batch_0.pt  # Contains all layer gradients for batch 0
-      │   ├── batch_1.pt
-      │   └── ...
-      ├── ifvp/
-      │   ├── batch_0.pt  # Contains all layer IFVP for batch 0
-      │   ├── batch_1.pt
-      │   └── ...
-      └── precond/
-          ├── layer_0.pt  # One preconditioner per layer
-          ├── layer_1.pt
-          └── ...
-    """
-
-    def __init__(self, cache_dir: str, setting: str, num_threads: int = 32, hessian: HessianOptions = "raw"):
-        """
-        Initialize the DiskIOManager.
-
-        Args:
-            cache_dir: Directory to save files
-            setting: Experiment setting/name
-            num_threads: Number of worker threads for I/O operations
-            hessian: Hessian approximation type for path generation
-        """
-        self.cache_dir = cache_dir
-        self.setting = setting
-        self.num_threads = num_threads
-        self.hessian = hessian
-
-        # Create cache directory if it doesn't exist
-        if cache_dir:
-            os.makedirs(cache_dir, exist_ok=True)
-
-        # Thread pool for async operations
-        self.executor = ThreadPoolExecutor(max_workers=num_threads)
-        self.futures = []
-
-    def get_path(self,
-                 data_type: DataTypeOptions,
-                 batch_idx: Optional[int] = None,
-                 layer_idx: Optional[int] = None,
-                 is_test: bool = False) -> str:
-        """
-        Generate standardized path for data storage.
-
-        Args:
-            data_type: Type of data ('gradients', 'preconditioners', or 'ifvp')
-            batch_idx: Optional batch index for batch-specific files
-            layer_idx: Optional layer index for preconditioners
-            is_test: Whether this is for test data
-
-        Returns:
-            Full path to the file
-        """
-        if not self.cache_dir:
-            raise ValueError("Cache directory is not set")
-
-        # Determine subdirectory based on data type
-        if data_type == 'gradients':
-            subdir = 'grad'
-        elif data_type == 'preconditioners':
-            subdir = 'precond'
-        elif data_type == 'ifvp':
-            subdir = 'ifvp'
-        else:
-            raise ValueError(f"Unknown data type: {data_type}")
-
-        # Create subdirectory if it doesn't exist
-        subdir_path = os.path.join(self.cache_dir, subdir)
-        os.makedirs(subdir_path, exist_ok=True)
-
-        # Determine filename
-        if data_type == 'preconditioners':
-            if layer_idx is None:
-                raise ValueError("Layer index must be provided for preconditioners")
-            filename = f"layer_{layer_idx}.pt"
-        else:
-            if batch_idx is None:
-                raise ValueError("Batch index must be provided for gradients and IFVP")
-            prefix = "test_" if is_test else ""
-            filename = f"{prefix}batch_{batch_idx}.pt"
-
-        return os.path.join(subdir_path, filename)
-
-    def save_tensor(self, tensor: torch.Tensor, path: str, async_save: bool = True) -> None:
-        """
-        Save a tensor to disk, optionally asynchronously.
-        Uses CUDA stream for efficient CPU transfer and thread pool for disk I/O.
-
-        Args:
-            tensor: The tensor to save
-            path: Path where to save the tensor
-            async_save: Whether to save asynchronously
-        """
-        # Ensure the directory exists
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-
-        # Use async stream for CPU transfer if tensor is on CUDA
-        if tensor.is_cuda:
-            with async_stream():
-                cpu_tensor = tensor.cpu()
-
-                if async_save:
-                    # Save asynchronously using thread pool
-                    future = self.executor.submit(torch.save, cpu_tensor, path)
-                    self.futures.append(future)
-                else:
-                    # Save synchronously
-                    torch.save(cpu_tensor, path)
-        else:
-            # Tensor already on CPU
-            if async_save:
-                future = self.executor.submit(torch.save, tensor, path)
-                self.futures.append(future)
-            else:
-                torch.save(tensor, path)
-
-    def save_dict(self, data_dict: Dict, path: str, async_save: bool = True) -> None:
-        """
-        Save a dictionary of tensors to disk, optionally asynchronously.
-        Uses CUDA stream for efficient CPU transfer and thread pool for disk I/O.
-
-        Args:
-            data_dict: Dictionary of tensors to save
-            path: Path where to save the dictionary
-            async_save: Whether to save asynchronously
-        """
-        # Ensure the directory exists
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-
-        # Process CUDA tensors if present
-        has_cuda = any(isinstance(v, torch.Tensor) and v.is_cuda for v in data_dict.values())
-
-        if has_cuda:
-            with async_stream():
-                # Transfer all tensors to CPU within the stream
-                cpu_dict = {k: v.cpu() if isinstance(v, torch.Tensor) and v.is_cuda else v
-                          for k, v in data_dict.items()}
-
-                if async_save:
-                    # Save asynchronously using thread pool
-                    future = self.executor.submit(torch.save, cpu_dict, path)
-                    self.futures.append(future)
-                else:
-                    # Save synchronously
-                    torch.save(cpu_dict, path)
-        else:
-            # No CUDA tensors
-            if async_save:
-                future = self.executor.submit(torch.save, data_dict, path)
-                self.futures.append(future)
-            else:
-                torch.save(data_dict, path)
-
-    def load_tensor(self, path: str) -> torch.Tensor:
-        """
-        Load a tensor from disk.
-
-        Args:
-            path: Path to the tensor file
-
-        Returns:
-            The loaded tensor
-        """
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Could not find tensor file: {path}")
-
-        return torch.load(path)
-
-    def load_dict(self, path: str) -> Dict:
-        """
-        Load a dictionary of tensors from disk.
-
-        Args:
-            path: Path to the dictionary file
-
-        Returns:
-            The loaded dictionary
-        """
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Could not find dictionary file: {path}")
-
-        return torch.load(path)
-
-    def batch_load_tensors(self, paths: List[str], process_fn=None) -> List[torch.Tensor]:
-        """
-        Load multiple tensors in parallel.
-
-        Args:
-            paths: List of paths to tensor files
-            process_fn: Optional function to process each tensor after loading
-
-        Returns:
-            List of loaded tensors
-        """
-        # Submit all load jobs to thread pool
-        futures = [self.executor.submit(self.load_tensor, path) for path in paths]
-
-        # Wait for all to complete and gather results
-        tensors = []
-        for future in futures:
-            tensor = future.result()
-            if process_fn:
-                tensor = process_fn(tensor)
-            tensors.append(tensor)
-
-        return tensors
-
-    def batch_load_dicts(self, paths: List[str]) -> List[Dict]:
-        """
-        Load multiple dictionaries in parallel.
-
-        Args:
-            paths: List of paths to dictionary files
-
-        Returns:
-            List of loaded dictionaries
-        """
-        # Submit all load jobs to thread pool
-        futures = [self.executor.submit(self.load_dict, path) for path in paths]
-
-        # Wait for all to complete and gather results
-        return [future.result() for future in futures]
-
-    def find_batch_files(self,
-                       data_type: DataTypeOptions,
-                       is_test: bool = False) -> List[str]:
-        """
-        Find all batch files for a specific data type.
-
-        Args:
-            data_type: Type of data
-            is_test: Whether to look for test data
-
-        Returns:
-            List of file paths
-        """
-        if not self.cache_dir:
-            return []
-
-        # Determine subdirectory based on data type
-        if data_type == 'gradients':
-            subdir = 'grad'
-        elif data_type == 'ifvp':
-            subdir = 'ifvp'
-        else:
-            raise ValueError(f"Cannot find batch files for data type: {data_type}")
-
-        # Construct path pattern
-        prefix = "test_" if is_test else ""
-        pattern = os.path.join(self.cache_dir, subdir, f"{prefix}batch_*.pt")
-
-        # Find all matching files
-        return sorted(glob.glob(pattern))
-
-    def extract_batch_idx(self, path: str) -> int:
-        """
-        Extract batch index from file path.
-
-        Args:
-            path: File path
-
-        Returns:
-            Batch index
-        """
-        filename = os.path.basename(path)
-        # Extract batch index from filename (e.g., "batch_42.pt" -> 42)
-        try:
-            return int(filename.split('_')[1].split('.')[0])
-        except (IndexError, ValueError):
-            raise ValueError(f"Could not extract batch index from {filename}")
-
-    def wait_for_async_operations(self) -> None:
-        """Wait for all pending async operations to complete."""
-        for future in self.futures:
-            future.result()
-        self.futures = []
-
-
-class MetadataManager:
-    """
-    Manages metadata about batches, layers, and processing state.
-    """
-
-    def __init__(self, cache_dir: str, layer_names: List[str]):
-        """
-        Initialize the MetadataManager.
-
-        Args:
-            cache_dir: Directory for metadata storage
-            layer_names: Names of neural network layers
-        """
-        self.cache_dir = cache_dir
-        self.layer_names = layer_names
-        self.batch_info = {}
-        self.total_samples = 0
-
-        if cache_dir:
-            os.makedirs(cache_dir, exist_ok=True)
-
-            # Check for existing metadata
-            self._load_metadata_if_exists()
-
-    def _get_metadata_path(self) -> str:
-        """Get the path to the metadata file."""
-        return os.path.join(self.cache_dir, "batch_metadata.json")
-
-    def _load_metadata_if_exists(self) -> None:
-        """Load metadata from disk if it exists."""
-        metadata_path = self._get_metadata_path()
-        if os.path.exists(metadata_path):
-            try:
-                with open(metadata_path, 'r') as f:
-                    metadata = json.load(f)
-                    # Convert string keys back to integers for batch info
-                    self.batch_info = {
-                        int(batch_idx): {
-                            "sample_count": info["sample_count"],
-                            "start_idx": info["start_idx"]
-                        }
-                        for batch_idx, info in metadata['batch_info'].items()
-                    }
-                    self.total_samples = metadata.get('total_samples', 0)
-
-                print(f"Loaded metadata for {len(self.batch_info)} batches from {metadata_path}")
-            except Exception as e:
-                print(f"Error loading metadata: {e}")
-
-    def add_batch_info(self, batch_idx: int, sample_count: int) -> None:
-        """
-        Add information about a processed batch without assuming sample order.
-        Only stores the sample count; start indices are computed when saving metadata.
-        """
-        # Only store the sample count; don't calculate start_idx yet
-        self.batch_info[batch_idx] = {
-            "sample_count": sample_count,
-            "start_idx": 0  # Placeholder, will be properly set when saving
-        }
-
-    def save_metadata(self) -> None:
-        """Save all metadata to disk with file locking, supporting out-of-order batch processing."""
-        if not self.cache_dir:
-            return
-
-        metadata_path = self._get_metadata_path()
-        lock_path = metadata_path + ".lock"
-
-        # Try to acquire a lock
-        try:
-            # Simple file-based lock
-            with open(lock_path, 'x') as lock_file:
-                # First, load any existing metadata to merge with our updates
-                existing_batch_info = {}
-                if os.path.exists(metadata_path):
-                    try:
-                        with open(metadata_path, 'r') as f:
-                            metadata = json.load(f)
-                            # Convert string keys back to integers
-                            existing_batch_info = {
-                                int(batch_idx): info
-                                for batch_idx, info in metadata.get('batch_info', {}).items()
-                            }
-                    except Exception as e:
-                        print(f"Error loading existing metadata: {e}")
-
-                # Merge our batch info with existing batch info
-                merged_batch_info = {**existing_batch_info, **self.batch_info}
-
-                # Recompute all start indices based on batch order
-                sorted_batches = sorted(merged_batch_info.keys())
-                current_idx = 0
-
-                for batch_idx in sorted_batches:
-                    merged_batch_info[batch_idx]["start_idx"] = current_idx
-                    current_idx += merged_batch_info[batch_idx]["sample_count"]
-
-                # Calculate total samples from the merged data
-                total_samples = current_idx
-
-                # Prepare serializable format
-                serializable_info = {
-                    str(idx): info for idx, info in merged_batch_info.items()
-                }
-
-                metadata = {
-                    'batch_info': serializable_info,
-                    'layer_names': self.layer_names,
-                    'total_samples': total_samples
-                }
-
-                # Write to temporary file then rename (atomic operation)
-                temp_path = metadata_path + ".tmp"
-                with open(temp_path, 'w') as f:
-                    json.dump(metadata, f, indent=2)
-
-                os.replace(temp_path, metadata_path)
-
-                # Update our in-memory state to match what we saved
-                self.batch_info = merged_batch_info
-                self.total_samples = total_samples
-
-                print(f"Saved metadata for {len(self.batch_info)} batches to {metadata_path}")
-        except FileExistsError:
-            # Lock already exists, wait and retry
-            print("Metadata is being updated by another process, waiting...")
-            time.sleep(1)
-            self.save_metadata()  # Recursive retry
-        finally:
-            # Remove lock file if it exists and we created it
-            if os.path.exists(lock_path):
-                try:
-                    os.remove(lock_path)
-                except:
-                    pass
-
-    def get_batch_indices(self) -> List[int]:
-        """Get all batch indices."""
-        return sorted(self.batch_info.keys())
-
-    def get_total_samples(self) -> int:
-        """Get total number of samples across all batches."""
-        return self.total_samples
-
-    def get_batch_to_sample_mapping(self) -> Dict[int, Tuple[int, int]]:
-        """
-        Get mapping from batch indices to sample ranges.
-
-        Returns:
-            Dictionary mapping batch index to (start_sample, end_sample) tuple
-        """
-        mapping = {}
-
-        for batch_idx in sorted(self.batch_info.keys()):
-            info = self.batch_info[batch_idx]
-            start_idx = info["start_idx"]
-            end_idx = start_idx + info["sample_count"]
-            mapping[batch_idx] = (start_idx, end_idx)
-
-        return mapping
-
 
 class IFAttributor:
     """
@@ -858,7 +381,7 @@ class IFAttributor:
         else:
             return gradients_dict
 
-    def compute_preconditioners(self, damping: Optional[float] = None, save: bool = False) -> List[torch.Tensor]:
+    def compute_preconditioners(self, damping: Optional[float] = None) -> List[torch.Tensor]:
         """
         Compute preconditioners (inverse Hessian) from gradients based on the specified Hessian type.
         Accumulates Hessian contributions from all batches to compute a single preconditioner per layer.
@@ -866,7 +389,6 @@ class IFAttributor:
 
         Args:
             damping: Damping factor for Hessian inverse (uses self.damping if None)
-            save: Whether to save preconditioners to disk (for disk offload)
 
         Returns:
             List of preconditioners for each layer (one preconditioner per layer)
@@ -907,7 +429,7 @@ class IFAttributor:
             batch_files = self.disk_io.find_batch_files('gradients')
 
             # Process in chunks to avoid memory issues
-            chunk_size = 1  # Adjust based on memory constraints
+            chunk_size = 2  # Adjust based on memory constraints
             for i in tqdm(range(0, len(batch_files), chunk_size), desc="Processing batches for preconditioners..."):
                 chunk_files = batch_files[i:i+chunk_size]
 
@@ -998,7 +520,7 @@ class IFAttributor:
                     precond = stable_inverse(hessian, damping=damping)
 
                     # Save or store based on offload strategy
-                    if self.offload == "disk" and save:
+                    if self.offload == "disk":
                         cpu_precond = precond.cpu()
                         file_path = self.disk_io.get_path('preconditioners', layer_idx=layer_idx)
                         self.disk_io.save_tensor(cpu_precond, file_path)
@@ -1015,7 +537,7 @@ class IFAttributor:
 
                 elif self.hessian in ["kfac", "ekfac"]:
                     # Store Hessian itself for KFAC-type preconditioners
-                    if self.offload == "disk" and save:
+                    if self.offload == "disk":
                         file_path = self.disk_io.get_path('preconditioners', layer_idx=layer_idx)
                         self.disk_io.save_tensor(hessian.cpu(), file_path)
                         preconditioners[layer_idx] = hessian.cpu()
@@ -1043,15 +565,12 @@ class IFAttributor:
         else:
             return preconditioners
 
-    def compute_ifvp(self, save: bool = True) -> Dict[int, List[torch.Tensor]]:
+    def compute_ifvp(self) -> Dict[int, List[torch.Tensor]]:
         """
         Compute inverse-Hessian-vector products (IFVP) from gradients and preconditioners.
         Organizes IFVP by batch, with each batch file containing all layer IFVPs.
 
         Optimized to process multiple batches at once and reduce device transfers.
-
-        Args:
-            save: Whether to save the results to disk (for disk offload)
 
         Returns:
             Dictionary mapping batch indices to lists of tensors (one tensor per layer)
@@ -1114,7 +633,7 @@ class IFAttributor:
             batch_files = self.disk_io.find_batch_files('gradients')
 
             # Process in chunks to leverage batch operations
-            chunk_size = 1  # Adjust based on memory and GPU capability
+            chunk_size = 2  # Adjust based on memory and GPU capability
 
             for i in tqdm(range(0, len(batch_files), chunk_size), desc="Processing batches for ifvp..."):
                 chunk_files = batch_files[i:i+chunk_size]
@@ -1213,7 +732,7 @@ class IFAttributor:
                         precond_tensor = precond.to(self.device) if self.offload == "cpu" else precond
 
                     # Process batches in chunks to manage memory
-                    chunk_size = 32
+                    chunk_size = 2
                     for i in range(0, len(batch_indices), chunk_size):
                         chunk_batch_indices = batch_indices[i:i+chunk_size]
 
@@ -1369,8 +888,8 @@ class IFAttributor:
         train_batch_indices = sorted(batch_to_sample_mapping.keys())
 
         # Determine optimal chunk sizes based on memory and dataset characteristics
-        train_chunk_size = min(1, len(train_batch_indices))  # Adjust based on memory available
-        test_chunk_size = min(1, len(test_batch_indices))     # Process multiple test batches at once
+        train_chunk_size = min(2, len(train_batch_indices))  # Adjust based on memory available
+        test_chunk_size = min(2, len(test_batch_indices))     # Process multiple test batches at once
 
         # Calculate influence scores by processing chunks of train and test batches
         for test_chunk_start in tqdm(range(0, len(test_grads_dict), test_chunk_size), desc="Attributing test batches..."):
@@ -1538,7 +1057,7 @@ class IFAttributor:
 
         # If not found, compute them
         print("Preconditioners not found. Computing them now...")
-        result = self.compute_preconditioners(save=False)
+        result = self.compute_preconditioners()
         if self.profile:
             return result[0]
         else:

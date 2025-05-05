@@ -641,43 +641,13 @@ def main():
         torch.cuda.synchronize(device)
         cache_start_time = time.time()
         attributor.cache_gradients(train_dataloader)
-        attributor.compute_ifvp(save=True)
-
-        # attributor.cache_gradients(train_dataloader, batch_range=(100, 146))
-        # attributor.cache_gradients(train_dataloader, batch_range=(0, 50))
-        # attributor.cache_gradients(train_dataloader, batch_range=(50, 100))
-
-        # attributor = IFAttributor(
-        #     setting="GPT2_wikitext",
-        #     model=model,
-        #     layer_names=layer_names,
-        #     hessian=hessian,
-        #     profile=args.profile,
-        #     device=device,
-        #     projector_kwargs=projector_kwargs,
-        #     offload="disk",
-        #     cache_dir="./GradComp/cache",
-        # )
-
-        # attributor.compute_preconditioners()
-        # attributor.compute_ifvp(save=True)
-        # torch.cuda.synchronize(device)
+        attributor.compute_ifvp()
+        torch.cuda.synchronize(device)
         cache_end_time = time.time()
 
         # Measure attribute throughput
         torch.cuda.synchronize(device)
         attribute_start_time = time.time()
-        # attributor = IFAttributor(
-        #     setting="GPT2_wikitext",
-        #     model=model,
-        #     layer_names=layer_names,
-        #     hessian=hessian,
-        #     profile=args.profile,
-        #     device=device,
-        #     projector_kwargs=projector_kwargs,
-        #     offload="disk",
-        #     cache_dir="./GradComp/cache",
-        # )
         if args.profile:
             score, profile = attributor.attribute(test_dataloader=test_dataloader)
         else:
