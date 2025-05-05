@@ -1,20 +1,15 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, Literal, List, Optional, Union, Tuple, TypedDict, cast
+from typing import Dict, Literal, List, Optional
 import os
-import time
-import json
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 import glob
-import contextlib
-
-if TYPE_CHECKING:
-    from torch.utils.data import DataLoader
-    import torch.nn as nn
 
 import torch
-from tqdm import tqdm
+
+# Type hints
+HessianOptions = Literal["none", "raw", "kfac", "ekfac"]
+DataTypeOptions = Literal["gradients", "preconditioners", "ifvp"]
 
 class DiskIOManager:
     """

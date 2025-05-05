@@ -616,7 +616,7 @@ def main():
     if args.baseline == "GC":
         check_min_version("4.46.0")
         from _GradComp.utils import find_layers
-        from _GradComp.influence_function import IFAttributor
+        from _GradComp.influence_function_old import IFAttributor
 
         # get which Hessian to use
         tda, hessian = args.tda.split("-")
@@ -633,15 +633,16 @@ def main():
             profile=args.profile,
             device=device,
             projector_kwargs=projector_kwargs,
-            offload="disk",
+            offload="cpu",
             cache_dir="./GradComp/cache",
         )
 
         # Measure cache throughput
         torch.cuda.synchronize(device)
         cache_start_time = time.time()
-        attributor.cache_gradients(train_dataloader)
-        attributor.compute_ifvp(save=True)
+        # attributor.cache_gradients(train_dataloader)
+        # attributor.compute_ifvp(save=False)
+        attributor.cache(train_dataloader)
 
         # attributor.cache_gradients(train_dataloader, batch_range=(100, 146))
         # attributor.cache_gradients(train_dataloader, batch_range=(0, 50))
