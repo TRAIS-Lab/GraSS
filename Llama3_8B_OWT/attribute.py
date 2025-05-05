@@ -509,10 +509,38 @@ def main():
             trust_remote_code=args.trust_remote_code,
         )
     elif args.model_name_or_path:
-        config = AutoConfig.from_pretrained(
-            args.model_name_or_path,
-            trust_remote_code=args.trust_remote_code,
-        )
+        if args.baseline == "GC":
+            config = AutoConfig.from_pretrained(
+                args.model_name_or_path,
+                trust_remote_code=args.trust_remote_code,
+            )
+        elif args.baseline == "LogIX":
+            import json
+            from pathlib import Path
+            from transformers.models.llama.configuration_llama import LlamaConfig
+
+            # Path to your original config
+            model_name = "meta-llama/Llama-3.1-8B-Instruct"
+            cache_dir = "/work/10367/pbb/vista/.cache/hub"
+
+            # Get the config path directly
+            snapshot_path = Path(cache_dir) / "models--meta-llama--Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659"
+            config_path = snapshot_path / "config.json"
+
+            # Load and modify the config
+            with open(config_path, 'r') as f:
+                config_dict = json.load(f)
+
+            # Fix the rope_scaling structure
+            if "rope_scaling" in config_dict:
+                factor = config_dict["rope_scaling"].get("factor", 1.0)
+                config_dict["rope_scaling"] = {
+                    "type": "linear",
+                    "factor": factor
+                }
+
+            # Create a LlamaConfig directly instead of using AutoConfig.from_dict
+            config = LlamaConfig(**config_dict)
     else:
         config = CONFIG_MAPPING[args.model_type]()
         logger.warning("You are instantiating a new config instance from scratch.")
@@ -624,21 +652,20 @@ def main():
         if not torch.cuda.is_available():
             raise ValueError("CUDA is not available. Please check your CUDA installation.")
         device = torch.device(args.device)
+        torch.cuda.set_device(device)
     else:
         assert args.device == "cpu", "Invalid device. Choose from 'cuda' or 'cpu'."
         device = torch.device("cpu")
-
-    torch.cuda.set_device(device)
 
     # Dataset
     train_dataset = lm_datasets["train"]
     prompt_dataset = FilePromptDataset("./prompts/", tokenizer, block_size)
 
-    train_batch_size, test_batch_size = 7, 7
+    train_batch_size, test_batch_size = 6, 6
 
     train_dataset = train_dataset.select(range(int(1_000_000_000 / block_size)))
     if args.debug: # toy dataset
-        train_dataset = train_dataset.select(range(1_000_000))
+        train_dataset = train_dataset.select(range(int(100_000 / block_size)))
 
     train_sampler = SubsetSampler(range(len(train_dataset)))
     train_dataloader = DataLoader(
@@ -656,7 +683,18 @@ def main():
     projector_kwargs = setup_projection_kwargs(args, device)
 
     # Get the batch range for this worker
-    worker_id, batch_range = get_worker_batch_range(train_dataloader, args.worker)
+    # Parse worker configuration
+    worker_config = args.worker.split("/")
+    if len(worker_config) != 2:
+        raise ValueError("Worker argument must be in format 'WORKER_ID/TOTAL_WORKER'")
+
+    worker_id = int(worker_config[0])
+    total_workers = int(worker_config[1])
+
+    batch_per_worker = (len(train_dataloader) + total_workers - 1) // total_workers  # Ceiling division
+    start_idx = worker_id * batch_per_worker
+    end_idx = min((worker_id + 1) * batch_per_worker, len(train_dataloader))
+    batch_range = (start_idx, end_idx)
 
     # Logging setting
     logger.info(f"The train dataset length: {len(train_dataset)}.")
@@ -799,7 +837,7 @@ def main():
             cache_start_time = time.time()
             trainer.extract_log()
             torch.cuda.synchronize(device)
-            cache_end_time = time.time(device)
+            cache_end_time = time.time()
 
         model = model_cpy # Reset the model to the original one (removing LoRA)
         if args.precondition:

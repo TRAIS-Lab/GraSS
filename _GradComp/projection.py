@@ -385,6 +385,7 @@ class CudaProjector(AbstractProjector):
                     active_dim,
                     proj_dim,
                     device=device,
+                    dtype=torch.bfloat16
                 )
         elif self.method == "Identity":
             # Subsample self.active_indices if the total active indices is larger than proj_dim

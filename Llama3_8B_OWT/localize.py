@@ -518,7 +518,6 @@ def main():
     from _GradComp.utils import find_layers
     from _Localizer.gradient_extractor import GradientExtractor
     from _Localizer.localizer import Localizer
-    import gc
 
     if args.device.startswith("cuda"):
         # Check if GPU is available
@@ -639,7 +638,7 @@ def main():
             train_input_features=train_input_features,
             test_pre_activation=test_pre_activations,
             test_input_features=test_input_features,
-            batch_size=8,
+            batch_size=10,
             accumulation_steps=5,
             num_epochs=args.epoch,
             log_every=args.log_interval,
@@ -676,7 +675,6 @@ def main():
         del train_pre_activations, train_input_features, test_pre_activations, test_input_features
         del optimizer, train_components, test_components
         torch.cuda.empty_cache()
-        gc.collect()
 
     logger.info(f"Worker {worker_id} has completed processing all assigned layers ({start_idx}-{end_idx-1}).")
 

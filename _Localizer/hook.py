@@ -159,6 +159,4 @@ class HookManager:
         self.normalized = [None] * len(self.layer_names)
 
         # Force garbage collection
-        import gc
-        gc.collect()
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
