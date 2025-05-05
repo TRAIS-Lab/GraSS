@@ -1023,7 +1023,7 @@ class IFAttributor:
 
         # If not found, compute them
         print("IFVP not found or cached version not requested. Computing them now...")
-        return self.compute_ifvp(save=True)
+        return self.compute_ifvp()
 
     def _get_preconditioners(self) -> List[Union[torch.Tensor, str, None]]:
         """

@@ -633,8 +633,7 @@ def main():
             profile=args.profile,
             device=device,
             projector_kwargs=projector_kwargs,
-            offload="disk",
-            cache_dir="./GradComp/cache",
+            offload="cpu",
         )
 
         # Measure cache throughput
@@ -649,9 +648,9 @@ def main():
         torch.cuda.synchronize(device)
         attribute_start_time = time.time()
         if args.profile:
-            score, profile = attributor.attribute(test_dataloader=test_dataloader)
+            score, profile = attributor.attribute(test_dataloader=test_dataloader, use_cached_ifvp=False)
         else:
-            score = attributor.attribute(test_dataloader=test_dataloader)
+            score = attributor.attribute(test_dataloader=test_dataloader, use_cached_ifvp=False)
         torch.cuda.synchronize(device)
         attribute_end_time = time.time()
 

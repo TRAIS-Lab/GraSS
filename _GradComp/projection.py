@@ -385,15 +385,12 @@ class CudaProjector(AbstractProjector):
                     active_dim,
                     proj_dim,
                     device=device,
-                    dtype=torch.bfloat16
+                    # dtype=torch.bfloat16 #Add
                 )
-        elif self.method == "Identity":
-            # Subsample self.active_indices if the total active indices is larger than proj_dim
-            active_dim = self.active_indices.numel()
-            if active_dim > proj_dim:
-                print(f"Reduced active indices from {active_dim} to {proj_dim} to avoid OOM.")
+        elif self.method == "Random":
+            if self.active_indices.numel() > proj_dim:
                 torch.manual_seed(self.seed)
-                indices = torch.randperm(active_dim)[:proj_dim]
+                indices = torch.randperm(self.active_indices.numel())[:proj_dim]
                 self.active_indices = self.active_indices[indices]
 
 
@@ -522,7 +519,7 @@ class CudaProjector(AbstractProjector):
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
 
             result = features @ proj_matrix / (self.proj_dim ** 0.5)
-        elif self.method == "Identity":
+        elif self.method == "Random":
             features = features[:, self.active_indices]
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
             result = features
@@ -796,7 +793,7 @@ def make_random_projector(
             proj_type = ProjectionType.rademacher
         elif method == "Gaussian":
             proj_type = ProjectionType.normal
-        elif method == "Identity" or method == "Localize":
+        elif method == "Random" or method == "Localize":
             proj_type = ProjectionType.identity
 
         projector = CudaProjector
