@@ -15,11 +15,9 @@ except ImportError:
 
 class SJLTProjection(torch.nn.Module):
     """Sparse Johnson-Lindenstrauss Transform implemented with CUDA kernels"""
-
     def __init__(self, original_dim, proj_dim, c=1, threads=1024, fixed_blocks=84, device='cuda'):
         """
         Initialize SJLT projection
-
         Args:
             original_dim: Original dimension of the input vectors
             proj_dim: Target projection dimension
@@ -29,7 +27,6 @@ class SJLTProjection(torch.nn.Module):
             device: Device to run the computation on (e.g., 'cuda:0', 'cuda:1')
         """
         super(SJLTProjection, self).__init__()
-
         self.original_dim = original_dim
         self.proj_dim = proj_dim
         self.c = c
@@ -42,7 +39,6 @@ class SJLTProjection(torch.nn.Module):
             'rand_indices',
             torch.randint(proj_dim, (original_dim, c), device=device)
         )
-
         self.register_buffer(
             'rand_signs',
             (torch.randint(0, 2, (original_dim, c), device=device) * 2 - 1).to(torch.int8)
@@ -51,10 +47,8 @@ class SJLTProjection(torch.nn.Module):
     def forward(self, x):
         """
         Apply SJLT projection to input tensor
-
         Args:
             x: Input tensor of shape [batch_size, original_dim]
-
         Returns:
             Projected tensor of shape [batch_size, proj_dim]
         """
@@ -79,3 +73,7 @@ class SJLTProjection(torch.nn.Module):
         )[0]
 
         return output
+
+    def extra_repr(self):
+        """Extra information for string representation"""
+        return f'original_dim={self.original_dim}, proj_dim={self.proj_dim}, c={self.c}'
