@@ -169,3 +169,28 @@ def lds(score, training_setting):
     except (FileNotFoundError, RuntimeError) as e:
         print(f"Error: {e}")
         return None, None, None
+
+def split_lds(score, training_setting, split_indices, full_test_len):
+    """
+    Calculate LDS on a subset of the test data.
+
+    Args:
+        score: Attribution scores (train_size x test_subset_size)
+        training_setting: Model setting for loading ground truth
+        split_indices: Indices of the test subset in the full test set
+        full_test_len: Length of the full test set
+
+    Returns:
+        lds_score: LDS score for this subset
+    """
+    # Create a full score tensor with zeros for test examples not in the split
+    full_score = torch.zeros((score.shape[0], full_test_len), dtype=score.dtype, device=score.device)
+
+    # Place the split scores at the correct positions
+    for i, idx in enumerate(split_indices):
+        full_score[:, idx] = score[:, i]
+
+    # Calculate LDS using the original function but with our prepared full_score
+    lds_result, _, _ = lds(full_score, training_setting)
+
+    return lds_result

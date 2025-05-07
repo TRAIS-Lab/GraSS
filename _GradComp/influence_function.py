@@ -388,7 +388,7 @@ class IFAttributor:
         Stores preconditioners in individual files per layer.
 
         Args:
-            damping: Damping factor for Hessian inverse (uses self.damping if None)
+            damping: (Adaptive) damping factor for Hessian inverse (uses self.damping if None)
 
         Returns:
             List of preconditioners for each layer (one preconditioner per layer)
@@ -956,8 +956,7 @@ class IFAttributor:
                             train_ifvp_gpu = train_ifvp.to(self.device)
 
                             # Compute influence for this layer, train batch, and test batch
-                            with torch.cuda.amp.autocast(enabled=True):  # Use mixed precision for faster computation
-                                layer_influence = torch.matmul(train_ifvp_gpu, test_grads_gpu.t())
+                            layer_influence = torch.matmul(train_ifvp_gpu, test_grads_gpu.t())
 
                             # Update influence scores
                             IF_score[row_st:row_ed, col_st:col_ed] += layer_influence.cpu()
@@ -979,7 +978,6 @@ class IFAttributor:
             del test_chunk_grads
             torch.cuda.empty_cache()
 
-        # print(IF_score)
         # Return result
         if self.profile and self.profiling_stats:
             return (IF_score, self.profiling_stats)
@@ -1023,7 +1021,11 @@ class IFAttributor:
 
         # If not found, compute them
         print("IFVP not found or cached version not requested. Computing them now...")
-        return self.compute_ifvp()
+        result = self.compute_ifvp()
+        if self.profile:
+            return result[0]
+        else:
+            return result
 
     def _get_preconditioners(self) -> List[Union[torch.Tensor, str, None]]:
         """

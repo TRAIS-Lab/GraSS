@@ -163,14 +163,15 @@ class TRAKAttributor(BaseAttributor):
                 total_num += grad_t.numel()
                 batch_size = grad_t.shape[0]
 
-                torch.cuda.synchronize(self.device)
-                start_time = time.time()
-                grad_p = (
-                    random_project(
+                projector = random_project(
                         grad_t,
                         batch_size,
                         **self.projector_kwargs,
-                    )(grad_t, ensemble_id=ckpt_idx)
+                    )
+                torch.cuda.synchronize(self.device)
+                start_time = time.time()
+                grad_p = (
+                    projector(grad_t, ensemble_id=ckpt_idx)
                     .clone()
                     .detach()
                 )

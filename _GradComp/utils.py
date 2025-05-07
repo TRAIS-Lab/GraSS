@@ -326,7 +326,7 @@ def stable_inverse(matrix: torch.Tensor, damping: float = None) -> torch.Tensor:
 
     Args:
         matrix: Input matrix to invert
-        damping: Damping factor for numerical stability
+        damping: (Adaptive) Damping factor for numerical stability
 
     Returns:
         Stable inverse of the input matrix
@@ -344,7 +344,9 @@ def stable_inverse(matrix: torch.Tensor, damping: float = None) -> torch.Tensor:
 
     # Add damping to the diagonal
     if damping is None:
-        damping = 0.1 * torch.trace(matrix) / matrix.size(0)
+        damping = 1e-2 * torch.trace(matrix) / matrix.size(0)
+    else:
+        damping = damping * torch.trace(matrix) / matrix.size(0)
 
     damped_matrix = matrix + damping * torch.eye(matrix.size(0), device=matrix.device)
 

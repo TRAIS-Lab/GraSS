@@ -501,7 +501,6 @@ class CudaProjector(AbstractProjector):
 
             features = features[:, self.active_indices]
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
-
             result = features @ proj_matrix / (self.proj_dim ** 0.5)
         elif self.method == "Gaussian":
             if self.pre_compute:
@@ -517,7 +516,6 @@ class CudaProjector(AbstractProjector):
 
             features = features[:, self.active_indices]
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
-
             result = features @ proj_matrix / (self.proj_dim ** 0.5)
         elif self.method == "Random":
             features = features[:, self.active_indices]

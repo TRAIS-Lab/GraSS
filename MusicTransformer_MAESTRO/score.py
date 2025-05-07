@@ -163,12 +163,19 @@ def main():
     print("Test groundtruth values shape:", test_gt[0].shape)
 
     task = AttributionTask(model=model, loss_func=loss_trak, checkpoints=model_details["models_half"][:5])
+    if args.proj_method == "Localize":
+        mask_path = f"./Localize/mask_{args.proj_dim}/result.pt"
+        result = torch.load(mask_path, weights_only=False)
+        active_indices = result['active_indices'].to(args.device)
+    else:
+        active_indices = None
 
     projector_kwargs = {
         "device": args.device,
         "use_half_precision": False,
         "method": args.proj_method,
         "proj_dim": args.proj_dim,
+        "active_indices": active_indices
     }
 
     # Grid search over damping values

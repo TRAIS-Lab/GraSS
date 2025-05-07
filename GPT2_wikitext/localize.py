@@ -252,6 +252,13 @@ def parse_args():
         default=0.9,
         help="The correlation threshold for early stopping.",
     )
+    # >>>>>>>>>>>>>>>>>>>>> Worker parallelization argument >>>>>>>>>>>>>>>>>>>>>
+    parser.add_argument(
+        "--worker",
+        type=str,
+        default="0/1",
+        help="Worker ID and total workers in format WORKER_ID/TOTAL_WORKER",
+    )
 
     args = parser.parse_args()
 
@@ -508,20 +515,18 @@ def main():
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
     from GPT2_wikitext.utils import SubsetSampler, replace_conv1d_modules
     from _GradComp.utils import find_layers
-    from _Localizer.gradient_extractor import GradientExtractor
-    from _Localizer.localizer import Localizer
-    import gc
+    from _Localizer.MLPGradientExtractor import MLPGradientExtractor
+    from _Localizer.MLPLocalizer import MLPLocalizer
 
     if args.device.startswith("cuda"):
         # Check if GPU is available
         if not torch.cuda.is_available():
             raise ValueError("CUDA is not available. Please check your CUDA installation.")
         device = torch.device(args.device)
+        torch.cuda.set_device(device)
     else:
         assert args.device == "cpu", "Invalid device. Choose from 'cuda' or 'cpu'."
         device = torch.device("cpu")
-
-    torch.cuda.set_device(device)
 
     # Dataset
     whole_train_dataset = lm_datasets["train"]
@@ -547,20 +552,46 @@ def main():
     # Extract the layers we want to analyze
     layers = find_layers(model, args.layer, return_type="name_instance")
 
+    # Parse worker configuration
+    worker_config = args.worker.split("/")
+    if len(worker_config) != 2:
+        raise ValueError("Worker argument must be in format 'WORKER_ID/TOTAL_WORKER'")
+
+    worker_id = int(worker_config[0])
+    total_workers = int(worker_config[1])
+
+    if worker_id >= total_workers:
+        raise ValueError(f"Worker ID {worker_id} must be less than total workers {total_workers}")
+
+    logger.info(f"Running as worker {worker_id} of {total_workers}")
+
+    # Divide layers among workers
+    layers_per_worker = (len(layers) + total_workers - 1) // total_workers  # Ceiling division
+    start_idx = worker_id * layers_per_worker
+    end_idx = min((worker_id + 1) * layers_per_worker, len(layers))
+
+    logger.info(f"Worker {worker_id} processing layers {start_idx} to {end_idx-1} (inclusive)")
+    layers_to_process = layers[start_idx:end_idx]
+
+    if not layers_to_process:
+        logger.info(f"No layers assigned to worker {worker_id}. Exiting.")
+        return
+
     # Create output directory for saving masks
     output_dir = f"./Localize/mask_{args.localize}*{args.localize}"
     os.makedirs(output_dir, exist_ok=True)
 
     # Initialize gradient extractor
     logger.info("Initializing gradient extractor...")
-    extractor = GradientExtractor(
+    extractor = MLPGradientExtractor(
         model=model,
         device=device,
     )
 
     # Process each layer individually to save memory
-    for layer_idx, (module_name, layer) in enumerate(layers):
-        logger.info(f"Processing layer {layer_idx + 1}/{len(layers)}: {module_name}")
+    for layer_idx, (module_name, layer) in enumerate(layers_to_process):
+        global_layer_idx = start_idx + layer_idx
+        logger.info(f"Processing layer {global_layer_idx + 1}/{len(layers)}: {module_name}")
 
         # Extract gradients for this specific layer (both train and test)
         train_components, test_components = extractor.extract_gradients_for_layer(
@@ -590,7 +621,7 @@ def main():
         logger.info(f"Training the dual component mask optimizer for layer {layer_idx + 1}...")
 
         # Initialize the optimizer for this layer
-        optimizer = Localizer(
+        optimizer = MLPLocalizer(
             pre_activation_dim=pre_activation_dim,
             input_features_dim=input_features_dim,
             lambda_reg=args.regularization,
@@ -609,6 +640,7 @@ def main():
             train_input_features=train_input_features,
             test_pre_activation=test_pre_activations,
             test_input_features=test_input_features,
+            batch_size=100,
             num_epochs=args.epoch,
             log_every=args.log_interval,
             correlation_threshold=args.early_stop,
@@ -644,9 +676,8 @@ def main():
         del train_pre_activations, train_input_features, test_pre_activations, test_input_features
         del optimizer, train_components, test_components
         torch.cuda.empty_cache()
-        gc.collect()
 
-    logger.info("Gradient component analysis completed for all layers.")
+    logger.info(f"Worker {worker_id} has completed processing all assigned layers ({start_idx}-{end_idx-1}).")
 
 
 if __name__ == "__main__":

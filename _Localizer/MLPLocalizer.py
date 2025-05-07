@@ -6,7 +6,7 @@ from scipy.stats import spearmanr
 import math
 from torch.utils.data import DataLoader, TensorDataset
 
-class Localizer:
+class MLPLocalizer:
     def __init__(
             self,
             pre_activation_dim,
@@ -160,7 +160,7 @@ class Localizer:
         masked_var = torch.sum(masked_centered**2, dim=1)
 
         # Use a larger epsilon for numerical stability
-        epsilon = 1e-4  # Increased from 1e-5
+        epsilon = 1e-5
 
         # Create a mask for valid samples (non-zero variance)
         valid_samples = (orig_var > epsilon) & (masked_var > epsilon)

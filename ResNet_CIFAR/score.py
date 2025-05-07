@@ -93,7 +93,7 @@ def main():
     args = parser.parse_args()
 
     # Define the grid of damping values to search
-    damping_values = [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e3, 1e4]
+    damping_values = [1e-7, 1e-6, 1e-5]
 
     # Print the settings
     print("Settings: ResNet + CIFAR2")
@@ -153,12 +153,19 @@ def main():
 
     # Create task
     task = AttributionTask(model=model, loss_func=f, checkpoints=model_details["models_half"][:10])
+    if args.proj_method == "Localize":
+        mask_path = f"./Localize/mask_{args.proj_dim}/result.pt"
+        result = torch.load(mask_path, weights_only=False)
+        active_indices = result['active_indices'].to(args.device)
+    else:
+        active_indices = None
 
     projector_kwargs = {
         "device": args.device,
         "use_half_precision": False,
         "method": args.proj_method,
         "proj_dim": args.proj_dim,
+        "active_indices": active_indices
     }
 
     # Grid search over damping values

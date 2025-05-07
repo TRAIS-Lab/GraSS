@@ -8,9 +8,9 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 from tqdm import tqdm
-from .hook import HookManager
+from .MLPHook import HookManager
 
-class GradientExtractor:
+class MLPGradientExtractor:
     """
     Extracts raw gradients and pre-activations from model layers using hooks,
     without requiring custom layer implementations or projections.

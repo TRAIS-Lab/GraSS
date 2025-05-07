@@ -14,7 +14,7 @@ from _dattri.benchmark.utils import SubsetSampler
 from _dattri.metric import lds
 from _dattri.task import AttributionTask
 
-def create_validation_split(test_dataset, test_sampler, groundtruth, val_ratio=0.1, seed=42):
+def create_validation_split(test_dataset, test_sampler, groundtruth, val_ratio=0.1, seed=0):
     """
     Split the test set into validation and test sets, and reconstruct groundtruth.
 
@@ -93,7 +93,7 @@ def main():
     args = parser.parse_args()
 
     # Define the grid of damping values to search
-    damping_values = [1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2, 1e3, 1e4]
+    damping_values = [5e-3, 1e-3]
 
     # Print the settings
     print("Settings: MLP + MNIST")
@@ -154,13 +154,21 @@ def main():
 
     # Create task
     task = AttributionTask(model=model, loss_func=f, checkpoints=model_details["models_half"][:10])
+    if args.proj_method == "Localize":
+        mask_path = f"./Localize/mask_{args.proj_dim}/result.pt"
+        result = torch.load(mask_path, weights_only=False)
+        active_indices = result['active_indices'].to(args.device)
+    else:
+        active_indices = None
 
     # Setup projector kwargs
     projector_kwargs = {
         "device": args.device,
         "use_half_precision": False,
         "method": args.proj_method,
+        "proj_seed": args.seed,
         "proj_dim": args.proj_dim,
+        "active_indices": active_indices
     }
 
     # Grid search over damping values

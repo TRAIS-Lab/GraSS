@@ -516,19 +516,18 @@ def main():
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
     from Llama3_8B_OWT.utils import SubsetSampler
     from _GradComp.utils import find_layers
-    from _Localizer.gradient_extractor import GradientExtractor
-    from _Localizer.localizer import Localizer
+    from _Localizer.MLPGradientExtractor import MLPGradientExtractor
+    from _Localizer.MLPLocalizer import MLPLocalizer
 
     if args.device.startswith("cuda"):
         # Check if GPU is available
         if not torch.cuda.is_available():
             raise ValueError("CUDA is not available. Please check your CUDA installation.")
         device = torch.device(args.device)
+        torch.cuda.set_device(device)
     else:
         assert args.device == "cpu", "Invalid device. Choose from 'cuda' or 'cpu'."
         device = torch.device("cpu")
-
-    torch.cuda.set_device(device)
 
     # Dataset
     whole_train_dataset = lm_datasets["train"]
@@ -580,7 +579,7 @@ def main():
 
     # Initialize gradient extractor
     logger.info("Initializing gradient extractor...")
-    extractor = GradientExtractor(
+    extractor = MLPGradientExtractor(
         model=model,
         device=device,
         cpu_offload=True,
@@ -619,7 +618,7 @@ def main():
         logger.info(f"Training the dual component mask optimizer for layer {global_layer_idx + 1}...")
 
         # Initialize the optimizer for this layer
-        optimizer = Localizer(
+        optimizer = MLPLocalizer(
             pre_activation_dim=pre_activation_dim,
             input_features_dim=input_features_dim,
             lambda_reg=args.regularization,

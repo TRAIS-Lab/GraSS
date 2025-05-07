@@ -73,6 +73,39 @@ require_version("datasets>=2.14.0", "To fix: pip install -r examples/pytorch/lan
 MODEL_CONFIG_CLASSES = list(MODEL_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
+def create_validation_split(test_dataset, val_ratio=0.1, seed=42):
+    """
+    Split the test set into validation and test sets.
+
+    Args:
+        test_dataset: The test dataset
+        val_ratio: Ratio of test data to use for validation
+        seed: Random seed for reproducibility
+
+    Returns:
+        val_dataset: Dataset for validation
+        test_dataset: Dataset for test
+        val_indices: Indices for validation set
+        test_indices: Indices for test set
+    """
+    # Get total number of examples
+    num_test = len(test_dataset)
+    all_indices = list(range(num_test))
+
+    # Set random seed for reproducibility
+    random.seed(seed)
+
+    # Shuffle indices and split
+    random.shuffle(all_indices)
+    num_val = int(val_ratio * num_test)
+    val_indices = all_indices[:num_val]
+    test_indices = all_indices[num_val:]
+
+    # Create validation and test datasets
+    val_dataset = test_dataset.select(val_indices)
+    new_test_dataset = test_dataset.select(test_indices)
+
+    return val_dataset, new_test_dataset, val_indices, test_indices
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Finetune a transformers model on a causal language modeling task")
@@ -308,6 +341,13 @@ def parse_args():
         type=float,
         default=0.0,
         help="Randomly drop the specified percentage of the projection input dimensions.",
+    )
+
+    parser.add_argument(
+        "--val_ratio",
+        type=float,
+        default=0.1,
+        help="Ratio of test data to use for validation",
     )
 
     args = parser.parse_args()
@@ -563,7 +603,7 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from GPT2_wikitext.utils import SubsetSampler, replace_conv1d_modules, setup_projection_kwargs, result_filename, lds
+    from GPT2_wikitext.utils import SubsetSampler, replace_conv1d_modules, setup_projection_kwargs, result_filename, split_lds
 
     if args.device.startswith("cuda"):
         # Check if GPU is available
@@ -585,14 +625,32 @@ def main():
         train_dataset = train_dataset.select(range(200))
         test_dataset = test_dataset.select(range(20))
 
+    # Split test dataset into validation and test
+    val_dataset, new_test_dataset, val_indices, test_indices = create_validation_split(
+        test_dataset, val_ratio=args.val_ratio, seed=args.seed
+    )
+
+    # Create dataloaders
     train_sampler = SubsetSampler(range(len(train_dataset)))
     train_dataloader = DataLoader(
         train_dataset, collate_fn=default_data_collator, batch_size=train_batch_size, sampler=train_sampler
     )
-    test_dataloader = DataLoader(
-        test_dataset, collate_fn=default_data_collator, batch_size=test_batch_size, shuffle=False
+    val_dataloader = DataLoader(
+        val_dataset, collate_fn=default_data_collator, batch_size=test_batch_size, shuffle=False
     )
+    test_dataloader = DataLoader(
+        new_test_dataset, collate_fn=default_data_collator, batch_size=test_batch_size, shuffle=False
+    )
+    # Save the original test dataset length for proper LDS calculation
+    original_test_len = len(test_dataset)
 
+    training_setting = args.output_dir.split("/")[-1]
+
+    # Define the grid of damping values to search
+    damping_values = [1e-3, 5e-3, 1e-2, 5e-2, 1e-1, 5e-1, 1e0]
+    best_damping = None
+    best_lds_score = float('-inf')
+    validation_results = {}
     throughput_stats = {}
 
     projector_kwargs = setup_projection_kwargs(args, device)
@@ -634,23 +692,64 @@ def main():
             device=device,
             projector_kwargs=projector_kwargs,
             offload="cpu",
+            # cache_dir="./GradComp/cache"
         )
 
         # Measure cache throughput
         torch.cuda.synchronize(device)
         cache_start_time = time.time()
         attributor.cache_gradients(train_dataloader)
-        attributor.compute_ifvp()
         torch.cuda.synchronize(device)
         cache_end_time = time.time()
+
+        # Grid search over damping values
+        logger.info("Starting grid search for damping values...")
+        for damping in tqdm(damping_values, desc="Damping Grid Search"):
+            logger.info(f"Evaluating damping = {damping}")
+
+            # Compute preconditioners for current damping
+            attributor.compute_preconditioners(damping=damping)
+            attributor.compute_ifvp()
+
+            # Evaluate on validation set
+            if args.profile:
+                val_score, profile = attributor.attribute(test_dataloader=val_dataloader)
+            else:
+                val_score = attributor.attribute(test_dataloader=val_dataloader)
+
+            # Calculate LDS for validation set
+            val_lds_score = split_lds(val_score, training_setting, val_indices, original_test_len)
+            validation_results[damping] = val_lds_score
+
+            logger.info(f"Damping: {damping}, Validation LDS: {val_lds_score}")
+
+            # Track best damping value
+            if val_lds_score > best_lds_score:
+                best_lds_score = val_lds_score
+                best_damping = damping
+
+        logger.info("\nValidation Results:")
+        for damping, score in validation_results.items():
+            logger.info(f"Damping: {damping}, LDS: {score}")
+
+        logger.info(f"\nBest damping value: {best_damping} (Validation LDS: {best_lds_score})")
+
+        # Run final attribution with best damping value
+        logger.info("\nRunning final attribution with best damping value...")
+        torch.cuda.synchronize(device)
+        attribute_start_time = time.time()
+
+        # Compute preconditioners for best damping value
+        attributor.compute_preconditioners(damping=best_damping)
+        attributor.compute_ifvp()
 
         # Measure attribute throughput
         torch.cuda.synchronize(device)
         attribute_start_time = time.time()
         if args.profile:
-            score, profile = attributor.attribute(test_dataloader=test_dataloader, use_cached_ifvp=False)
+            score, profile = attributor.attribute(test_dataloader=test_dataloader)
         else:
-            score = attributor.attribute(test_dataloader=test_dataloader, use_cached_ifvp=False)
+            score = attributor.attribute(test_dataloader=test_dataloader)
         torch.cuda.synchronize(device)
         attribute_end_time = time.time()
 
@@ -803,12 +902,11 @@ def main():
         "throughput_pair_per_second": attribute_throughput
     }
 
-    training_setting = args.output_dir.split("/")[-1]
-    lds_score, _, _ = lds(score, training_setting)
+    lds_score = split_lds(score, training_setting, test_indices, original_test_len)
 
     logger.info("***** Attribution finished *****")
 
-    result = {"score": score, "lds": lds_score, "profile": profile, "throughput": throughput_stats}
+    result = {"score": score, "lds": lds_score, "profile": profile, "throughput": throughput_stats, "best_damping": best_damping}
     logger.info(result)
 
     if not args.debug: # only save the results when not in debug mode
