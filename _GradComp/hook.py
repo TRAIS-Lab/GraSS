@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 import functools
+import time
 
 
 class HookManager:
@@ -20,6 +21,8 @@ class HookManager:
             self,
             model: nn.Module,
             layer_names: List[str],
+            profile: bool = False,
+            device: str = 'cpu'
         ) -> None:
         """
         Initialize the hook manager
@@ -27,9 +30,13 @@ class HookManager:
         Args:
             model: The model to hook
             layer_names: Names of layers to hook
+            profile: Whether to profile execution time
+            device: Device to use for profiling synchronization
         """
         self.model = model
         self.layer_names = layer_names
+        self.profile = profile
+        self.device = device
 
         # Create mapping from layer name to index for O(1) lookups
         self.layer_name_to_idx = {name: idx for idx, name in enumerate(layer_names)}
@@ -41,6 +48,9 @@ class HookManager:
         self.pre_activations = [None] * len(layer_names)
         self.normalized = [None] * len(layer_names)  # For LayerNorm
         self.projectors = [None] * len(layer_names)
+
+        # Profiling stats
+        self.projection_time = 0.0
 
         # Register hooks
         self._register_hooks()
@@ -77,20 +87,14 @@ class HookManager:
         """
         return self.projected_grads
 
-    def get_projected_grad_by_name(self, name: str) -> Optional[Tensor]:
+    def get_projection_time(self) -> float:
         """
-        Get projected gradient for a specific layer by name
-
-        Args:
-            name: Layer name
+        Get the accumulated projection time
 
         Returns:
-            Projected gradient tensor for the specified layer
+            Total time spent in projection operations
         """
-        if name in self.layer_name_to_idx:
-            idx = self.layer_name_to_idx[name]
-            return self.projected_grads[idx]
-        return None
+        return self.projection_time
 
     def _forward_hook_fn(self, name: str, mod: nn.Module, inp: Any, out: Any) -> None:
         """
@@ -140,6 +144,11 @@ class HookManager:
 
         # Calculate the projected gradient based on layer type
         with torch.no_grad():
+            # Start timing for projection if profiling is enabled
+            if self.profile:
+                torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
+                start_time = time.time()
+
             if isinstance(mod, nn.Linear):
                 grad = self._linear_grad_from_grad_comp(
                     mod, idx, grad_pre_activation, per_sample=True
@@ -154,6 +163,11 @@ class HookManager:
             else:
                 # Fallback for other layer types
                 grad = None
+
+            # End timing for projection if profiling is enabled
+            if self.profile:
+                torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
+                self.projection_time += time.time() - start_time
 
             if grad is not None:
                 # Store the projected gradient
@@ -172,7 +186,6 @@ class HookManager:
         Args:
             layer: Linear layer
             idx: Layer index
-            name: Layer name (kept for debugging)
             grad_pre_activation: Gradient of the pre-activation
             per_sample: Whether to compute per-sample gradients
 
@@ -253,7 +266,6 @@ class HookManager:
         Args:
             layer: LayerNorm layer
             idx: Layer index
-            name: Layer name (kept for debugging)
             grad_pre_activation: Gradient of the pre-activation
             per_sample: Whether to compute per-sample gradients
 

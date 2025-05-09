@@ -170,6 +170,8 @@ class IFAttributor:
             self.hook_manager = HookManager(
                 self.model,
                 self.layer_names,
+                profile=self.profile,  # Pass profile parameter
+                device=self.device     # Pass device for proper synchronization
             )
 
             # Set projectors in the hook manager
@@ -271,6 +273,11 @@ class IFAttributor:
             # GPU memory management - ensure we don't run out of memory
             if batch_idx % 10 == 0:
                 torch.cuda.empty_cache()
+
+        # Collect projection time from hook manager if profiling is enabled
+        if self.profile and self.profiling_stats and self.hook_manager:
+            self.profiling_stats.projection += self.hook_manager.get_projection_time()
+            self.profiling_stats.backward -= self.hook_manager.get_projection_time()
 
         # Wait for all disk operations to complete if using disk offload
         if self.offload == "disk":
