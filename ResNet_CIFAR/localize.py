@@ -213,7 +213,7 @@ def main():
     eval_metrics = localizer.train(
         train_gradients=train_grad_tensor,
         test_gradients=test_grad_tensor,
-        batch_size=200,
+        batch_size=4000,
         num_epochs=args.epoch,
         log_every=args.log_interval,
         correlation_threshold=args.early_stop

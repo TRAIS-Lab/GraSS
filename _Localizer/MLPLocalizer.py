@@ -389,6 +389,7 @@ class MLPLocalizer:
             batch_size=min(batch_size, len(test_pre_activation))
         )
 
+        # For tracking purposes only - we will use the final mask regardless
         best_correlation = -float('inf')
         best_masks = None
 
@@ -493,6 +494,7 @@ class MLPLocalizer:
                         'avg_rank_correlation': eval_metrics.get('avg_rank_correlation', float('nan'))
                     })
 
+                # Track best mask for logging/reference purposes only
                 if meets_constraints and correlation_value > best_correlation:
                     best_correlation = correlation_value
                     best_masks = {
@@ -507,19 +509,13 @@ class MLPLocalizer:
                     self._log(f"Early stopping at epoch {epoch} - correlation {avg_rank_correlation:.4f} below threshold {correlation_threshold:.4f}")
                     break
 
-        # Select the best masks
+        # MODIFIED: Always use the final mask (don't replace it with the best mask)
+        self._log("Using final masks from training (not the best masks)")
+
+        # Log information about the best mask that was found (for comparison)
         if best_masks is not None:
-            self._log("Using best masks found during training")
-            self.S_pre = nn.Parameter(best_masks['pre'])
-            self.S_input = nn.Parameter(best_masks['input'])
-        elif len(candidate_masks) > 0:
-            best_candidate = max(candidate_masks, key=lambda x: x['correlation'])
-            self._log(f"Using best candidate masks from epoch {best_candidate['epoch']} "
-                    f"(correlation: {best_candidate['correlation']:.4f})")
-            self.S_pre = nn.Parameter(best_candidate['mask_pre'])
-            self.S_input = nn.Parameter(best_candidate['mask_input'])
-        else:
-            self._log("Warning: No masks met the sparsity constraints. Using final masks.")
+            self._log(f"For reference, best masks were found during training "
+                    f"(correlation: {best_correlation:.4f})")
 
         # Final evaluation
         self._log("Final mask evaluation:")
@@ -615,7 +611,7 @@ class MLPLocalizer:
             if verbose:
                 self._log(f"Pre-activation Mask: {active_pre}/{mask_pre.numel()} parameters active ({percent_active_pre:.2f}%)")
                 self._log(f"Input Features Mask: {active_input}/{mask_input.numel()} parameters active ({percent_active_input:.2f}%)")
-                self._log(f"Total effective parameters: {total_active}/{total_possible} ({percent_active_total:.2f}%)")
+                self._log(f"Total effective parameters: {total_active}/{total_possible} ({100-percent_active_total:.2f}%)")
 
             # Process test data in batches
             all_correlations = []
@@ -723,12 +719,20 @@ class MLPLocalizer:
             self._log(f"Warning: Only {len(pre_indices)} pre-activation parameters above threshold. Selecting top-{min_count_pre} instead.", level="warning")
             values, top_indices = torch.topk(mask_pre, k=min_count_pre)
             pre_indices = top_indices
+        if len(pre_indices) > self.max_active_pre_activation:
+            self._log(f"Warning: More than {self.max_active_pre_activation} pre-activation parameters selected. Reducing to max.", level="warning")
+            values, top_indices = torch.topk(mask_pre, k=self.max_active_pre_activation)
+            pre_indices = top_indices
 
         # Get indices for input features mask
         input_indices = torch.where(mask_input > threshold)[0]
         if min_count_input is not None and len(input_indices) < min_count_input:
             self._log(f"Warning: Only {len(input_indices)} input feature parameters above threshold. Selecting top-{min_count_input} instead.", level="warning")
             values, top_indices = torch.topk(mask_input, k=min_count_input)
+            input_indices = top_indices
+        if len(input_indices) > self.max_active_input:
+            self._log(f"Warning: More than {self.max_active_input} input feature parameters selected. Reducing to max.", level="warning")
+            values, top_indices = torch.topk(mask_input, k=self.max_active_input)
             input_indices = top_indices
 
         # Log summary of selected indices

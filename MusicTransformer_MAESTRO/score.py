@@ -88,13 +88,15 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--proj_method", type=str, default="Gaussian")
+    parser.add_argument("--localization", type=int, default=0, help="Use localization active indices first")
+    parser.add_argument("--random", type=int, default=0, help="Use random active indices first")
     parser.add_argument("--proj_dim", type=int, default=1024)
     parser.add_argument("--val_ratio", type=float, default=0.1, help="Ratio of test data to use for validation")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     args = parser.parse_args()
 
     # Define the grid of damping values to search
-    damping_values = [1e-3]
+    damping_values = [1e-4, 1e-3]
 
     # Print the settings
     print("Settings: MusicTransformer + MAESTRO")
@@ -167,6 +169,14 @@ def main():
         mask_path = f"./Localize/mask_{args.proj_dim}/result.pt"
         result = torch.load(mask_path, weights_only=False)
         active_indices = result['active_indices'].to(args.device)
+    elif args.localization > 0:
+        mask_path = f"./Localize/mask_{args.localization}/result.pt"
+        result = torch.load(mask_path, weights_only=False)
+        active_indices = result['active_indices'].to(args.device)
+    elif args.random > 0:
+        # generate random active indices
+        total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        active_indices = torch.randperm(total_params)[:args.random].to(args.device)
     else:
         active_indices = None
 
@@ -243,7 +253,12 @@ def main():
         "proj_time": proj_time,
     }
 
-    torch.save(result, f"./results/{args.proj_method}-{args.proj_dim}.pt")
+    if args.localization > 0:
+        torch.save(result, f"./results/Loc-{args.localization}_{args.proj_method}-{args.proj_dim}.pt")
+    elif args.random > 0:
+        torch.save(result, f"./results/Rand-{args.random}_{args.proj_method}-{args.proj_dim}.pt")
+    else:
+        torch.save(result, f"./results/{args.proj_method}-{args.proj_dim}.pt")
 
 if __name__ == "__main__":
     main()

@@ -53,7 +53,7 @@ class Localizer:
         self.temp_decay_rate = temp_decay_rate
 
         # Initialize mask parameters for gradient
-        self.S_grad = nn.Parameter(torch.randn(gradient_dim, device=device) * 1e-5)
+        self.S_grad = nn.Parameter(torch.randn(gradient_dim, device=device) * 1e-2)
 
         # Use Adam optimizer for the mask
         self.optimizer = optim.Adam([self.S_grad], lr=lr)
@@ -188,7 +188,7 @@ class Localizer:
             grad_factor = 1.0
 
         # Sparsity loss
-        return self.lambda_reg * grad_factor * torch.sum(L1_norm)
+        return self.lambda_reg * grad_factor * L1_norm
 
     def update_temperature(self, epoch, num_epochs):
         """
@@ -634,6 +634,6 @@ class Localizer:
         self._log(f"Current temperature: {self.temperature:.4f}")
 
         return {
-            'gradient': grad_indices.cpu().numpy(),
+            'gradient': grad_indices,
             'mask_hardness': mask_hardness
         }

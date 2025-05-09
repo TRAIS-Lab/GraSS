@@ -96,6 +96,8 @@ def setup_projection_kwargs(args, device):
         "proj_factorize": proj_factorize,
         "device": device,
         "method": proj_method,
+        "random": args.random,
+        "localization": args.localization,
         "use_half_precision": False,
         "threshold": args.threshold,
         "random_drop": args.random_drop,
@@ -109,13 +111,16 @@ def result_filename(args):
     if args.projection is not None:
         filename_parts.append(args.projection)
 
-
     filename_parts.append(f"thrd-{args.threshold}")
     filename_parts.append(f"rdp-{args.random_drop}")
 
     training_setting = args.output_dir.split("/")[-1]
-    # Join parts and save the file
-    result_filename = f"./results/{training_setting}/{args.baseline}/{args.tda}/{args.layer}/{'_'.join(filename_parts)}.pt"
+    if args.localization > 0:
+        result_filename = f"./results/{training_setting}/{args.baseline}/{args.tda}/{args.layer}/Loc-{args.localization}*{args.localization}_{'_'.join(filename_parts)}.pt"
+    elif args.random > 0:
+        result_filename = f"./results/{training_setting}/{args.baseline}/{args.tda}/{args.layer}/Rand-{args.random}*{args.random}_{'_'.join(filename_parts)}.pt"
+    else:
+        result_filename = f"./results/{training_setting}/{args.baseline}/{args.tda}/{args.layer}/{'_'.join(filename_parts)}.pt"
 
     return result_filename
 

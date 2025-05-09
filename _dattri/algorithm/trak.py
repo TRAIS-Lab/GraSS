@@ -141,6 +141,7 @@ class TRAKAttributor(BaseAttributor):
 
             full_train_projected_grad = []
             Q = []
+            projector = None
             for train_data in tqdm(
                 self.full_train_dataloader,
                 desc="calculating gradient of training set...",
@@ -162,12 +163,12 @@ class TRAKAttributor(BaseAttributor):
                 num_zeros += torch.sum(grad_t == 0).item()
                 total_num += grad_t.numel()
                 batch_size = grad_t.shape[0]
-
-                projector = random_project(
-                        grad_t,
-                        batch_size,
-                        **self.projector_kwargs,
-                    )
+                if projector is None:
+                    projector = random_project(
+                            grad_t,
+                            batch_size,
+                            **self.projector_kwargs,
+                        )
                 torch.cuda.synchronize(self.device)
                 start_time = time.time()
                 grad_p = (

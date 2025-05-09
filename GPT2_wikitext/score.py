@@ -342,6 +342,18 @@ def parse_args():
         default=0.0,
         help="Randomly drop the specified percentage of the projection input dimensions.",
     )
+    parser.add_argument(
+        "--localization",
+        type=int,
+        default=0,
+        help="Use localization active indices first"
+    )
+    parser.add_argument(
+        "--random",
+        type=int,
+        default=0,
+        help="Use random active indices first"
+    )
 
     parser.add_argument(
         "--val_ratio",
@@ -647,7 +659,7 @@ def main():
     training_setting = args.output_dir.split("/")[-1]
 
     # Define the grid of damping values to search
-    damping_values = [1e-3, 5e-3, 1e-2, 5e-2, 1e-1, 5e-1, 1e0]
+    damping_values = [1e-3, 1e-2, 1e-1, 1e0, 10]
     best_damping = None
     best_lds_score = float('-inf')
     validation_results = {}
