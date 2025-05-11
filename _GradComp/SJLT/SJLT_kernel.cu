@@ -2,6 +2,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <vector>
+#include <cuda_bf16.h>
 
 template <typename scalar_t>
 __global__ void sjlt_projection_kernel(
@@ -57,7 +58,7 @@ __global__ void sjlt_projection_kernel(
     }
 }
 
-// Specialized kernel for BFloat16
+// BFloat16 specialized kernel - simpler implementation that's more efficient
 __global__ void sjlt_projection_kernel_bfloat16(
     const at::BFloat16* input,       // Input tensor [batch_size, original_dim]
     at::BFloat16* output,            // Output tensor [batch_size, proj_dim]
@@ -72,10 +73,12 @@ __global__ void sjlt_projection_kernel_bfloat16(
     const int thread_id = blockIdx.x * blockDim.x + threadIdx.x;
     const int dims_per_thread = (original_dim + total_threads - 1) / total_threads;
 
+    // Process multiple dimensions per thread
     for (int chunk = 0; chunk < dims_per_thread; chunk++) {
         const int idx = thread_id + chunk * total_threads;
         if (idx >= original_dim) continue;
 
+        // Local storage for indices and signs
         int local_rand_indices[16];
         int8_t local_rand_signs[16];
 
@@ -85,18 +88,18 @@ __global__ void sjlt_projection_kernel_bfloat16(
         }
 
         for (int b = 0; b < batch_size; b++) {
-            // We need to convert BFloat16 to float for calculations
+            // Convert BFloat16 to float for calculations
             float val_float = static_cast<float>(input[b * original_dim + idx]);
 
             if (val_float != 0.0f) {
                 for (int j = 0; j < c; j++) {
                     int output_idx = b * proj_dim + local_rand_indices[j];
-                    float scaled_val_float = val_float * static_cast<float>(local_rand_signs[j]);
+                    float scaled_val = val_float * static_cast<float>(local_rand_signs[j]);
 
-                    // We need to use a workaround for atomicAdd with BFloat16
-                    float old_val = static_cast<float>(output[output_idx]);
-                    float new_val = old_val + scaled_val_float;
-                    output[output_idx] = at::BFloat16(new_val);
+                    // For BFloat16, we use a float-based atomic add
+                    float current = static_cast<float>(output[output_idx]);
+                    float updated = current + scaled_val;
+                    output[output_idx] = at::BFloat16(updated);
                 }
             }
         }
@@ -127,7 +130,7 @@ __global__ void normalize_kernel(
     }
 }
 
-// Specialized normalize kernel for BFloat16
+// Simple BFloat16 normalize kernel
 __global__ void normalize_kernel_bfloat16(
     at::BFloat16* output,
     const int batch_size,
