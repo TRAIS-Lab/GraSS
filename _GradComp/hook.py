@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, Callable, Any, Optional, Tuple, List, Union
+from typing import TYPE_CHECKING, Dict, Callable, Any, Optional, Tuple, List
 if TYPE_CHECKING:
     from typing import Union
 
@@ -16,10 +16,6 @@ class HookManager:
     """
     Manages hooks for efficient gradient component capturing and projection
     without requiring custom layer implementations.
-
-    Supports two modes of gradient projection:
-    1. Component-wise: Projects input and grad_pre_activation separately before reconstruction
-    2. Direct gradient: Uses PyTorch's parameter.grad directly and applies projection
     """
     def __init__(
             self,
@@ -45,20 +41,13 @@ class HookManager:
         # Create mapping from layer name to index for O(1) lookups
         self.layer_name_to_idx = {name: idx for idx, name in enumerate(layer_names)}
 
-        # Maps layer names to modules for direct gradient access
-        self.layer_modules = {name: None for name in layer_names}
-
         self.forward_hooks = [None] * len(layer_names)
         self.backward_hooks = [None] * len(layer_names)
-        self.param_grad_hooks = [None] * len(layer_names)  # New: hooks for direct parameter gradients
         self.projected_grads = [None] * len(layer_names)
         self.inputs = [None] * len(layer_names)
         self.pre_activations = [None] * len(layer_names)
         self.normalized = [None] * len(layer_names)  # For LayerNorm
         self.projectors = [None] * len(layer_names)
-
-        # Flag to determine which mode to use for each layer
-        self.use_direct_grad = [False] * len(layer_names)
 
         # Profiling stats
         self.projection_time = 0.0
@@ -71,7 +60,6 @@ class HookManager:
         for name, module in self.model.named_modules():
             if name in self.layer_names:
                 idx = self.layer_name_to_idx[name]
-                self.layer_modules[name] = module
 
                 # Use functools.partial to correctly bind parameters to avoid late binding issues
                 forward_hook = functools.partial(self._forward_hook_fn, name)
@@ -81,120 +69,21 @@ class HookManager:
                 self.forward_hooks[idx] = module.register_forward_hook(forward_hook)
                 self.backward_hooks[idx] = module.register_full_backward_hook(backward_hook)
 
-                # We'll register param_grad_hooks dynamically later when needed
-
     def set_projectors(self, projectors: List[Any]) -> None:
         """
-        Set projector objects for each layer and determine which hook mode to use.
-
-        If projector has only 'projector_grad' and not 'projector_grad_comp',
-        we'll use direct gradient mode.
+        Set projector objects for each layer
 
         Args:
             projectors: List of projector objects, ordered by layer_names
         """
         self.projectors = projectors
 
-        # Determine which hook mode to use for each layer
-        for idx, projector in enumerate(projectors):
-            if projector is None:
-                continue
-
-            # Check if we should use direct gradient mode
-            if (hasattr(projector, 'projector_grad') and projector.projector_grad is not None and
-                (not hasattr(projector, 'projector_grad_comp') or
-                 projector.projector_grad_comp == (None, None))):
-
-                self.use_direct_grad[idx] = True
-                # Register parameter gradient hooks for this layer
-                self._register_param_grad_hooks(idx)
-            else:
-                self.use_direct_grad[idx] = False
-
-    def _register_param_grad_hooks(self, idx: int):
+    def get_projected_grads(self) -> List[Tensor]:
         """
-        Register hooks to capture and project parameter gradients directly
-
-        Args:
-            idx: Layer index to register hooks for
-        """
-        layer_name = self.layer_names[idx]
-        module = self.layer_modules[layer_name]
-
-        # Remove existing backward hook as we'll use param grad hooks instead
-        if self.backward_hooks[idx] is not None:
-            self.backward_hooks[idx].remove()
-            self.backward_hooks[idx] = None
-
-        # Create hooks for each parameter in the module
-        hooks = []
-
-        def make_hook_fn(param_name, idx=idx):
-            def hook_fn(grad):
-                # Apply projection to the gradient
-                self._project_param_grad(idx, param_name, grad)
-                return grad
-            return hook_fn
-
-        # Register hooks for each parameter
-        for name, param in module.named_parameters():
-            if param.requires_grad:
-                hook = param.register_hook(make_hook_fn(name))
-                hooks.append(hook)
-
-        self.param_grad_hooks[idx] = hooks
-
-    def _project_param_grad(self, idx: int, param_name: str, grad: Tensor):
-        """
-        Project parameter gradients directly using projector_grad
-
-        Args:
-            idx: Layer index
-            param_name: Parameter name
-            grad: Gradient tensor
-        """
-        projector = self.projectors[idx]
-        if projector and hasattr(projector, 'projector_grad') and projector.projector_grad is not None:
-            # Start timing for projection if profiling is enabled
-            if self.profile:
-                torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
-                start_time = time.time()
-
-            # For direct gradient mode, we treat the param grad as a batch of 1
-            # We need to reshape and then reshape back
-            orig_shape = grad.shape
-
-            # Reshape to match projector's expected input
-            batch_grad = grad.reshape(1, -1)
-
-            # Apply projection
-            projected_grad = projector.projector_grad(batch_grad)
-
-            # Reshape back to original shape
-            if projected_grad.numel() == grad.numel():  # Check if dimensions match
-                projected_grad = projected_grad.reshape(orig_shape)
-
-                # Store a copy for later retrieval
-                if self.projected_grads[idx] is None:
-                    self.projected_grads[idx] = {}
-
-                self.projected_grads[idx][param_name] = projected_grad.detach().clone()
-
-                # In-place modification of the gradient
-                grad.copy_(projected_grad)
-
-            # End timing for projection
-            if self.profile:
-                torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
-                self.projection_time += time.time() - start_time
-
-    def get_projected_grads(self) -> List[Union[Tensor, Dict[str, Tensor]]]:
-        """
-        Get all captured projected gradients.
-        For direct gradient mode, returns a dict mapping parameter names to gradients.
+        Get all captured projected gradients
 
         Returns:
-            List of projected gradient tensors or dictionaries, ordered by layer_names
+            List of projected gradient tensors, ordered by layer_names
         """
         return self.projected_grads
 
@@ -220,9 +109,6 @@ class HookManager:
         # Get the index for this layer
         idx = self.layer_name_to_idx[name]
 
-        # Skip if we're using direct gradient mode (we still need forward hooks for capturing inputs)
-        # This data is still useful for debugging or analysis
-
         # Store input
         if isinstance(inp, tuple) and len(inp) > 0:
             self.inputs[idx] = inp[0].detach()
@@ -243,7 +129,6 @@ class HookManager:
     def _backward_hook_fn(self, name: str, mod: nn.Module, grad_input: Any, grad_output: Any) -> None:
         """
         Backward hook function that computes projected gradients
-        Only used for component-wise projection mode
 
         Args:
             name: Layer name
@@ -253,10 +138,6 @@ class HookManager:
         """
         # Get the index for this layer
         idx = self.layer_name_to_idx[name]
-
-        # Skip if we're using direct gradient mode
-        if self.use_direct_grad[idx]:
-            return
 
         # Get the gradient of the pre-activation
         grad_pre_activation = grad_output[0]
@@ -290,7 +171,8 @@ class HookManager:
         per_sample: bool = True
     ) -> Tensor:
         """
-        Compute the gradient for Linear layers using component-wise projection
+        Compute the gradient for Linear layers, with optimized path when only
+        gradient projector is available.
 
         Args:
             layer: Linear layer
@@ -303,7 +185,26 @@ class HookManager:
         """
         input_features = self.inputs[idx]
         is_3d = input_features.dim() == 3
+        projector = self.projectors[idx]
 
+        # Determine which projection approach to use
+        using_component_projectors = (
+            projector and
+            hasattr(projector, 'projector_grad_comp') and
+            projector.projector_grad_comp != (None, None)
+        )
+        using_grad_projector = (
+            projector and
+            hasattr(projector, 'projector_grad') and
+            projector.projector_grad is not None
+        )
+
+        # Optimized path: When we only need to project the final gradient
+        if not using_component_projectors and using_grad_projector:
+            return self._compute_projected_param_gradients(layer, idx, input_features,
+                                                          grad_pre_activation, per_sample)
+
+        # Original path: When we need to project components
         if is_3d:
             batch_size, seq_length, hidden_size = input_features.shape
             # Reshape 3D tensors to 2D for consistent processing
@@ -330,9 +231,8 @@ class HookManager:
             input_features = input_features.reshape(batch_size, seq_length, -1)
             grad_pre_activation = grad_pre_activation.reshape(batch_size, seq_length, -1)
 
-        # Apply projectors if they exist - only measure this part for profiling
-        projector = self.projectors[idx]
-        if projector and hasattr(projector, 'projector_grad_comp') and projector.projector_grad_comp != (None, None):
+        # Apply component projectors if they exist
+        if using_component_projectors:
             # Start timing for projection if profiling is enabled
             if self.profile:
                 torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
@@ -366,8 +266,8 @@ class HookManager:
         else:
             grad = torch.einsum('bi,bj->bij', grad_pre_activation, input_features).reshape(batch_size, -1)
 
-        # Apply final projector if available - also measure this as part of projection
-        if projector and hasattr(projector, 'projector_grad') and projector.projector_grad is not None:
+        # Apply final projector if available
+        if using_grad_projector:
             # Start timing for projection if profiling is enabled
             if self.profile:
                 torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
@@ -382,6 +282,135 @@ class HookManager:
 
         return grad
 
+    def _compute_projected_param_gradients(
+        self,
+        layer: nn.Linear,
+        idx: int,
+        input_features: Tensor,
+        grad_pre_activation: Tensor,
+        per_sample: bool = True
+    ) -> Tensor:
+        """
+        Compute per-sample gradients for a linear layer using PyTorch's efficient
+        matrix operations and apply projections.
+
+        This method is optimized for the case when only the gradient projector is provided.
+
+        Args:
+            layer: Linear layer
+            idx: Layer index
+            input_features: Input features to the layer
+            grad_pre_activation: Gradient of the pre-activation
+            per_sample: Whether to compute per-sample gradients
+
+        Returns:
+            Projected gradient tensor
+        """
+        projector = self.projectors[idx]
+        batch_size = input_features.shape[0]
+
+        # Start timing for the whole operation if profiling is enabled
+        if self.profile:
+            torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
+            start_time = time.time()
+
+        with torch.no_grad():
+            # Handle different input dimensions
+            is_3d = input_features.dim() == 3
+
+            if is_3d:
+                # For 3D inputs (sequence data)
+                batch_size, seq_length, hidden_size = input_features.shape
+
+                # Compute weight gradients for each sample in the batch
+                # Reshape to 2D, compute gradients, then reshape back
+                input_reshaped = input_features.view(-1, hidden_size)
+                grad_reshaped = grad_pre_activation.view(-1, layer.out_features)
+
+                # Efficient matrix multiplication for weight gradients
+                # Using batched matmul to compute all per-sample gradients at once
+                if per_sample:
+                    # Scale gradients for per-sample computation
+                    grad_reshaped = grad_reshaped * batch_size
+
+                    # Reshape for batched matrix multiplication
+                    input_batched = input_reshaped.view(batch_size, seq_length, hidden_size)
+                    grad_batched = grad_reshaped.view(batch_size, seq_length, layer.out_features)
+
+                    # Efficient batched computation (B x S x O) @ (B x S x I) -> (B x O x I)
+                    # Sum over sequence dimension for each sample
+                    per_sample_grads_w = torch.bmm(
+                        grad_batched.transpose(1, 2),  # B x O x S
+                        input_batched                  # B x S x I
+                    )  # Result: B x O x I
+
+                    # For bias gradients, sum over sequence dimension
+                    if layer.bias is not None:
+                        per_sample_grads_b = grad_batched.sum(dim=1)  # B x O
+
+                        # Combine weight and bias gradients
+                        per_sample_grads_w = per_sample_grads_w.view(batch_size, -1)  # B x (O*I)
+                        per_sample_grads = torch.cat([per_sample_grads_w, per_sample_grads_b], dim=1)
+                    else:
+                        per_sample_grads = per_sample_grads_w.view(batch_size, -1)
+                else:
+                    # For full batch gradient, just do standard matrix multiplication
+                    per_sample_grads_w = torch.matmul(grad_reshaped.t(), input_reshaped)  # O x I
+
+                    if layer.bias is not None:
+                        per_sample_grads_b = grad_reshaped.sum(dim=0)  # O
+                        per_sample_grads = torch.cat([per_sample_grads_w.view(-1), per_sample_grads_b])
+                    else:
+                        per_sample_grads = per_sample_grads_w.view(-1)
+
+                    # Expand to match batch dimension for consistent return format
+                    per_sample_grads = per_sample_grads.expand(batch_size, -1)
+            else:
+                # For 2D inputs (standard batch data)
+                if per_sample:
+                    # Scale gradients for per-sample computation
+                    grad_pre_activation = grad_pre_activation * batch_size
+
+                    # Efficient per-sample gradient computation
+                    # Each sample computed independently using outer product
+                    per_sample_grads_w = torch.bmm(
+                        grad_pre_activation.unsqueeze(2),   # B x O x 1
+                        input_features.unsqueeze(1)         # B x 1 x I
+                    )  # Result: B x O x I
+
+                    # For bias gradients
+                    if layer.bias is not None:
+                        per_sample_grads_b = grad_pre_activation  # B x O
+
+                        # Combine weight and bias gradients
+                        per_sample_grads_w = per_sample_grads_w.view(batch_size, -1)  # B x (O*I)
+                        per_sample_grads = torch.cat([per_sample_grads_w, per_sample_grads_b], dim=1)
+                    else:
+                        per_sample_grads = per_sample_grads_w.view(batch_size, -1)
+                else:
+                    # For full batch gradient
+                    per_sample_grads_w = torch.matmul(grad_pre_activation.t(), input_features)  # O x I
+
+                    if layer.bias is not None:
+                        per_sample_grads_b = grad_pre_activation.sum(dim=0)  # O
+                        per_sample_grads = torch.cat([per_sample_grads_w.view(-1), per_sample_grads_b])
+                    else:
+                        per_sample_grads = per_sample_grads_w.view(-1)
+
+                    # Expand to match batch dimension for consistent return format
+                    per_sample_grads = per_sample_grads.expand(batch_size, -1)
+
+            # Apply gradient projector
+            if projector and hasattr(projector, 'projector_grad') and projector.projector_grad is not None:
+                per_sample_grads = projector.projector_grad(per_sample_grads)
+
+        # End timing for the whole operation
+        if self.profile:
+            torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
+            self.projection_time += time.time() - start_time
+
+        return per_sample_grads
+
     def _layernorm_grad_from_grad_comp(
         self,
         layer: nn.LayerNorm,
@@ -390,7 +419,7 @@ class HookManager:
         per_sample: bool = True
     ) -> Tensor:
         """
-        Compute the gradient for LayerNorm layers using component-wise projection
+        Compute the gradient for LayerNorm layers
 
         Args:
             layer: LayerNorm layer
@@ -470,13 +499,5 @@ class HookManager:
         for hook in self.backward_hooks:
             if hook is not None:
                 hook.remove()
-
-        # Remove parameter gradient hooks
-        for hooks in self.param_grad_hooks:
-            if hooks is not None:
-                for hook in hooks:
-                    hook.remove()
-
         self.forward_hooks = [None] * len(self.layer_names)
         self.backward_hooks = [None] * len(self.layer_names)
-        self.param_grad_hooks = [None] * len(self.layer_names)
