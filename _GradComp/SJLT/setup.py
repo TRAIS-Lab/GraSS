@@ -1,4 +1,3 @@
-# setup.py
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 import torch.cuda
@@ -38,8 +37,6 @@ setup(
                     "--extended-lambda",
                     # Enable relaxed constexpr for bfloat16 support
                     "--expt-relaxed-constexpr",
-                    # Remove this flag to allow BFloat16 conversions
-                    # "-D__CUDA_NO_BFLOAT16_CONVERSIONS__"
                 ] + get_cuda_arch_flags()
             }
         )

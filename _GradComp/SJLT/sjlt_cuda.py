@@ -30,7 +30,10 @@ class SJLTProjection(torch.nn.Module):
         self.original_dim = original_dim
         self.proj_dim = proj_dim
         self.c = c
-        self.threads = threads
+
+        # Ensure threads is a multiple of 32 (warp size) for optimal performance
+        self.threads = (threads // 32) * 32
+
         self.fixed_blocks = fixed_blocks
         self.device = device
 

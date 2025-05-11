@@ -170,6 +170,8 @@ def setup_projection_kwargs(args, device):
         "proj_factorize": proj_factorize,
         "device": device,
         "method": proj_method,
+        "random": args.random,
+        "localization": args.localization,
         "use_half_precision": False,
         "threshold": args.threshold,
         "random_drop": args.random_drop,

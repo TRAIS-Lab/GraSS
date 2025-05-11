@@ -363,6 +363,18 @@ def parse_args():
         action="store_true",
         help="Attributing.",
     )
+    parser.add_argument(
+        "--localization",
+        type=int,
+        default=0,
+        help="Use localization active indices first"
+    )
+    parser.add_argument(
+        "--random",
+        type=int,
+        default=0,
+        help="Use random active indices first"
+    )
 
     args = parser.parse_args()
 
@@ -661,11 +673,11 @@ def main():
     train_dataset = lm_datasets["train"]
     prompt_dataset = FilePromptDataset("./prompts/", tokenizer, block_size)
 
-    train_batch_size, test_batch_size = 6, 6
+    train_batch_size, test_batch_size = 7, 7
 
     train_dataset = train_dataset.select(range(int(1_000_000_000 / block_size)))
     if args.debug: # toy dataset
-        train_dataset = train_dataset.select(range(int(100_000 / block_size)))
+        train_dataset = train_dataset.select(range(int(1_000_000 / block_size)))
 
     train_sampler = SubsetSampler(range(len(train_dataset)))
     train_dataloader = DataLoader(

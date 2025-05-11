@@ -139,10 +139,13 @@ def setup_model_projectors(
                 proj_kwargs = kwargs_copy.copy()
                 proj_kwargs["active_indices"] = active_indices
             elif random > 0:
-                active_indices = {
-                    "pre_activation": torch.randperm(layer_outputs[module_name].shape[1])[:random].to(device),
-                    "input_features": torch.randperm(layer_inputs[module_name].shape[1])[:random].to(device)
-                }
+                if proj_factorize:
+                    active_indices = {
+                        "pre_activation": torch.randperm(layer_outputs[module_name].shape[1])[:random].to(device),
+                        "input_features": torch.randperm(layer_inputs[module_name].shape[1])[:random].to(device)
+                    }
+                else:
+                    active_indices = torch.randperm(layer_inputs[module_name].shape[1] * layer_outputs[module_name].shape[1])[:random].to(device)
                 proj_kwargs = kwargs_copy.copy()
                 proj_kwargs["active_indices"] = active_indices
             else:
@@ -225,6 +228,7 @@ def _setup_linear_projector(
     if proj_factorize:
         dumb_grad_comp_1 = torch.zeros_like(pre_activation.view(-1, pre_activation.shape[-1]))
         active_indices = projector_kwargs.get("active_indices", None)
+        projector_kwargs.pop("active_indices")
 
         if active_indices is None:
             active_indices = {"pre_activation": None, "input_features": None}
@@ -233,9 +237,9 @@ def _setup_linear_projector(
             dumb_grad_comp_1,
             dumb_grad_comp_1.shape[0],
             proj_seed=base_seed,
-            pre_compute=proj_factorize,
+            pre_compute=True,
             active_indices=active_indices.get("pre_activation"),
-            **{k: v for k, v in projector_kwargs.items() if k != 'active_indices'}
+            **projector_kwargs
         )
 
         dumb_grad_comp_2 = torch.zeros_like(input_features.view(-1, input_features.shape[-1]))
@@ -243,9 +247,9 @@ def _setup_linear_projector(
             dumb_grad_comp_2,
             dumb_grad_comp_2.shape[0],
             proj_seed=base_seed + 1,
-            pre_compute=proj_factorize,
+            pre_compute=True,
             active_indices=active_indices.get("input_features"),
-            **{k: v for k, v in projector_kwargs.items() if k != 'active_indices'}
+            **projector_kwargs
         )
 
         projector.projector_grad_comp = (
@@ -262,7 +266,7 @@ def _setup_linear_projector(
             dumb_grad,
             dumb_grad.shape[0],
             proj_seed=base_seed,
-            pre_compute=proj_factorize,
+            pre_compute=True,
             **projector_kwargs
         )
 
