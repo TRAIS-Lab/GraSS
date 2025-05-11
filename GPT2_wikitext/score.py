@@ -38,6 +38,9 @@ import sys
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(parent_dir)
 
+# setting CUDA_LAUNCH_BLOCKING=1
+# os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+
 import datasets
 import torch
 from accelerate import Accelerator, DistributedType
@@ -634,7 +637,7 @@ def main():
     if args.tda == "TRAK":
         train_batch_size, test_batch_size = 4, 4
     else:
-        train_batch_size, test_batch_size = 32, 32
+        train_batch_size, test_batch_size = 24, 24
 
     if args.debug: # toy dataset
         train_dataset = train_dataset.select(range(200))
@@ -662,8 +665,8 @@ def main():
     training_setting = args.output_dir.split("/")[-1]
 
     # Define the grid of damping values to search
-    # damping_values = [1e-4, 1e-3, 1e-2, 1e-1, 1e0, 10]
-    damping_values = [0]
+    damping_values = [1e-4, 1e-3, 1e-2, 1e-1, 1e0, 10]
+    # damping_values = [0]
     best_damping = None
     best_lds_score = float('-inf')
     validation_results = {}
