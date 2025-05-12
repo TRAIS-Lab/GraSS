@@ -14,7 +14,7 @@ import time
 import torch.jit as jit
 
 @jit.script
-def compute_weight_gradients_2d(grad_pre_activation: Tensor, input_features: Tensor) -> Tensor:
+def compute_linear_gradients_2d(grad_pre_activation: Tensor, input_features: Tensor) -> Tensor:
     """
     Compute weight gradients using outer products for 2D tensors.
 
@@ -29,16 +29,11 @@ def compute_weight_gradients_2d(grad_pre_activation: Tensor, input_features: Ten
     output_dim = grad_pre_activation.shape[1]
     input_dim = input_features.shape[1]
 
-    # Using einsum for efficient outer product computation
-    # For each sample in the batch, compute outer product of grad_pre_activation and input_features
-    # 'bi,bj->bij' means: for each batch element b, compute outer product of vectors i and j
     grad_tensor = torch.einsum('bi,bj->bij', grad_pre_activation, input_features)
-
-    # Reshape to [batch_size, output_dim * input_dim]
     return grad_tensor.reshape(batch_size, output_dim * input_dim)
 
 @jit.script
-def compute_weight_gradients_3d(grad_pre_activation: Tensor, input_features: Tensor) -> Tensor:
+def compute_linear_gradients_3d(grad_pre_activation: Tensor, input_features: Tensor) -> Tensor:
     """
     Compute weight gradients using outer products for 3D tensors (sequence data).
 
@@ -50,12 +45,10 @@ def compute_weight_gradients_3d(grad_pre_activation: Tensor, input_features: Ten
         Tensor of shape [batch_size, output_dim * input_dim] containing per-sample gradients
     """
     batch_size = input_features.shape[0]
-    seq_length = input_features.shape[1]
     output_dim = grad_pre_activation.shape[2]
     input_dim = input_features.shape[2]
 
     grad_tensor = torch.einsum('bsi,bsj->bij', grad_pre_activation, input_features)
-    # grad_tensor = grad_tensor.sum(dim=1)
     return grad_tensor.reshape(batch_size, output_dim * input_dim)
 
 class HookManager:
@@ -297,7 +290,7 @@ class HookManager:
                 input_features_3d = input_features_flat.reshape(batch_size, seq_length, -1)
                 grad_pre_activation_3d = grad_pre_activation_flat.reshape(batch_size, seq_length, -1)
 
-                grad_tensor = compute_weight_gradients_3d(grad_pre_activation_3d, input_features_3d)
+                grad_tensor = compute_linear_gradients_3d(grad_pre_activation_3d, input_features_3d)
             else:
                 if per_sample:
                     grad_pre_activation = grad_pre_activation * grad_pre_activation.shape[0]
@@ -310,7 +303,7 @@ class HookManager:
                     )
                     input_features = torch.cat([input_features, ones], dim=1)
 
-                grad_tensor = compute_weight_gradients_2d(grad_pre_activation, input_features)
+                grad_tensor = compute_linear_gradients_2d(grad_pre_activation, input_features)
 
             return grad_tensor.reshape(input_features.shape[0] if not is_3d else batch_size, -1)
 
@@ -366,13 +359,13 @@ class HookManager:
                 )
 
                 # Compute gradient with sparsified components
-                grad_tensor = compute_weight_gradients_3d(grad_pre_activation_sparse, input_features_sparse)
+                grad_tensor = compute_linear_gradients_3d(grad_pre_activation_sparse, input_features_sparse)
             else:
                 grad_pre_activation_sparse = sparsifier_grad_comp_1(grad_pre_activation_flat)
                 input_features_sparse = sparsifier_grad_comp_2(input_features_flat)
 
                 # Compute gradient with sparsified components
-                grad_tensor = compute_weight_gradients_2d(grad_pre_activation_sparse, input_features_sparse)
+                grad_tensor = compute_linear_gradients_2d(grad_pre_activation_sparse, input_features_sparse)
 
             if self.profile:
                 torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
@@ -398,13 +391,13 @@ class HookManager:
                 )
 
                 # Compute gradient with projected components
-                grad_tensor = compute_weight_gradients_3d(grad_pre_activation_proj, input_features_proj)
+                grad_tensor = compute_linear_gradients_3d(grad_pre_activation_proj, input_features_proj)
             else:
                 grad_pre_activation_proj = projector_grad_comp_1(grad_pre_activation_flat)
                 input_features_proj = projector_grad_comp_2(input_features_flat)
 
                 # Compute gradient with projected components
-                grad_tensor = compute_weight_gradients_2d(grad_pre_activation_proj, input_features_proj)
+                grad_tensor = compute_linear_gradients_2d(grad_pre_activation_proj, input_features_proj)
 
             if self.profile:
                 torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
@@ -415,9 +408,9 @@ class HookManager:
         # Case: Only use full sparsification
         if using_sparsifier_full and not using_projector_component and not using_projector_full:
             if is_3d:
-                grad_tensor = compute_weight_gradients_3d(grad_pre_activation_3d, input_features_3d)
+                grad_tensor = compute_linear_gradients_3d(grad_pre_activation_3d, input_features_3d)
             else:
-                grad_tensor = compute_weight_gradients_2d(grad_pre_activation_flat, input_features_flat)
+                grad_tensor = compute_linear_gradients_2d(grad_pre_activation_flat, input_features_flat)
 
             grad = grad_tensor.reshape(batch_size, -1)
 
@@ -491,18 +484,18 @@ class HookManager:
 
                 # Compute the final gradient using the processed components
                 if is_3d:
-                    grad_tensor = compute_weight_gradients_3d(grad_pre_activation_final, input_features_final)
+                    grad_tensor = compute_linear_gradients_3d(grad_pre_activation_final, input_features_final)
                 else:
-                    grad_tensor = compute_weight_gradients_2d(grad_pre_activation_final, input_features_final)
+                    grad_tensor = compute_linear_gradients_2d(grad_pre_activation_final, input_features_final)
 
                 grad = grad_tensor.reshape(batch_size, -1)
 
             else:  # Using sparsifier component with full projector
                 # Compute gradient with sparsified components
                 if is_3d:
-                    grad_tensor = compute_weight_gradients_3d(grad_pre_activation_sparse, input_features_sparse)
+                    grad_tensor = compute_linear_gradients_3d(grad_pre_activation_sparse, input_features_sparse)
                 else:
-                    grad_tensor = compute_weight_gradients_2d(grad_pre_activation_sparse, input_features_sparse)
+                    grad_tensor = compute_linear_gradients_2d(grad_pre_activation_sparse, input_features_sparse)
 
                 grad = grad_tensor.reshape(batch_size, -1)
 
@@ -523,9 +516,9 @@ class HookManager:
         else:  # Not using sparsifier component mode
             # Compute the outer product to get the gradient
             if is_3d:
-                grad_tensor = compute_weight_gradients_3d(grad_pre_activation_3d, input_features_3d)
+                grad_tensor = compute_linear_gradients_3d(grad_pre_activation_3d, input_features_3d)
             else:
-                grad_tensor = compute_weight_gradients_2d(grad_pre_activation_flat, input_features_flat)
+                grad_tensor = compute_linear_gradients_2d(grad_pre_activation_flat, input_features_flat)
 
             grad = grad_tensor.reshape(batch_size, -1)
 
@@ -558,231 +551,6 @@ class HookManager:
                     self.compression_time += time.time() - start_time
 
         return grad
-
-    # def _linear_grad_from_grad_comp(
-    #     self,
-    #     layer: nn.Linear,
-    #     idx: int,
-    #     grad_pre_activation: Tensor,
-    #     per_sample: bool = True
-    # ) -> Tensor:
-    #     """
-    #     Compute the gradient for Linear layers with two-stage compression:
-    #     sparsifiers (stage 1) and projectors (stage 2).
-
-    #     Supports four different behaviors:
-    #     1. Sparsifier is full and projector is full
-    #     2. Sparsifier is full and projector is component (invalid)
-    #     3. Sparsifier is component and projector is full
-    #     4. Sparsifier is component and projector is component
-
-    #     Args:
-    #         layer: Linear layer
-    #         idx: Layer index
-    #         grad_pre_activation: Gradient of the pre-activation
-    #         per_sample: Whether to compute per-sample gradients
-
-    #     Returns:
-    #         Projected gradient tensor
-    #     """
-    #     input_features = self.inputs[idx]
-    #     is_3d = input_features.dim() == 3
-
-    #     # Get sparsifier and projector for this layer
-    #     sparsifier = self.sparsifiers[idx] if hasattr(self, 'sparsifiers') and idx < len(self.sparsifiers) else None
-    #     projector = self.projectors[idx] if hasattr(self, 'projectors') and idx < len(self.projectors) else None
-
-    #     # Determine sparsifier configuration
-    #     using_sparsifier_component = (
-    #         sparsifier and
-    #         hasattr(sparsifier, 'projector_grad_comp') and
-    #         sparsifier.projector_grad_comp != (None, None)
-    #     )
-    #     using_sparsifier_full = (
-    #         sparsifier and
-    #         hasattr(sparsifier, 'projector_grad') and
-    #         sparsifier.projector_grad is not None
-    #     )
-
-    #     # Determine projector configuration
-    #     using_projector_component = (
-    #         projector and
-    #         hasattr(projector, 'projector_grad_comp') and
-    #         projector.projector_grad_comp != (None, None)
-    #     )
-    #     using_projector_full = (
-    #         projector and
-    #         hasattr(projector, 'projector_grad') and
-    #         projector.projector_grad is not None
-    #     )
-
-    #     print(f"Layer {idx}: using_sparsifier_component={using_sparsifier_component}, "
-    #           f"using_sparsifier_full={using_sparsifier_full}, "
-    #           f"using_projector_component={using_projector_component}, "
-    #           f"using_projector_full={using_projector_full}")
-
-    #     # Check for invalid configuration: sparsifier is full and projector is component
-    #     assert not (using_sparsifier_full and using_projector_component), \
-    #         "Cannot use component projector with full sparsifier."
-
-    #     # Optimized path: When we only need to project the final gradient and no sparsification
-    #     if not using_sparsifier_component and not using_sparsifier_full and using_projector_full:
-    #         return self._compute_projected_param_gradients(layer, idx, input_features,
-    #                                                       grad_pre_activation, per_sample)
-
-    #     # Process tensors for gradient computation
-    #     if is_3d:
-    #         batch_size, seq_length, hidden_size = input_features.shape
-    #         # Reshape 3D tensors to 2D for consistent processing
-    #         input_features_flat = input_features.reshape(-1, hidden_size)
-    #         grad_pre_activation_flat = grad_pre_activation.reshape(-1, layer.out_features)
-    #     else:
-    #         batch_size = input_features.shape[0]
-    #         input_features_flat = input_features
-    #         grad_pre_activation_flat = grad_pre_activation
-
-    #     # Scale the gradient if we're computing per-sample gradients
-    #     if per_sample:
-    #         grad_pre_activation_flat = grad_pre_activation_flat * batch_size
-
-    #     # Handle bias term by augmenting input with ones
-    #     if layer.bias is not None:
-    #         ones = torch.ones(
-    #             input_features_flat.size(0), 1,
-    #             device=input_features_flat.device,
-    #             dtype=input_features_flat.dtype
-    #         )
-    #         input_features_flat = torch.cat([input_features_flat, ones], dim=1)
-
-    #     # Reshape back to 3D if needed
-    #     if is_3d:
-    #         input_features_3d = input_features_flat.reshape(batch_size, seq_length, -1)
-    #         grad_pre_activation_3d = grad_pre_activation_flat.reshape(batch_size, seq_length, -1)
-
-    #     # Stage 1: Apply sparsification in component mode if available
-    #     if using_sparsifier_component:
-    #         # Start timing for sparsification if profiling is enabled
-    #         if self.profile:
-    #             torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
-    #             start_time = time.time()
-
-    #         sparsifier_grad_comp_1, sparsifier_grad_comp_2 = sparsifier.projector_grad_comp
-
-    #         # Apply sparsification to gradient components
-    #         if is_3d:
-    #             grad_pre_activation_sparse = sparsifier_grad_comp_1(grad_pre_activation_flat).reshape(
-    #                 batch_size, seq_length, -1
-    #             )
-    #             input_features_sparse = sparsifier_grad_comp_2(input_features_flat).reshape(
-    #                 batch_size, seq_length, -1
-    #             )
-    #         else:
-    #             grad_pre_activation_sparse = sparsifier_grad_comp_1(grad_pre_activation_flat)
-    #             input_features_sparse = sparsifier_grad_comp_2(input_features_flat)
-
-    #         # End timing for sparsification
-    #         if self.profile:
-    #             torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
-    #             self.compression_time += time.time() - start_time
-
-    #         # Stage 2: Apply projection in component mode if available
-    #         if using_projector_component:
-    #             # Start timing for projection if profiling is enabled
-    #             if self.profile:
-    #                 torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
-    #                 start_time = time.time()
-
-    #             projector_grad_comp_1, projector_grad_comp_2 = projector.projector_grad_comp
-
-    #             # Apply projection to sparsified components
-    #             if is_3d:
-    #                 grad_pre_activation_sparse_flat = grad_pre_activation_sparse.reshape(-1, grad_pre_activation_sparse.shape[-1])
-    #                 input_features_sparse_flat = input_features_sparse.reshape(-1, input_features_sparse.shape[-1])
-
-    #                 grad_pre_activation_final = projector_grad_comp_1(grad_pre_activation_sparse_flat).reshape(
-    #                     batch_size, seq_length, -1
-    #                 )
-    #                 input_features_final = projector_grad_comp_2(input_features_sparse_flat).reshape(
-    #                     batch_size, seq_length, -1
-    #                 )
-    #             else:
-    #                 grad_pre_activation_final = projector_grad_comp_1(grad_pre_activation_sparse)
-    #                 input_features_final = projector_grad_comp_2(input_features_sparse)
-
-    #             # End timing for projection
-    #             if self.profile:
-    #                 torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
-    #                 self.compression_time += time.time() - start_time
-
-    #             # Compute the final gradient using the processed components
-    #             if is_3d:
-    #                 grad_tensor = compute_weight_gradients_3d(grad_pre_activation_final, input_features_final)
-    #             else:
-    #                 grad_tensor = compute_weight_gradients_2d(grad_pre_activation_final, input_features_final)
-
-    #             grad = grad_tensor.reshape(batch_size, -1)
-
-    #         else:  # Using sparsifier component with full projector
-    #             # Compute gradient with sparsified components
-    #             if is_3d:
-    #                 grad_tensor = compute_weight_gradients_3d(grad_pre_activation_sparse, input_features_sparse)
-    #             else:
-    #                 grad_tensor = compute_weight_gradients_2d(grad_pre_activation_sparse, input_features_sparse)
-
-    #             grad = grad_tensor.reshape(batch_size, -1)
-
-    #             # Apply full projector if available
-    #             if using_projector_full:
-    #                 # Start timing for projection if profiling is enabled
-    #                 if self.profile:
-    #                     torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
-    #                     start_time = time.time()
-
-    #                 grad = projector.projector_grad(grad)
-
-    #                 # End timing for projection
-    #                 if self.profile:
-    #                     torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
-    #                     self.compression_time += time.time() - start_time
-
-    #     else:  # Not using sparsifier component mode
-    #         # Compute the outer product to get the gradient
-    #         if is_3d:
-    #             grad_tensor = compute_weight_gradients_3d(grad_pre_activation_3d, input_features_3d)
-    #         else:
-    #             grad_tensor = compute_weight_gradients_2d(grad_pre_activation_flat, input_features_flat)
-
-    #         grad = grad_tensor.reshape(batch_size, -1)
-
-    #         # Apply full sparsifier if available
-    #         if using_sparsifier_full:
-    #             # Start timing for sparsification if profiling is enabled
-    #             if self.profile:
-    #                 torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
-    #                 start_time = time.time()
-
-    #             grad = sparsifier.projector_grad(grad)
-
-    #             # End timing for sparsification
-    #             if self.profile:
-    #                 torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
-    #                 self.compression_time += time.time() - start_time
-
-    #         # Apply full projector if available
-    #         if using_projector_full:
-    #             # Start timing for projection if profiling is enabled
-    #             if self.profile:
-    #                 torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
-    #                 start_time = time.time()
-
-    #             grad = projector.projector_grad(grad)
-
-    #             # End timing for projection
-    #             if self.profile:
-    #                 torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
-    #                 self.compression_time += time.time() - start_time
-
-    #     return grad
 
     def _compute_projected_param_gradients(
         self,
