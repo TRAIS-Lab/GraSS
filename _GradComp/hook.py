@@ -193,11 +193,11 @@ class HookManager:
         # Calculate the projected gradient based on layer type
         with torch.no_grad():
             if isinstance(mod, nn.Linear):
-                grad = self._linear_grad_from_grad_comp(
+                grad = self._linear_grad(
                     mod, idx, grad_pre_activation, per_sample=True
                 )
             elif isinstance(mod, nn.LayerNorm):
-                grad = self._layernorm_grad_from_grad_comp(
+                grad = self._layernorm_grad(
                     mod, idx, grad_pre_activation, per_sample=True
                 )
             elif isinstance(mod, nn.Embedding):
@@ -211,7 +211,7 @@ class HookManager:
                 # Store the projected gradient
                 self.projected_grads[idx] = grad.detach()
 
-    def _linear_grad_from_grad_comp(
+    def _linear_grad(
         self,
         layer: nn.Linear,
         idx: int,
@@ -681,7 +681,7 @@ class HookManager:
 
         return per_sample_grads
 
-    def _layernorm_grad_from_grad_comp(
+    def _layernorm_grad(
         self,
         layer: nn.LayerNorm,
         idx: int,
