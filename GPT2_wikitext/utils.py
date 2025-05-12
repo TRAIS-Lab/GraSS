@@ -128,8 +128,6 @@ def setup_compression_kwargs(args, device):
     return sparsifier_kwargs, projector_kwargs
 
 def result_filename(args):
-    filename_parts = []
-
     if args.sparsification is not None:
         sparsification_name = args.sparsification
     else:

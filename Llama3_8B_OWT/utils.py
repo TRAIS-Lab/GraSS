@@ -138,43 +138,69 @@ def get_worker_batch_range(train_dataloader, worker_arg="0/1"):
         print(f"Error parsing worker argument: {e}")
         return None
 
-def setup_projection_kwargs(args, device):
+def setup_compression_kwargs(args, device):
+    if args.sparsification is None:
+        sparsifier_kwargs = None
+    else:
+        sparsification_method, sparsification_dim = args.sparsification.split("-")
+        if "*" in sparsification_dim:
+            sparsification_factorize = True
+            sparsification_dim = sparsification_dim.split("*")
+            assert sparsification_dim[0] == sparsification_dim[1], "Sparsification dimension must be the same for factorized projection."
+
+            sparsification_dim = int(sparsification_dim[0])
+        else:
+            sparsification_factorize = False
+            sparsification_dim = int(sparsification_dim)
+
+        sparsifier_kwargs = {
+            "proj_dim": sparsification_dim,
+            "proj_max_batch_size": 64,
+            "proj_seed": args.seed,
+            "proj_factorize": sparsification_factorize,
+            "device": device,
+            "method": sparsification_method,
+            "use_half_precision": False,
+        }
+
     if args.projection is None:
-        proj_method = "Identity"
-        proj_factorize = False
-        proj_dim = -1
+        projector_kwargs = {
+            "proj_dim": -1,
+            "proj_max_batch_size": -1,
+            "proj_seed": args.seed,
+            "proj_factorize": False,
+            "device": device,
+            "method": "Identity",
+            "use_half_precision": False,
+        }
     else:
         proj_method, proj_dim = args.projection.split("-")
-
-        # proj_dim might be of the form 'proj_dim*proj_dim' for factorized projection, for simply 'proj_dim' for non-factorized projection
         if "*" in proj_dim:
             proj_factorize = True
             proj_dim = proj_dim.split("*")
             assert proj_dim[0] == proj_dim[1], "Projection dimension must be the same for factorized projection."
 
-            proj_dim = int(proj_dim[0]) # Convert to integer
+            proj_dim = int(proj_dim[0])
         else:
             proj_factorize = False
-            proj_dim = int(proj_dim) # Convert to integer
+            proj_dim = int(proj_dim)
+
+        projector_kwargs = {
+            "proj_dim": proj_dim,
+            "proj_max_batch_size": 64,
+            "proj_seed": args.seed,
+            "proj_factorize": proj_factorize,
+            "device": device,
+            "method": proj_method,
+            "use_half_precision": False,
+        }
 
     # Compatibility checking
     if proj_method == "Localize":
         assert args.baseline == "GC", "Localize option only works with GC baseline."
         assert args.layer == "Linear", "Localize option only works with Linear layer."
 
-    projector_kwargs = {
-        "proj_dim": proj_dim,
-        "proj_max_batch_size": 32,
-        "proj_seed": args.seed,
-        "proj_factorize": proj_factorize,
-        "device": device,
-        "method": proj_method,
-        "random": args.random,
-        "localization": args.localization,
-        "use_half_precision": False,
-    }
-
-    return projector_kwargs
+    return sparsifier_kwargs, projector_kwargs
 
 def prompt_collate_fn(batch, tokenizer):
     """
@@ -368,12 +394,17 @@ def retrieve_top_k(scores, k=10, prompt_dataset=None, train_dataset=None, tokeni
     return top_k_per_prompt
 
 def result_filename(args):
-    filename_parts = []
+    if args.sparsification is not None:
+        sparsification_name = args.sparsification
+    else:
+        sparsification_name = "NA"
 
     if args.projection is not None:
-        filename_parts.append(args.projection)
+        projection_name = args.projection
+    else:
+        projection_name = "NA"
 
     # Join parts and save the file
-    result_filename = f"./results/{args.baseline}/{args.tda}/{args.layer}/{'_'.join(filename_parts)}.pt"
+    result_filename = f"./results/{args.baseline}/{args.tda}/{args.layer}/{sparsification_name}->{projection_name}.pt"
 
     return result_filename
