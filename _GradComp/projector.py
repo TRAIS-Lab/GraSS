@@ -242,7 +242,7 @@ def _setup_linear_projector(
             dumb_grad_comp_1,
             dumb_grad_comp_1.shape[0],
             proj_seed=base_seed,
-            pre_compute=True,
+            pre_compute=False,
             active_indices=active_indices.get("pre_activation"),
             **projector_kwargs
         )
@@ -252,7 +252,7 @@ def _setup_linear_projector(
             dumb_grad_comp_2,
             dumb_grad_comp_2.shape[0],
             proj_seed=base_seed + 1,
-            pre_compute=True,
+            pre_compute=False,
             active_indices=active_indices.get("input_features"),
             **projector_kwargs
         )
@@ -271,7 +271,7 @@ def _setup_linear_projector(
             dumb_grad,
             dumb_grad.shape[0],
             proj_seed=base_seed,
-            pre_compute=True,
+            pre_compute=False,
             **projector_kwargs
         )
 
