@@ -11,6 +11,17 @@ from torch import Tensor
 import functools
 import time
 
+# JIT-compiled helper functions for critical operations
+@torch.jit.script
+def compute_weight_gradients_3d(grad_output: torch.Tensor, input_features: torch.Tensor) -> torch.Tensor:
+    """JIT-compiled function for efficient 3D weight gradient computation"""
+    return torch.einsum('bso,bsi->boi', grad_output, input_features)
+
+@torch.jit.script
+def compute_weight_gradients_2d(grad_output: torch.Tensor, input_features: torch.Tensor) -> torch.Tensor:
+    """JIT-compiled function for efficient 2D weight gradient computation"""
+    return torch.einsum('bo,bi->boi', grad_output, input_features)
+
 
 class HookManager:
     """
@@ -260,14 +271,29 @@ class HookManager:
                 torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
                 self.projection_time += time.time() - start_time
 
-        # Compute the outer product to get the gradient
+        # Compute the outer product to get the gradient - use optimized einsum
         if is_3d:
-            grad = torch.einsum('ijk,ijl->ikl', grad_pre_activation, input_features).reshape(batch_size, -1)
+            # Use JIT-compiled function for better performance
+            grad_tensor = compute_weight_gradients_3d(grad_pre_activation, input_features)
+            grad = grad_tensor.reshape(batch_size, -1)
         else:
-            grad = torch.einsum('bi,bj->bij', grad_pre_activation, input_features).reshape(batch_size, -1)
+            # Use JIT-compiled function for better performance
+            grad_tensor = compute_weight_gradients_2d(grad_pre_activation, input_features)
+            grad = grad_tensor.reshape(batch_size, -1)
 
-        # assert no using_grad_projector
-        assert not using_grad_projector, "Using both component and gradient projectors is not supported."
+        # Apply final projector if available
+        if using_grad_projector:
+            # Start timing for projection if profiling is enabled
+            if self.profile:
+                torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
+                start_time = time.time()
+
+            grad = projector.projector_grad(grad)
+
+            # End timing for projection
+            if self.profile:
+                torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
+                self.projection_time += time.time() - start_time
 
         return grad
 
@@ -280,10 +306,7 @@ class HookManager:
         per_sample: bool = True
     ) -> Tensor:
         """
-        Compute per-sample gradients for a linear layer using PyTorch's efficient
-        matrix operations and apply projections.
-
-        This method is optimized for the case when only the gradient projector is provided.
+        Compute per-sample gradients for a linear layer using optimized operations.
 
         Args:
             layer: Linear layer
@@ -298,11 +321,6 @@ class HookManager:
         projector = self.projectors[idx]
         batch_size = input_features.shape[0]
 
-        # Start timing for the whole operation if profiling is enabled
-        if self.profile:
-            torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
-            start_time = time.time()
-
         with torch.no_grad():
             # Handle different input dimensions
             is_3d = input_features.dim() == 3
@@ -310,93 +328,89 @@ class HookManager:
             if is_3d:
                 # For 3D inputs (sequence data)
                 batch_size, seq_length, hidden_size = input_features.shape
+                out_features = layer.out_features
 
-                # Compute weight gradients for each sample in the batch
-                # Reshape to 2D, compute gradients, then reshape back
-                input_reshaped = input_features.view(-1, hidden_size)
-                grad_reshaped = grad_pre_activation.view(-1, layer.out_features)
-
-                # Efficient matrix multiplication for weight gradients
-                # Using batched matmul to compute all per-sample gradients at once
                 if per_sample:
                     # Scale gradients for per-sample computation
-                    grad_reshaped = grad_reshaped * batch_size
+                    grad_pre_activation = grad_pre_activation * batch_size
 
-                    # Reshape for batched matrix multiplication
-                    input_batched = input_reshaped.view(batch_size, seq_length, hidden_size)
-                    grad_batched = grad_reshaped.view(batch_size, seq_length, layer.out_features)
+                    # Use JIT-compiled einsum for maximum efficiency
+                    per_sample_grads_w = compute_weight_gradients_3d(
+                        grad_pre_activation, input_features
+                    )
 
-                    # Efficient batched computation (B x S x O) @ (B x S x I) -> (B x O x I)
-                    # Sum over sequence dimension for each sample
-                    per_sample_grads_w = torch.bmm(
-                        grad_batched.transpose(1, 2),  # B x O x S
-                        input_batched                  # B x S x I
-                    )  # Result: B x O x I
-
-                    # For bias gradients, sum over sequence dimension
+                    # For bias gradients, sum over sequence dimension efficiently
                     if layer.bias is not None:
-                        per_sample_grads_b = grad_batched.sum(dim=1)  # B x O
+                        per_sample_grads_b = grad_pre_activation.sum(dim=1)  # B x O
 
-                        # Combine weight and bias gradients
-                        per_sample_grads_w = per_sample_grads_w.view(batch_size, -1)  # B x (O*I)
-                        per_sample_grads = torch.cat([per_sample_grads_w, per_sample_grads_b], dim=1)
+                        # Combine weight and bias gradients efficiently
+                        per_sample_grads = torch.cat([
+                            per_sample_grads_w.reshape(batch_size, -1),
+                            per_sample_grads_b
+                        ], dim=1)
                     else:
-                        per_sample_grads = per_sample_grads_w.view(batch_size, -1)
+                        per_sample_grads = per_sample_grads_w.reshape(batch_size, -1)
                 else:
-                    # For full batch gradient, just do standard matrix multiplication
-                    per_sample_grads_w = torch.matmul(grad_reshaped.t(), input_reshaped)  # O x I
+                    # For full batch, reshape once and use efficient matmul
+                    input_reshaped = input_features.reshape(-1, hidden_size)
+                    grad_reshaped = grad_pre_activation.reshape(-1, out_features)
+
+                    # Use torch.mm which is more efficient for 2D matrices
+                    per_sample_grads_w = torch.mm(grad_reshaped.t(), input_reshaped)
 
                     if layer.bias is not None:
-                        per_sample_grads_b = grad_reshaped.sum(dim=0)  # O
-                        per_sample_grads = torch.cat([per_sample_grads_w.view(-1), per_sample_grads_b])
+                        per_sample_grads_b = grad_reshaped.sum(dim=0)
+                        per_sample_grads = torch.cat([per_sample_grads_w.reshape(-1), per_sample_grads_b])
                     else:
-                        per_sample_grads = per_sample_grads_w.view(-1)
+                        per_sample_grads = per_sample_grads_w.reshape(-1)
 
-                    # Expand to match batch dimension for consistent return format
-                    per_sample_grads = per_sample_grads.expand(batch_size, -1)
+                    # Efficient expansion using repeat instead of expand
+                    per_sample_grads = per_sample_grads.repeat(batch_size, 1)
             else:
                 # For 2D inputs (standard batch data)
                 if per_sample:
                     # Scale gradients for per-sample computation
                     grad_pre_activation = grad_pre_activation * batch_size
 
-                    # Efficient per-sample gradient computation
-                    # Each sample computed independently using outer product
-                    per_sample_grads_w = torch.bmm(
-                        grad_pre_activation.unsqueeze(2),   # B x O x 1
-                        input_features.unsqueeze(1)         # B x 1 x I
-                    )  # Result: B x O x I
+                    # Use JIT-compiled einsum for outer product
+                    per_sample_grads_w = compute_weight_gradients_2d(
+                        grad_pre_activation, input_features
+                    )
 
                     # For bias gradients
                     if layer.bias is not None:
                         per_sample_grads_b = grad_pre_activation  # B x O
 
-                        # Combine weight and bias gradients
-                        per_sample_grads_w = per_sample_grads_w.view(batch_size, -1)  # B x (O*I)
-                        per_sample_grads = torch.cat([per_sample_grads_w, per_sample_grads_b], dim=1)
+                        # Reshape once and combine
+                        per_sample_grads = torch.cat([
+                            per_sample_grads_w.reshape(batch_size, -1),
+                            per_sample_grads_b
+                        ], dim=1)
                     else:
-                        per_sample_grads = per_sample_grads_w.view(batch_size, -1)
+                        per_sample_grads = per_sample_grads_w.reshape(batch_size, -1)
                 else:
-                    # For full batch gradient
-                    per_sample_grads_w = torch.matmul(grad_pre_activation.t(), input_features)  # O x I
+                    # Use efficient matmul for full batch computation
+                    per_sample_grads_w = torch.mm(grad_pre_activation.t(), input_features)
 
                     if layer.bias is not None:
-                        per_sample_grads_b = grad_pre_activation.sum(dim=0)  # O
-                        per_sample_grads = torch.cat([per_sample_grads_w.view(-1), per_sample_grads_b])
+                        per_sample_grads_b = grad_pre_activation.sum(dim=0)
+                        per_sample_grads = torch.cat([per_sample_grads_w.reshape(-1), per_sample_grads_b])
                     else:
-                        per_sample_grads = per_sample_grads_w.view(-1)
+                        per_sample_grads = per_sample_grads_w.reshape(-1)
 
-                    # Expand to match batch dimension for consistent return format
-                    per_sample_grads = per_sample_grads.expand(batch_size, -1)
+                    # Efficient expansion using repeat
+                    per_sample_grads = per_sample_grads.repeat(batch_size, 1)
 
-            # Apply gradient projector
+            # Apply gradient projector (ensure it runs on the same device)
             if projector and hasattr(projector, 'projector_grad') and projector.projector_grad is not None:
+                # Start timing for the whole operation if profiling is enabled
+                if self.profile:
+                    torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
+                    start_time = time.time()
                 per_sample_grads = projector.projector_grad(per_sample_grads)
-
-        # End timing for the whole operation
-        if self.profile:
-            torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
-            self.projection_time += time.time() - start_time
+                if self.profile:
+                    torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
+                    self.projection_time += time.time() - start_time
 
         return per_sample_grads
 
@@ -431,6 +445,7 @@ class HookManager:
         if per_sample:
             grad_pre_activation = grad_pre_activation * normalized.shape[0]
             if is_3d:
+                # Use efficient einsum for 3D case
                 grad_weight = torch.einsum("ijk,ijk->ik", grad_pre_activation, normalized)
                 grad_bias = torch.sum(grad_pre_activation, dim=1)
             else:
@@ -438,6 +453,7 @@ class HookManager:
                 grad_bias = grad_pre_activation
         else:
             if is_3d:
+                # Use efficient einsum and sum
                 grad_weight = torch.sum(grad_pre_activation * normalized, dim=(0, 1))
                 grad_bias = torch.sum(grad_pre_activation, dim=(0, 1))
             else:

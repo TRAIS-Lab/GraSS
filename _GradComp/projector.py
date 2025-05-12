@@ -117,11 +117,16 @@ def setup_model_projectors(
                     dim = kwargs_copy["proj_dim"]
                     mask_path = f"../{setting}/Localize/mask_{dim}*{dim}/{module_name}.pt"
                     active_indices = torch.load(mask_path, weights_only=False)
+                    # sort in  the indices to ensure they are in the correct order
+                    active_indices = {
+                        "pre_activation": torch.sort(active_indices["pre_activation"])[0],
+                        "input_features": torch.sort(active_indices["input_features"])[0]
+                    }
                 except FileNotFoundError:
                     print(f"Mask file not found for {module_name}. Random indices are used.")
                     active_indices = {
-                        "pre_activation": torch.randperm(layer_outputs[module_name].shape[1])[:dim].to(device),
-                        "input_features": torch.randperm(layer_inputs[module_name].shape[1])[:dim].to(device)
+                        "pre_activation": torch.sort(torch.randperm(layer_outputs[module_name].shape[1])[:dim])[0].to(device),
+                        "input_features": torch.sort(torch.randperm(layer_inputs[module_name].shape[1])[:dim])[0].to(device)
                     }
                 proj_kwargs = kwargs_copy.copy()
                 proj_kwargs["active_indices"] = active_indices
@@ -133,19 +138,19 @@ def setup_model_projectors(
                 except FileNotFoundError:
                     print(f"Mask file not found for {module_name}. Random indices are used.")
                     active_indices = {
-                        "pre_activation": torch.randperm(layer_outputs[module_name].shape[1])[:localization].to(device),
-                        "input_features": torch.randperm(layer_inputs[module_name].shape[1])[:localization].to(device)
+                        "pre_activation": torch.sort(torch.randperm(layer_outputs[module_name].shape[1])[:localization])[0].to(device),
+                        "input_features": torch.sort(torch.randperm(layer_inputs[module_name].shape[1])[:localization])[0].to(device)
                     }
                 proj_kwargs = kwargs_copy.copy()
                 proj_kwargs["active_indices"] = active_indices
             elif random > 0:
                 if proj_factorize:
                     active_indices = {
-                        "pre_activation": torch.randperm(layer_outputs[module_name].shape[1])[:random].to(device),
-                        "input_features": torch.randperm(layer_inputs[module_name].shape[1])[:random].to(device)
+                        "pre_activation": torch.sort(torch.randperm(layer_outputs[module_name].shape[1])[:random])[0].to(device),
+                        "input_features": torch.sort(torch.randperm(layer_inputs[module_name].shape[1])[:random])[0].to(device)
                     }
                 else:
-                    active_indices = torch.randperm(layer_inputs[module_name].shape[1] * layer_outputs[module_name].shape[1])[:random].to(device)
+                    active_indices = torch.sort(torch.randperm(layer_inputs[module_name].shape[1] * layer_outputs[module_name].shape[1])[:random])[0].to(device)
                 proj_kwargs = kwargs_copy.copy()
                 proj_kwargs["active_indices"] = active_indices
             else:

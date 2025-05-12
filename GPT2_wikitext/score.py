@@ -709,8 +709,9 @@ def main():
             profile=args.profile,
             device=device,
             projector_kwargs=projector_kwargs,
-            offload="cpu",
+            offload="device",
             # cache_dir="./GradComp/cache"
+            cache_dir="/scratch/pbb/Project/Sparse-Influence/GPT2-wikitext/cache"
         )
 
         # Measure cache throughput
@@ -908,129 +909,8 @@ def main():
 
         score = result["influence"].T
 
-    elif args.baseline == "dattri":
-        from _dattri.task import AttributionTask
-        from _dattri.algorithm.trak import TRAKAttributor
-
-        assert args.tda == "TRAK", "dattri only supports TRAK in this script."
-
-        # model = model.to(device)
-        # model.eval()
-
-        # Define loss and probability functions for TRAK
-        def f(params, batch):
-            outputs = torch.func.functional_call(model, params, batch["input_ids"].to(device),
-                                               kwargs={"attention_mask": batch["attention_mask"].to(device),
-                                                      "labels": batch["labels"].to(device)})
-            logp = -outputs.loss
-            return logp - torch.log(1 - torch.exp(logp))
-
-        def m(params, batch):
-            outputs = torch.func.functional_call(model, params, batch["input_ids"].to(device),
-                                               kwargs={"attention_mask": batch["attention_mask"].to(device),
-                                                      "labels": batch["labels"].to(device)})
-            p = torch.exp(-outputs.loss)
-            return p
-
-        # Setup checkpoints for the model
-        checkpoints = [f"{args.output_dir}/{i}" for i in range(1)]
-
-        def checkpoints_load_func(model, checkpoint):
-            model = AutoModelForCausalLM.from_pretrained(checkpoint).to(device)
-            model.eval()
-            return model
-
-        # Create attribution task
-        task = AttributionTask(
-            loss_func=f,
-            model=model,
-            checkpoints=checkpoints,
-            checkpoints_load_func=checkpoints_load_func
-        )
-        # Process projector kwargs
-        proj_factorize = projector_kwargs.get("proj_factorize", False)
-        assert proj_factorize is False, "TRAK does not support factorized projection."
-        localization = projector_kwargs.get("localization", 0)
-        random = projector_kwargs.get("random", 0)
-
-        #TODO: handle localization and random later
-
-        # Remove parameters that are handled separately
-        if 'proj_factorize' in projector_kwargs:
-            projector_kwargs.pop("proj_factorize")
-        if 'localization' in projector_kwargs:
-            projector_kwargs.pop("localization")
-        if 'random' in projector_kwargs:
-            projector_kwargs.pop("random")
-
-        # Measure cache throughput (once for all damping values)
-        torch.cuda.synchronize(device)
-        cache_start_time = time.time()
-
-        # Create base attributor
-        base_attributor = TRAKAttributor(
-            task=task,
-            correct_probability_func=m,
-            device=device,
-            projector_kwargs=projector_kwargs,
-        )
-
-        torch.cuda.synchronize(device)
-        cache_end_time = time.time()
-
-        # Grid search over damping values
-        logger.info("Starting grid search for damping values...")
-        for damping in tqdm(damping_values, desc="Damping Grid Search"):
-            logger.info(f"Evaluating damping = {damping}")
-
-            # Update the regularization parameter
-            base_attributor.regularization = damping
-
-            base_attributor.cache(train_dataloader)
-            # Evaluate on validation set
-            with torch.no_grad():
-                val_score = base_attributor.attribute(test_dataloader=val_dataloader)
-
-            # Calculate LDS for validation set
-            val_lds_score = split_lds(val_score, training_setting, val_indices, original_test_len)
-            validation_results[damping] = val_lds_score
-
-            logger.info(f"Damping: {damping}, Validation LDS: {val_lds_score}")
-
-            # Track best damping value
-            if val_lds_score > best_lds_score:
-                best_lds_score = val_lds_score
-                best_damping = damping
-
-        logger.info("\nValidation Results:")
-        for damping, score in validation_results.items():
-            logger.info(f"Damping: {damping}, LDS: {score}")
-
-        logger.info(f"\nBest damping value: {best_damping} (Validation LDS: {best_lds_score})")
-
-        # Run final attribution with best damping value
-        logger.info("\nRunning final attribution with best damping value...")
-
-        # Set the best damping value
-        base_attributor.regularization = best_damping
-
-        proj_time = base_attributor.cache(train_dataloader)
-
-        with torch.no_grad():
-            # Measure attribute throughput
-            torch.cuda.synchronize(device)
-            attribute_start_time = time.time()
-            score = base_attributor.attribute(test_dataloader=test_dataloader)
-            torch.cuda.synchronize(device)
-            attribute_end_time = time.time()
-
-        # Put projection time to ProfilingStats
-        from _GradComp.influence_function import ProfilingStats
-        profile = ProfilingStats()
-        profile.projection = proj_time
-
     else:
-        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'LoGra', or 'dattri'.")
+        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'LoGra'.")
 
     # Calculate throughput
     train_tokens = block_size * len(train_dataset)
