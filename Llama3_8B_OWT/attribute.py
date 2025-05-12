@@ -661,7 +661,7 @@ def main():
     train_dataset = lm_datasets["train"]
     prompt_dataset = FilePromptDataset("./prompts/", tokenizer, block_size)
 
-    train_batch_size, test_batch_size = 7, 7
+    train_batch_size, test_batch_size = 6, 6
 
     train_dataset = train_dataset.select(range(int(1_000_000_000 / block_size)))
     if args.debug: # toy dataset
