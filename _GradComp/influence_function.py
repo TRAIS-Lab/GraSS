@@ -16,7 +16,7 @@ from tqdm import tqdm
 
 from .hook import HookManager
 from .utils import stable_inverse, MetadataManager
-from .projector import setup_model_projectors
+from .projector import setup_model_compressors
 from .IOManager import DiskIOManager
 
 OffloadOptions = Literal["none", "cpu", "disk"]
@@ -50,6 +50,7 @@ class IFAttributor:
         damping: Optional[float] = None,
         profile: bool = False,
         device: str = 'cpu',
+        sparsifier_kwargs: Optional[Dict[str, Any]] = None,
         projector_kwargs: Optional[Dict[str, Any]] = None,
         offload: OffloadOptions = "none",
         cache_dir: Optional[str] = None,
@@ -81,6 +82,7 @@ class IFAttributor:
         self.damping = damping
         self.profile = profile
         self.device = device
+        self.sparsifier_kwargs = sparsifier_kwargs or {}
         self.projector_kwargs = projector_kwargs or {}
         self.offload = offload
         self.cpu_offload = offload in ["cpu", "disk"]
@@ -99,6 +101,8 @@ class IFAttributor:
 
         self.full_train_dataloader: Optional[DataLoader] = None
         self.hook_manager: Optional[HookManager] = None
+
+        self.sparsifiers: Optional[List[Any]] = None
         self.projectors: Optional[List[Any]] = None
 
         # For in-memory storage
@@ -116,13 +120,10 @@ class IFAttributor:
         Args:
             train_dataloader: DataLoader for training data
         """
-        if not self.projector_kwargs:
-            self.projectors = []
-            return
-
-        self.projectors = setup_model_projectors(
+        self.sparsifiers, self.projectors = setup_model_compressors(
             self.model,
             self.layer_names,
+            self.sparsifier_kwargs,
             self.projector_kwargs,
             train_dataloader,
             self.setting,
@@ -136,7 +137,7 @@ class IFAttributor:
         is_test: bool = False,
     ) -> Tuple[Dict[int, List[torch.Tensor]], List[int]]:
         """
-        Compute projected gradients for a given dataloader.
+        Compute compressed gradients for a given dataloader.
 
         Args:
             dataloader: DataLoader for the data
@@ -174,6 +175,9 @@ class IFAttributor:
                 device=self.device     # Pass device for proper synchronization
             )
 
+            # Set sparsifiers in the hook manager
+            if self.sparsifiers:
+                self.hook_manager.set_sparsifiers(self.sparsifiers)
             # Set projectors in the hook manager
             if self.projectors:
                 self.hook_manager.set_projectors(self.projectors)
@@ -232,13 +236,13 @@ class IFAttributor:
                 torch.cuda.synchronize(self.device)
                 self.profiling_stats.backward += time.time() - start_time
 
-            # Get projected gradients from hook manager
+            # Get compressed gradients from hook manager
             with torch.no_grad():
-                projected_grads = self.hook_manager.get_projected_grads()
+                compressed_grads = self.hook_manager.get_compressed_grads()
 
                 # Create list of detached gradients for this batch
                 batch_grads = []
-                for idx, grad in enumerate(projected_grads):
+                for idx, grad in enumerate(compressed_grads):
                     if grad is None:
                         # Use empty tensor as placeholder for missing gradient
                         batch_grads.append(torch.tensor([]))
@@ -276,8 +280,8 @@ class IFAttributor:
 
         # Collect projection time from hook manager if profiling is enabled
         if self.profile and self.profiling_stats and self.hook_manager:
-            self.profiling_stats.projection += self.hook_manager.get_projection_time()
-            self.profiling_stats.backward -= self.hook_manager.get_projection_time()
+            self.profiling_stats.projection += self.hook_manager.get_compression_time()
+            self.profiling_stats.backward -= self.hook_manager.get_compression_time()
 
         # Wait for all disk operations to complete if using disk offload
         if self.offload == "disk":
@@ -291,7 +295,7 @@ class IFAttributor:
         batch_range: Optional[Tuple[int, int]] = None
     ) -> Dict[int, List[torch.Tensor]]:
         """
-        Cache raw projected gradients from training data to disk or memory.
+        Cache raw compressed gradients from training data to disk or memory.
         Organizes gradients by batch, with each batch file containing all layer gradients.
 
         Args:
@@ -312,8 +316,8 @@ class IFAttributor:
         print(f"Caching gradients from training data with offload strategy: {self.offload}{batch_msg}...")
         self.full_train_dataloader = train_dataloader
 
-        # Set up the projectors if not already done
-        if self.projectors is None:
+        # Set sparsifiers and projectors in the hook manager
+        if self.sparsifiers is None and self.projectors is None:
             self._setup_projectors(train_dataloader)
 
         # Compute gradients using common function with batch range
@@ -853,8 +857,8 @@ class IFAttributor:
         if train_dataloader is None and self.full_train_dataloader is None and not self.metadata.batch_info:
             raise ValueError("No training data provided or cached.")
 
-        # Set up the projectors if not already done
-        if self.projectors is None and test_dataloader is not None:
+        # Set sparsifiers in the hook manager
+        if self.sparsifiers is None and self.projectors is None and train_dataloader is not None:
             self._setup_projectors(test_dataloader)
 
         # Get IFVP - either from memory, disk, or compute new
