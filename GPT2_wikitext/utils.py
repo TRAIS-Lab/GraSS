@@ -91,7 +91,7 @@ def setup_projection_kwargs(args, device):
 
     projector_kwargs = {
         "proj_dim": proj_dim,
-        "proj_max_batch_size": 32,
+        "proj_max_batch_size": 64,
         "proj_seed": args.seed,
         "proj_factorize": proj_factorize,
         "device": device,
