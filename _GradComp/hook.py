@@ -266,19 +266,8 @@ class HookManager:
         else:
             grad = torch.einsum('bi,bj->bij', grad_pre_activation, input_features).reshape(batch_size, -1)
 
-        # Apply final projector if available
-        if using_grad_projector:
-            # Start timing for projection if profiling is enabled
-            if self.profile:
-                torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
-                start_time = time.time()
-
-            grad = projector.projector_grad(grad)
-
-            # End timing for projection
-            if self.profile:
-                torch.cuda.synchronize(self.device) if torch.cuda.is_available() and self.device != 'cpu' else None
-                self.projection_time += time.time() - start_time
+        # assert no using_grad_projector
+        assert not using_grad_projector, "Using both component and gradient projectors is not supported."
 
         return grad
 
