@@ -634,7 +634,7 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from Llama3_8B_OWT.utils import SubsetSampler, FilePromptDataset, get_worker_batch_range, prompt_collate_fn, generate_responses, setup_projection_kwargs, retrieve_top_k, result_filename
+    from Llama3_8B_OWT.utils import SubsetSampler, FilePromptDataset, get_worker_batch_range, prompt_collate_fn, generate_responses, setup_compression_kwargs, retrieve_top_k, result_filename
 
     if args.device.startswith("cuda"):
         # Check if GPU is available
@@ -645,6 +645,8 @@ def main():
     else:
         assert args.device == "cpu", "Invalid device. Choose from 'cuda' or 'cpu'."
         device = torch.device("cpu")
+
+    torch.cuda.set_device(device)
 
     # Dataset
     train_dataset = lm_datasets["train"]
@@ -669,7 +671,7 @@ def main():
 
     throughput_stats = {}
 
-    projector_kwargs = setup_projection_kwargs(args, device)
+    sparsifier_kwargs, projector_kwargs = setup_compression_kwargs(args, device)
 
     # Get the batch range for this worker
     # Parse worker configuration
@@ -689,6 +691,7 @@ def main():
     logger.info(f"The train dataset length: {len(train_dataset)}.")
     logger.info(f"The train batch size: {train_batch_size}")
     logger.info(f"TDA Method: {args.baseline}-{args.tda}")
+    logger.info(f"Sparsifier: {sparsifier_kwargs}")
     logger.info(f"Projector: {projector_kwargs}")
     logger.info(f"Layer: {args.layer}")
     logger.info(f"Cache directory: {args.cache_dir}")
@@ -715,6 +718,7 @@ def main():
             hessian=hessian,
             profile=args.profile,
             device=device,
+            sparsifier_kwargs=sparsifier_kwargs,
             projector_kwargs=projector_kwargs,
             offload="disk",
             cache_dir=args.cache_dir
