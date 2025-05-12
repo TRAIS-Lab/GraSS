@@ -315,11 +315,6 @@ def parse_args():
         help="Directory to store cache files"
     )
     parser.add_argument(
-        "--reverse",
-        action="store_true",
-        help="Reverse the order of iterating through the training and test set to save memory.",
-    )
-    parser.add_argument(
         "--debug",
         action="store_true",
         help="Debug mode.",
@@ -329,6 +324,12 @@ def parse_args():
         type=str,
         default=None,
         help="The projection method to be used when attributing. Basic format: 'proj_method-proj_dim' for non-factorized gradient and 'proj_method-proj_dim*proj_dim' for factorized gradient.",
+    )
+    parser.add_argument(
+        "--sparsification",
+        type=str,
+        default=None,
+        help="The first stage of the gradient compression algorithm. Basic format: ''sparsification_method-proj_dim' for non-factorized gradient and 'sparsification_method-proj_dim*proj_dim' for factorized gradient.",
     )
     parser.add_argument(
         "--worker",
@@ -350,18 +351,6 @@ def parse_args():
         "--attribute",
         action="store_true",
         help="Attributing.",
-    )
-    parser.add_argument(
-        "--localization",
-        type=int,
-        default=0,
-        help="Use localization active indices first"
-    )
-    parser.add_argument(
-        "--random",
-        type=int,
-        default=0,
-        help="Use random active indices first"
     )
 
     args = parser.parse_args()
