@@ -161,7 +161,6 @@ def setup_projection_kwargs(args, device):
     if proj_method == "Localize":
         assert args.baseline == "GC", "Localize option only works with GC baseline."
         assert args.layer == "Linear", "Localize option only works with Linear layer."
-        assert args.random_drop == 0.0, "Localize option can't be combined with random drop."
 
     projector_kwargs = {
         "proj_dim": proj_dim,
@@ -173,8 +172,6 @@ def setup_projection_kwargs(args, device):
         "random": args.random,
         "localization": args.localization,
         "use_half_precision": False,
-        "threshold": args.threshold,
-        "random_drop": args.random_drop,
     }
 
     return projector_kwargs
@@ -375,9 +372,6 @@ def result_filename(args):
 
     if args.projection is not None:
         filename_parts.append(args.projection)
-
-    filename_parts.append(f"thrd-{args.threshold}")
-    filename_parts.append(f"rdp-{args.random_drop}")
 
     # Join parts and save the file
     result_filename = f"./results/{args.baseline}/{args.tda}/{args.layer}/{'_'.join(filename_parts)}.pt"

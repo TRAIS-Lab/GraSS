@@ -331,18 +331,6 @@ def parse_args():
         help="The projection method to be used when attributing. Basic format: 'proj_method-proj_dim' for non-factorized gradient and 'proj_method-proj_dim*proj_dim' for factorized gradient.",
     )
     parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.0,
-        help="Threshold to be used for projection when attributing.",
-    )
-    parser.add_argument(
-        "--random_drop",
-        type=float,
-        default=0.0,
-        help="Randomly drop the specified percentage of the projection input dimensions.",
-    )
-    parser.add_argument(
         "--worker",
         type=str,
         default="0/1",

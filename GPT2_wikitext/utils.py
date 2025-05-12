@@ -63,64 +63,85 @@ class SubsetSampler(Sampler):
         """
         return len(self.indices)
 
-def setup_projection_kwargs(args, device):
+def setup_compression_kwargs(args, device):
+    if args.sparsification is None:
+        sparsifier_kwargs = None
+    else:
+        sparsification_method, sparsification_dim = args.sparsification.split("-")
+        if "*" in sparsification_dim:
+            sparsification_factorize = True
+            sparsification_dim = sparsification_dim.split("*")
+            assert sparsification_dim[0] == sparsification_dim[1], "Sparsification dimension must be the same for factorized projection."
+
+            sparsification_dim = int(sparsification_dim[0])
+        else:
+            sparsification_factorize = False
+            sparsification_dim = int(sparsification_dim)
+
+        sparsifier_kwargs = {
+            "proj_dim": sparsification_dim,
+            "proj_max_batch_size": 64,
+            "proj_seed": args.seed,
+            "proj_factorize": sparsification_factorize,
+            "device": device,
+            "method": sparsification_method,
+            "use_half_precision": False,
+        }
+
     if args.projection is None:
-        proj_method = "Identity"
-        proj_factorize = False
-        proj_dim = -1
+        projector_kwargs = {
+            "proj_dim": -1,
+            "proj_max_batch_size": -1,
+            "proj_seed": args.seed,
+            "proj_factorize": False,
+            "device": device,
+            "method": "Identity",
+            "use_half_precision": False,
+        }
     else:
         proj_method, proj_dim = args.projection.split("-")
-
-        # proj_dim might be of the form 'proj_dim*proj_dim' for factorized projection, for simply 'proj_dim' for non-factorized projection
         if "*" in proj_dim:
             proj_factorize = True
             proj_dim = proj_dim.split("*")
             assert proj_dim[0] == proj_dim[1], "Projection dimension must be the same for factorized projection."
 
-            proj_dim = int(proj_dim[0]) # Convert to integer
+            proj_dim = int(proj_dim[0])
         else:
             proj_factorize = False
-            proj_dim = int(proj_dim) # Convert to integer
+            proj_dim = int(proj_dim)
+
+        projector_kwargs = {
+            "proj_dim": proj_dim,
+            "proj_max_batch_size": 64,
+            "proj_seed": args.seed,
+            "proj_factorize": proj_factorize,
+            "device": device,
+            "method": proj_method,
+            "use_half_precision": False,
+        }
 
     # Compatibility checking
     if proj_method == "Localize":
         assert args.baseline == "GC", "Localize option only works with GC baseline."
         assert args.layer == "Linear", "Localize option only works with Linear layer."
-        assert args.random_drop == 0.0, "Localize option can't be combined with random drop."
-        assert proj_factorize, "Localize option only works with factorized projection."
 
-    projector_kwargs = {
-        "proj_dim": proj_dim,
-        "proj_max_batch_size": 64,
-        "proj_seed": args.seed,
-        "proj_factorize": proj_factorize,
-        "device": device,
-        "method": proj_method,
-        "random": args.random,
-        "localization": args.localization,
-        "use_half_precision": False,
-        "threshold": args.threshold,
-        "random_drop": args.random_drop,
-    }
-
-    return projector_kwargs
+    return sparsifier_kwargs, projector_kwargs
 
 def result_filename(args):
     filename_parts = []
 
-    if args.projection is not None:
-        filename_parts.append(args.projection)
+    if args.sparsification is not None:
+        sparsification_name = args.sparsification
+    else:
+        sparsification_name = "NA"
 
-    filename_parts.append(f"thrd-{args.threshold}")
-    filename_parts.append(f"rdp-{args.random_drop}")
+    if args.projection is not None:
+        projection_name = args.projection
+    else:
+        projection_name = "NA"
 
     training_setting = args.output_dir.split("/")[-1]
-    if args.localization > 0:
-        result_filename = f"./results/{training_setting}/{args.baseline}/{args.tda}/{args.layer}/Loc-{args.localization}*{args.localization}_{'_'.join(filename_parts)}.pt"
-    elif args.random > 0:
-        result_filename = f"./results/{training_setting}/{args.baseline}/{args.tda}/{args.layer}/Rand-{args.random}*{args.random}_{'_'.join(filename_parts)}.pt"
-    else:
-        result_filename = f"./results/{training_setting}/{args.baseline}/{args.tda}/{args.layer}/{'_'.join(filename_parts)}.pt"
+    result_filename = f"./results/{training_setting}/{args.baseline}/{args.tda}/{args.layer}/{sparsification_name}->{projection_name}.pt"
 
     return result_filename
 

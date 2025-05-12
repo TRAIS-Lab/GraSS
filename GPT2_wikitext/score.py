@@ -318,11 +318,6 @@ def parse_args():
         help="Layer used for attribution.",
     )
     parser.add_argument(
-        "--reverse",
-        action="store_true",
-        help="Reverse the order of iterating through the training and test set to save memory.",
-    )
-    parser.add_argument(
         "--debug",
         action="store_true",
         help="Debug mode.",
@@ -334,30 +329,11 @@ def parse_args():
         help="The projection method to be used when attributing. Basic format: 'proj_method-proj_dim' for non-factorized gradient and 'proj_method-proj_dim*proj_dim' for factorized gradient.",
     )
     parser.add_argument(
-        "--threshold",
-        type=float,
-        default=0.0,
-        help="Threshold to be used for projection when attributing.",
+        "--sparsification",
+        type=str,
+        default=None,
+        help="The first stage of the gradient compression algorithm. Basic format: ''sparsification_method-proj_dim' for non-factorized gradient and 'sparsification_method-proj_dim*proj_dim' for factorized gradient.",
     )
-    parser.add_argument(
-        "--random_drop",
-        type=float,
-        default=0.0,
-        help="Randomly drop the specified percentage of the projection input dimensions.",
-    )
-    parser.add_argument(
-        "--localization",
-        type=int,
-        default=0,
-        help="Use localization active indices first"
-    )
-    parser.add_argument(
-        "--random",
-        type=int,
-        default=0,
-        help="Use random active indices first"
-    )
-
     parser.add_argument(
         "--val_ratio",
         type=float,
@@ -618,7 +594,7 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from GPT2_wikitext.utils import SubsetSampler, replace_conv1d_modules, setup_projection_kwargs, result_filename, split_lds
+    from GPT2_wikitext.utils import SubsetSampler, replace_conv1d_modules, setup_compression_kwargs, result_filename, split_lds
 
     if args.device.startswith("cuda"):
         # Check if GPU is available
@@ -634,13 +610,10 @@ def main():
     # Dataset
     train_dataset = lm_datasets["train"]
     test_dataset = lm_datasets["validation"]
-    if args.tda == "TRAK":
-        train_batch_size, test_batch_size = 4, 4
-    else:
-        train_batch_size, test_batch_size = 24, 24
+    train_batch_size, test_batch_size = 32, 32
 
     if args.debug: # toy dataset
-        train_dataset = train_dataset.select(range(200))
+        train_dataset = train_dataset.select(range(32))
         test_dataset = test_dataset.select(range(20))
 
     # Split test dataset into validation and test
@@ -672,7 +645,7 @@ def main():
     validation_results = {}
     throughput_stats = {}
 
-    projector_kwargs = setup_projection_kwargs(args, device)
+    sparsifier_kwargs, projector_kwargs = setup_compression_kwargs(args, device)
 
     # Logging setting
     logger.info(f"The train dataset length: {len(train_dataset)}.")
@@ -680,6 +653,7 @@ def main():
     logger.info(f"The train batch size: {train_batch_size}")
     logger.info(f"The test batch size: {test_batch_size}")
     logger.info(f"TDA Method: {args.baseline}-{args.tda}")
+    logger.info(f"Sparsifier: {sparsifier_kwargs}")
     logger.info(f"Projector: {projector_kwargs}")
     logger.info(f"Layer: {args.layer}")
     logger.info("***** Running attribution *****")
@@ -708,10 +682,11 @@ def main():
             hessian=hessian,
             profile=args.profile,
             device=device,
+            sparsifier_kwargs=sparsifier_kwargs,
             projector_kwargs=projector_kwargs,
-            offload="device",
+            offload="cpu",
             # cache_dir="./GradComp/cache"
-            cache_dir="/scratch/pbb/Project/Sparse-Influence/GPT2-wikitext/cache"
+            # cache_dir="/scratch/pbb/Project/Sparse-Influence/GPT2-wikitext/cache"
         )
 
         # Measure cache throughput
