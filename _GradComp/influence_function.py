@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, Tuple, Liter
 import os
 import time
 
-from concurrent.futures import ThreadPoolExecutor
+# from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 if TYPE_CHECKING:
@@ -602,26 +602,28 @@ class IFAttributor:
             print("Using raw gradients as IFVP since hessian type is 'none'")
 
             if self.offload == "disk":
-                # Process gradient files in parallel when possible
+                # Process gradient files in parallel using DiskIOManager
                 ifvp_dict = {}
                 batch_files = self.disk_io.find_batch_files('gradients')
+                futures = []
 
-                # Create a ThreadPoolExecutor for parallel processing
-                with ThreadPoolExecutor(max_workers=min(32, len(batch_files))) as executor:
-                    # Submit all copy tasks to the executor
-                    futures = []
-                    for file_path in batch_files:
-                        batch_idx = self.disk_io.extract_batch_idx(file_path)
-                        ifvp_path = self.disk_io.get_path('ifvp', batch_idx=batch_idx)
-                        # Copy file or load and save
-                        futures.append(executor.submit(self._copy_grad_to_ifvp, file_path, ifvp_path, batch_idx))
+                # Submit all copy tasks using the DiskIOManager's executor
+                for file_path in batch_files:
+                    batch_idx = self.disk_io.extract_batch_idx(file_path)
+                    ifvp_path = self.disk_io.get_path('ifvp', batch_idx=batch_idx)
+                    # Add to disk_io's futures list instead of creating our own
+                    future = self.disk_io.executor.submit(self._copy_grad_to_ifvp, file_path, ifvp_path, batch_idx)
+                    futures.append(future)
 
-                    # Collect results
-                    for future in futures:
-                        batch_idx, batch_data = future.result()
-                        ifvp_dict[batch_idx] = batch_data
+                # Collect results
+                for future in futures:
+                    batch_idx, batch_data = future.result()
+                    ifvp_dict[batch_idx] = batch_data
 
-                # Store in memory (not needed for disk offload, but for consistency)
+                # Clear these specific futures (not all disk_io futures)
+                futures = []
+
+                # Store in memory
                 self.cached_ifvp = ifvp_dict
                 return ifvp_dict
             else:
@@ -702,17 +704,26 @@ class IFAttributor:
                     del precond_tensor
                     torch.cuda.empty_cache()
 
-                # Save all IFVP batches to disk
-                save_tasks = []
+                # Save all IFVP batches to disk using DiskIOManager
                 for batch_idx, batch_dict in ifvp_dict.items():
                     if batch_idx in chunk_batch_indices:  # Only save batches from current chunk
                         ifvp_path = self.disk_io.get_path('ifvp', batch_idx=batch_idx)
-                        save_tasks.append((batch_dict, ifvp_path))
+                        self.disk_io.save_dict(batch_dict, ifvp_path)
 
-                # Save in parallel
-                with ThreadPoolExecutor(max_workers=min(16, len(save_tasks))) as executor:
-                    for batch_dict, ifvp_path in save_tasks:
-                        executor.submit(self.disk_io.save_dict, batch_dict, ifvp_path)
+                # Wait for all operations to complete before moving to the next chunk
+                self.disk_io.wait_for_async_operations()
+
+                # # Save all IFVP batches to disk
+                # save_tasks = []
+                # for batch_idx, batch_dict in ifvp_dict.items():
+                #     if batch_idx in chunk_batch_indices:  # Only save batches from current chunk
+                #         ifvp_path = self.disk_io.get_path('ifvp', batch_idx=batch_idx)
+                #         save_tasks.append((batch_dict, ifvp_path))
+
+                # # Save in parallel
+                # with ThreadPoolExecutor(max_workers=min(16, len(save_tasks))) as executor:
+                #     for batch_dict, ifvp_path in save_tasks:
+                #         executor.submit(self.disk_io.save_dict, batch_dict, ifvp_path)
 
                 # Convert dictionary format to list format for consistency
                 for batch_idx in list(ifvp_dict.keys()):
