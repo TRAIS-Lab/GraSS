@@ -132,6 +132,7 @@ def setup_model_compressors(
 
     # Create sparsifiers and projectors for each layer
     for module_id, (module_name, module) in enumerate(model.named_modules()):
+        print("module:", module)
         if module_name in layer_names:
             idx = name_to_index[module_name]
 
