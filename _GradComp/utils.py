@@ -323,24 +323,28 @@ def get_parameter_chunk_sizes(
 def stable_inverse(matrix: torch.Tensor, damping: float = None) -> torch.Tensor:
     """
     Compute a numerically stable inverse of a matrix using eigendecomposition.
-
     Args:
         matrix: Input matrix to invert
         damping: (Adaptive) Damping factor for numerical stability
-
     Returns:
-        Stable inverse of the input matrix
+        Stable inverse of the input matrix with the same dtype as input
     """
+    # Store original dtype for later conversion
+    orig_dtype = matrix.dtype
+    matrix.to(dtype=torch.float32)
+
     # sometimes the matrix is a single number, so we need to check if it's a scalar
     if len(matrix.shape) == 0:
         if matrix == 0:
-            # return a 2d 0 tensor
-            return torch.tensor([[0.0]], device=matrix.device)
+            # return a 2d 0 tensor with same dtype
+            return torch.tensor([[0.0]], device=matrix.device, dtype=orig_dtype)
         else:
             if damping is None:
-                return torch.tensor([[1.0 / (matrix * 1.1)]], device=matrix.device)
+                result = torch.tensor([[1.0 / (matrix * 1.1)]], device=matrix.device)
             else:
-                return torch.tensor([[1.0 / (matrix * (1 + damping))]], device=matrix.device)
+                result = torch.tensor([[1.0 / (matrix * (1 + damping))]], device=matrix.device)
+            # Convert result back to original dtype
+            return result.to(dtype=orig_dtype)
 
     # Add damping to the diagonal
     if damping is None:
@@ -359,7 +363,8 @@ def stable_inverse(matrix: torch.Tensor, damping: float = None) -> torch.Tensor:
         # Fall back to direct inverse
         inverse = torch.inverse(damped_matrix)
 
-    return inverse
+    # Convert result back to the original dtype
+    return inverse.to(dtype=orig_dtype)
 
 def find_layers(model, layer_type="Linear", return_type="instance"):
     layers = []

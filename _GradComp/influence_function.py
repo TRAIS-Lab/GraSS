@@ -440,7 +440,7 @@ class IFAttributor:
             batch_files = self.disk_io.find_batch_files('gradients')
 
             # Process in chunks to avoid memory issues
-            chunk_size = 2  # Adjust based on memory constraints
+            chunk_size = 512  # Adjust based on memory constraints
             for i in tqdm(range(0, len(batch_files), chunk_size), desc="Processing batches for preconditioners..."):
                 chunk_files = batch_files[i:i+chunk_size]
 
@@ -525,6 +525,7 @@ class IFAttributor:
             if hessian_accumulator is not None and sample_count > 0:
                 # Normalize by total number of samples
                 hessian = hessian_accumulator / sample_count
+                print(hessian)
 
                 # Compute inverse based on Hessian type
                 if self.hessian == "raw":
@@ -534,7 +535,7 @@ class IFAttributor:
                     if self.offload == "disk":
                         cpu_precond = precond.cpu()
                         file_path = self.disk_io.get_path('preconditioners', layer_idx=layer_idx)
-                        self.disk_io.save_tensor(cpu_precond, file_path)
+                        # self.disk_io.save_tensor(cpu_precond, file_path)
                         preconditioners[layer_idx] = cpu_precond
                     else:
                         # Store in memory
@@ -644,7 +645,7 @@ class IFAttributor:
             batch_files = self.disk_io.find_batch_files('gradients')
 
             # Process in chunks to leverage batch operations
-            chunk_size = 2  # Adjust based on memory and GPU capability
+            chunk_size = 512  # Adjust based on memory and GPU capability
 
             for i in tqdm(range(0, len(batch_files), chunk_size), desc="Processing batches for ifvp..."):
                 chunk_files = batch_files[i:i+chunk_size]
@@ -667,6 +668,8 @@ class IFAttributor:
                         continue
                     else:
                         precond_tensor = precond.to(self.device)
+
+                    precond_tensor = precond_tensor.to(dtype=torch.bfloat16) #Add
 
                     # Process all batches for this layer
                     for batch_dict, batch_idx in zip(batch_grad_dicts, chunk_batch_indices):
