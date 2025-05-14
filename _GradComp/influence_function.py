@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, Tuple, Liter
 import os
 import time
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 if TYPE_CHECKING:
@@ -136,7 +137,7 @@ class IFAttributor:
         is_test: bool = False,
     ) -> Tuple[Dict[int, List[torch.Tensor]], List[int]]:
         """
-        Compute projected gradients for a given dataloader.
+        Compute compressed gradients for a given dataloader.
 
         Args:
             dataloader: DataLoader for the data
@@ -174,6 +175,9 @@ class IFAttributor:
                 device=self.device     # Pass device for proper synchronization
             )
 
+            # Set sparsifiers in the hook manager
+            if self.sparsifiers:
+                self.hook_manager.set_sparsifiers(self.sparsifiers)
             # Set projectors in the hook manager
             if self.projectors:
                 self.hook_manager.set_projectors(self.projectors)
@@ -436,7 +440,7 @@ class IFAttributor:
             batch_files = self.disk_io.find_batch_files('gradients')
 
             # Process in chunks to avoid memory issues
-            chunk_size = 32  # Adjust based on memory constraints
+            chunk_size = 2  # Adjust based on memory constraints
             for i in tqdm(range(0, len(batch_files), chunk_size), desc="Processing batches for preconditioners..."):
                 chunk_files = batch_files[i:i+chunk_size]
 
@@ -572,20 +576,10 @@ class IFAttributor:
         else:
             return preconditioners
 
-    def compute_ifvp(
-        self,
-        batch_range: Optional[Tuple[int, int]] = None
-    ) -> Dict[int, List[torch.Tensor]]:
+    def compute_ifvp(self) -> Dict[int, List[torch.Tensor]]:
         """
         Compute inverse-Hessian-vector products (IFVP) from gradients and preconditioners.
-        Memory-efficient implementation that processes one batch at a time.
-
-        Args:
-            batch_range: Optional tuple of (start_batch, end_batch) to process only
-                    a subset of batches. Should match the range used in cache_gradients.
-
-        Returns:
-            Dictionary mapping batch indices to lists of tensors (one tensor per layer)
+        Optimized for minimal memory usage with disk offload.
         """
         print("Computing inverse-Hessian-vector products (IFVP)...")
 
@@ -597,69 +591,61 @@ class IFAttributor:
         if not hasattr(self, 'metadata') or not self.metadata.batch_info:
             raise ValueError("No batch information found. Call cache_gradients first.")
 
-        # If batch_range is None, process all available batches
-        if batch_range is None:
-            # Find the min and max batch indices from metadata
-            batch_indices = list(self.metadata.batch_info.keys())
-            if not batch_indices:
-                raise ValueError("No batch information available in metadata.")
-            start_batch, end_batch = min(batch_indices), max(batch_indices) + 1
-        else:
-            start_batch, end_batch = batch_range
-
-        batch_msg = f" (processing batches {start_batch} to {end_batch-1})"
-        print(f"Computing IFVP with batch range{batch_msg}...")
-
-        # Initialize result structure
-        ifvp_dict = {}
-
         # Return raw gradients if Hessian type is "none"
         if self.hessian == "none":
             print("Using raw gradients as IFVP since hessian type is 'none'")
 
             if self.offload == "disk":
-                # Find all gradient batch files
+                # Process gradient files in parallel when possible
+                processed_batch_indices = []
                 batch_files = self.disk_io.find_batch_files('gradients')
 
-                # Filter batch files based on batch_range
-                filtered_batch_files = []
-                for file_path in batch_files:
-                    batch_idx = self.disk_io.extract_batch_idx(file_path)
-                    if start_batch <= batch_idx < end_batch:
-                        filtered_batch_files.append(file_path)
+                # Process files in smaller chunks to reduce memory pressure
+                chunk_size = 20  # Process this many files at once
 
-                # Process batches sequentially to avoid thread issues
-                for file_path in tqdm(filtered_batch_files, desc="Copying gradients to IFVP"):
-                    batch_idx = self.disk_io.extract_batch_idx(file_path)
-                    ifvp_path = self.disk_io.get_path('ifvp', batch_idx=batch_idx)
+                for i in tqdm(range(0, len(batch_files), chunk_size), desc="Copying gradients to IFVP..."):
+                    chunk_files = batch_files[i:i+chunk_size]
+                    chunk_tasks = []
 
-                    # Load gradient dictionary (synchronously)
-                    grad_dict = self.disk_io.load_dict(file_path)
+                    # Prepare tasks but don't execute yet
+                    for file_path in chunk_files:
+                        batch_idx = self.disk_io.extract_batch_idx(file_path)
+                        ifvp_path = self.disk_io.get_path('ifvp', batch_idx=batch_idx)
+                        chunk_tasks.append((file_path, ifvp_path, batch_idx))
 
-                    # Save as IFVP (non-async to avoid thread issues)
-                    self.disk_io.save_dict(grad_dict, ifvp_path, async_save=False)
+                    # Use DiskIOManager's executor instead of creating a new one
+                    futures = []
+                    for task in chunk_tasks:
+                        file_path, ifvp_path, batch_idx = task
+                        # Modified to only return batch_idx, not the data
+                        futures.append(self.disk_io.executor.submit(self._copy_grad_to_ifvp_minimal,
+                                                                file_path, ifvp_path))
 
-                    # Convert to list format for consistency
-                    batch_data = [grad_dict.get(i, torch.tensor([]))
-                                for i in range(len(self.layer_names))]
+                    # Collect only the batch indices
+                    for future in futures:
+                        batch_idx = future.result()
+                        processed_batch_indices.append(batch_idx)
 
-                    # Store in memory dictionary
-                    ifvp_dict[batch_idx] = batch_data
+                    # Force garbage collection after each chunk
+                    import gc
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
-                # Store in memory for consistency
-                self.cached_ifvp = ifvp_dict
-                return ifvp_dict
+                # Create a lightweight dictionary with just indices
+                minimal_ifvp_dict = {batch_idx: None for batch_idx in processed_batch_indices}
+                self.cached_ifvp = minimal_ifvp_dict
+
+                # Wait for any pending async operations
+                self.disk_io.wait_for_async_operations()
+
+                return minimal_ifvp_dict
             else:
-                # For memory storage, use cached gradients directly but filter by batch range
-                if self.cached_gradients:
-                    self.cached_ifvp = {
-                        batch_idx: grads
-                        for batch_idx, grads in self.cached_gradients.items()
-                        if start_batch <= batch_idx < end_batch
-                    }
-                    return self.cached_ifvp
-                else:
-                    raise ValueError("No cached gradients found.")
+                # For memory storage, use cached gradients directly
+                self.cached_ifvp = self.cached_gradients
+                return self.cached_gradients
+
+        # Initialize tracking structure (not storing actual tensors)
+        processed_batch_indices = []
 
         # Get preconditioners - either from memory or disk
         preconditioners = self._get_preconditioners()
@@ -673,99 +659,87 @@ class IFAttributor:
             # Find all gradient batch files
             batch_files = self.disk_io.find_batch_files('gradients')
 
-            # Filter batch files based on batch_range
-            filtered_batch_files = []
-            for file_path in batch_files:
-                batch_idx = self.disk_io.extract_batch_idx(file_path)
-                if start_batch <= batch_idx < end_batch:
-                    filtered_batch_files.append(file_path)
+            # Process smaller chunks to reduce memory pressure
+            chunk_size = 128  # Process one file at a time for minimal memory usage
 
-            # Process in smaller chunks to leverage batch operations
-            chunk_size = 2  # Adjust based on memory and GPU capability
+            for i in tqdm(range(0, len(batch_files), chunk_size), desc="Processing batches for ifvp..."):
+                chunk_files = batch_files[i:i+chunk_size]
 
-            for i in tqdm(range(0, len(filtered_batch_files), chunk_size), desc="Processing batches for IFVP"):
-                chunk_files = filtered_batch_files[i:i+chunk_size]
-                chunk_batch_indices = [self.disk_io.extract_batch_idx(path) for path in chunk_files]
-
-                # Load all gradient dictionaries (sequentially to avoid thread issues)
-                batch_grad_dicts = []
                 for file_path in chunk_files:
-                    batch_grad_dicts.append(self.disk_io.load_dict(file_path))
+                    batch_idx = self.disk_io.extract_batch_idx(file_path)
+                    batch_grad_dict = self.disk_io.load_dict(file_path)
 
-                # Process each layer across all batches in the chunk
-                for layer_idx, precond in enumerate(preconditioners):
-                    # Skip if preconditioner is None
-                    if precond is None:
-                        continue
+                    # Initialize dict for this batch's results
+                    batch_ifvp_dict = {}
 
-                    # Load preconditioner to device if needed
-                    if isinstance(precond, str):
-                        precond_tensor = self.disk_io.load_tensor(precond).to(self.device)
-                    elif isinstance(precond, list):
-                        print(f"Warning: Preconditioner for layer {layer_idx} is a list, not a tensor or file path.")
-                        continue
-                    else:
-                        precond_tensor = precond.to(self.device)
-
-                    # Process all batches for this layer
-                    for batch_dict, batch_idx in zip(batch_grad_dicts, chunk_batch_indices):
-                        # Skip if layer not in gradient dictionary
-                        if layer_idx not in batch_dict or batch_dict[layer_idx].numel() == 0:
-                            # Create ifvp dict entry if it doesn't exist
-                            if batch_idx not in ifvp_dict:
-                                ifvp_dict[batch_idx] = {}
-                            # Add empty tensor for this layer
-                            ifvp_dict[batch_idx][layer_idx] = torch.tensor([])
+                    # Process each layer for this batch
+                    for layer_idx, precond in enumerate(preconditioners):
+                        # Skip if preconditioner is None
+                        if precond is None:
                             continue
 
+                        # Skip if layer not in gradient dictionary or empty
+                        if layer_idx not in batch_grad_dict or batch_grad_dict[layer_idx].numel() == 0:
+                            batch_ifvp_dict[layer_idx] = torch.tensor([])
+                            continue
+
+                        # Load preconditioner to device when needed
+                        if isinstance(precond, str):
+                            precond_tensor = self.disk_io.load_tensor(precond).to(self.device)
+                        elif isinstance(precond, list):
+                            print(f"Warning: Preconditioner for layer {layer_idx} is a list, not a tensor or file path.")
+                            continue
+                        else:
+                            precond_tensor = precond.to(self.device)
+
                         # Load gradient to device
-                        grad = batch_dict[layer_idx].to(self.device)
+                        grad = batch_grad_dict[layer_idx].to(self.device)
 
                         # Compute IFVP
                         result = torch.matmul(precond_tensor, grad.t()).t()
 
-                        # Create ifvp dict entry if it doesn't exist
-                        if batch_idx not in ifvp_dict:
-                            ifvp_dict[batch_idx] = {}
+                        # Store result directly to CPU
+                        batch_ifvp_dict[layer_idx] = result.cpu()
 
-                        # Store in dictionary (move to CPU first)
-                        ifvp_dict[batch_idx][layer_idx] = result.cpu()
-
-                        # Clean up
+                        # Clean up GPU memory immediately
                         del grad, result
+                        if isinstance(precond, str):
+                            del precond_tensor
+
                         torch.cuda.empty_cache()
 
-                    # Clean up preconditioner
-                    del precond_tensor
+                    # Save IFVP batch to disk immediately with synchronous save
+                    ifvp_path = self.disk_io.get_path('ifvp', batch_idx=batch_idx)
+                    self.disk_io.save_dict(batch_ifvp_dict, ifvp_path, async_save=False)
+
+                    # Track that we processed this batch
+                    processed_batch_indices.append(batch_idx)
+
+                    # Clean up memory for this batch
+                    del batch_grad_dict, batch_ifvp_dict
+
+                    # Force garbage collection
+                    import gc
+                    gc.collect()
                     torch.cuda.empty_cache()
 
-                # Save all IFVP batches to disk (sequentially)
-                for batch_idx in chunk_batch_indices:
-                    if batch_idx in ifvp_dict:
-                        batch_dict = ifvp_dict[batch_idx]
-                        ifvp_path = self.disk_io.get_path('ifvp', batch_idx=batch_idx)
-                        # Use non-async save to ensure completion
-                        self.disk_io.save_dict(batch_dict, ifvp_path, async_save=False)
+            # Create a lightweight result dictionary without actual tensors
+            minimal_ifvp_dict = {batch_idx: None for batch_idx in processed_batch_indices}
+            self.cached_ifvp = minimal_ifvp_dict
 
-                # Convert dictionary format to list format for consistency
-                for batch_idx in chunk_batch_indices:
-                    if batch_idx in ifvp_dict:
-                        batch_dict = ifvp_dict[batch_idx]
-                        ifvp_dict[batch_idx] = [batch_dict.get(i, torch.tensor([]))
-                                            for i in range(len(self.layer_names))]
+            # Wait for any pending async operations
+            self.disk_io.wait_for_async_operations()
 
-                # Clean up batch dictionaries
-                del batch_grad_dicts
-                torch.cuda.empty_cache()
+            return minimal_ifvp_dict
         else:
-            # Code for in-memory processing (modified to respect batch_range)
+            # For in-memory processing, we can optimize by processing layers in parallel
             if self.cached_gradients:
-                # Get all batch indices within range
-                batch_indices = [idx for idx in sorted(self.cached_gradients.keys())
-                            if start_batch <= idx < end_batch]
+                # Get all batch indices
+                batch_indices = sorted(self.cached_gradients.keys())
 
                 # Process each layer
                 for layer_idx, precond in enumerate(preconditioners):
+                    # Skip if preconditioner is None
                     if precond is None:
                         continue
 
@@ -835,7 +809,7 @@ class IFAttributor:
         # Store IFVP results
         self.cached_ifvp = ifvp_dict
 
-        # Ensure all operations are complete
+        # Wait for async operations to complete
         if self.offload == "disk":
             self.disk_io.wait_for_async_operations()
 
@@ -844,40 +818,45 @@ class IFAttributor:
         else:
             return ifvp_dict
 
-    def _copy_grad_to_ifvp(self, grad_path, ifvp_path, batch_idx):
-        """Helper method to copy gradient files to IFVP files in parallel"""
+    def _copy_grad_to_ifvp_minimal(self, grad_path, ifvp_path):
+        """
+        Helper method that copies gradient files to IFVP files
+        without loading data into memory unnecessarily
+        """
         # Load gradient dictionary
         grad_dict = self.disk_io.load_dict(grad_path)
 
-        # Save as IFVP
-        self.disk_io.save_dict(grad_dict, ifvp_path)
+        # Save as IFVP synchronously to ensure completion
+        self.disk_io.save_dict(grad_dict, ifvp_path, async_save=False)
 
-        # Convert to list format for consistency
-        batch_data = [grad_dict[i] if i in grad_dict else torch.tensor([])
-                    for i in range(len(self.layer_names))]
+        # Extract batch index only, don't return tensor data
+        batch_idx = self.disk_io.extract_batch_idx(grad_path)
 
-        return batch_idx, batch_data
+        # Clean up memory
+        del grad_dict
+
+        return batch_idx
 
     def attribute(
         self,
         test_dataloader: DataLoader,
         train_dataloader: Optional[DataLoader] = None,
-        use_cached_ifvp: bool = True,
-        batch_range: Optional[Tuple[int, int]] = None
+        use_cached_ifvp: bool = True
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ProfilingStats]]:
         """
         Attribute influence of training examples on test examples.
-        Optimized to process multiple batches simultaneously and reduce device transfers.
+        Optimized for minimal memory usage with aggressive cleanup.
 
         Args:
             test_dataloader: DataLoader for test data
             train_dataloader: Optional DataLoader for training data if not cached
             use_cached_ifvp: Whether to use cached IFVP (True) or recompute from cached gradients (False)
-            batch_range: Optional tuple of (start_batch, end_batch) to process only a subset of training batches
 
         Returns:
             Tensor of influence scores (and profiling stats if profile=True)
         """
+        import gc  # Import for explicit garbage collection
+
         # Load batch information if needed
         if self.metadata and not self.metadata.batch_info:
             print("Loading batch information from metadata...")
@@ -887,53 +866,67 @@ class IFAttributor:
             if train_dataloader is None:
                 raise ValueError("No batch information found and no training dataloader provided.")
 
-            # Cache gradients if needed (with batch_range)
+            # Cache gradients if needed
             print("No batch metadata found. Caching gradients from provided dataloader...")
-            self.cache_gradients(train_dataloader, batch_range=batch_range)
+            self.cache_gradients(train_dataloader)
 
         # Validate input
         if train_dataloader is None and self.full_train_dataloader is None and not self.metadata.batch_info:
             raise ValueError("No training data provided or cached.")
 
-        # Set sparsifiers in the hook manager
+        # Set sparsifiers and projectors if not already done
         if self.sparsifiers is None and self.projectors is None and train_dataloader is not None:
             self._setup_projectors(test_dataloader)
 
-        # Get IFVP - either from memory, disk, or compute new (with batch_range)
-        ifvp_dict = self._get_ifvp(use_cached_ifvp, batch_range=batch_range)
+        # Check if we're using cached IFVP or need to compute new ones
+        if use_cached_ifvp:
+            # Check if IFVP files exist before computing test gradients
+            if self.offload == "disk":
+                ifvp_files = self.disk_io.find_batch_files('ifvp')
+                if not ifvp_files:
+                    print("No cached IFVP found. Computing IFVP...")
+                    self.compute_ifvp()
+            elif not hasattr(self, 'cached_ifvp') or not self.cached_ifvp:
+                print("No cached IFVP found. Computing IFVP...")
+                self.compute_ifvp()
+        else:
+            print("Recomputing IFVP as requested...")
+            self.compute_ifvp()
 
         # Compute test gradients
+        print("Computing test gradients...")
         test_grads_dict, _ = self._compute_gradients(
             test_dataloader,
             is_test=True,
             batch_range=(0, len(test_dataloader))
         )
 
+        # Clean up memory after computing test gradients
         torch.cuda.empty_cache()
+        gc.collect()
 
         # Calculate total training samples and map batches to sample indices
         batch_to_sample_mapping = self.metadata.get_batch_to_sample_mapping()
         total_train_samples = self.metadata.get_total_samples()
 
-        # Filter batch_to_sample_mapping by batch_range if provided
-        if batch_range is not None:
-            start_batch, end_batch = batch_range
-            batch_to_sample_mapping = {
-                batch_idx: sample_range
-                for batch_idx, sample_range in batch_to_sample_mapping.items()
-                if start_batch <= batch_idx < end_batch
-            }
-
         # Initialize influence scores in memory
-        num_test = len(test_dataloader.sampler)
+        num_test = len(test_dataloader.dataset)
+        print(f"Initializing influence matrix for {total_train_samples} train samples and {num_test} test samples...")
         IF_score = torch.zeros(total_train_samples, num_test, device="cpu")
 
         # Map test batch indices to sample ranges
         test_batch_indices = {}
         current_index = 0
         for test_batch_idx in sorted(test_grads_dict.keys()):
-            batch_grads = test_grads_dict[test_batch_idx][0]  # Use first layer to get batch size
-            batch_size = batch_grads.shape[0] if batch_grads.numel() > 0 else 0
+            # Use first layer gradient to determine batch size
+            for layer_idx in range(len(self.layer_names)):
+                if test_grads_dict[test_batch_idx][layer_idx].numel() > 0:
+                    batch_size = test_grads_dict[test_batch_idx][layer_idx].shape[0]
+                    break
+            else:
+                # If all gradients are empty, assume batch size is 0
+                batch_size = 0
+
             test_batch_indices[test_batch_idx] = (current_index, current_index + batch_size)
             current_index += batch_size
 
@@ -942,99 +935,96 @@ class IFAttributor:
             self.hook_manager.remove_hooks()
             self.hook_manager = None
 
-        # Get all train batch indices and organize into optimal chunks
+        # Get all train batch indices
         train_batch_indices = sorted(batch_to_sample_mapping.keys())
 
-        # Determine optimal chunk sizes based on memory and dataset characteristics
-        train_chunk_size = min(2, len(train_batch_indices))  # Adjust based on memory available
-        test_chunk_size = min(2, len(test_batch_indices))     # Process multiple test batches at once
+        # Process one test batch at a time to reduce memory usage
+        for test_batch_idx in tqdm(sorted(test_grads_dict.keys()), desc="Attributing test batches..."):
+            test_col_st, test_col_ed = test_batch_indices[test_batch_idx]
 
-        # Calculate influence scores by processing chunks of train and test batches
-        for test_chunk_start in tqdm(range(0, len(test_grads_dict), test_chunk_size), desc="Attributing test batches..."):
-            test_chunk_end = min(test_chunk_start + test_chunk_size, len(test_grads_dict))
-            test_chunk_indices = sorted(list(test_grads_dict.keys()))[test_chunk_start:test_chunk_end]
+            # If no test samples in this batch, skip
+            if test_col_ed <= test_col_st:
+                continue
 
-            # Load all test gradients for this chunk
-            test_chunk_grads = {}
-            for test_batch_idx in test_chunk_indices:
+            # Load test gradients for this batch
+            if self.offload == "disk":
+                test_path = self.disk_io.get_path('gradients', batch_idx=test_batch_idx, is_test=True)
+                test_dict = self.disk_io.load_dict(test_path)
+                test_gradients = [test_dict.get(i, torch.tensor([])) for i in range(len(self.layer_names))]
+            else:
+                test_gradients = test_grads_dict[test_batch_idx]
+
+            # Process one train batch at a time
+            for train_batch_idx in tqdm(train_batch_indices,
+                                    desc=f"Processing train batches for test batch {test_batch_idx}...",
+                                    leave=False):
+                train_row_st, train_row_ed = batch_to_sample_mapping[train_batch_idx]
+
+                # If no train samples in this batch, skip
+                if train_row_ed <= train_row_st:
+                    continue
+
+                # Load IFVP for this train batch
                 if self.offload == "disk":
-                    test_path = self.disk_io.get_path('gradients', batch_idx=test_batch_idx, is_test=True)
-                    test_dict = self.disk_io.load_dict(test_path)
-                    test_chunk_grads[test_batch_idx] = [test_dict[i] if i in test_dict else torch.tensor([])
-                                                    for i in range(len(self.layer_names))]
-                else:
-                    test_chunk_grads[test_batch_idx] = test_grads_dict[test_batch_idx]
-
-            # Process train batches in chunks
-            for train_chunk_start in range(0, len(train_batch_indices), train_chunk_size):
-                train_chunk_end = min(train_chunk_start + train_chunk_size, len(train_batch_indices))
-                train_chunk_indices = train_batch_indices[train_chunk_start:train_chunk_end]
-
-                # Load all IFVP for this train chunk
-                train_chunk_ifvps = {}
-                for train_batch_idx in train_chunk_indices:
-                    if self.offload == "disk":
-                        ifvp_path = self.disk_io.get_path('ifvp', batch_idx=train_batch_idx)
-                        ifvp_dict_batch = self.disk_io.load_dict(ifvp_path)
-                        train_chunk_ifvps[train_batch_idx] = [ifvp_dict_batch[i] if i in ifvp_dict_batch else torch.tensor([])
-                                                            for i in range(len(self.layer_names))]
-                    else:
-                        train_chunk_ifvps[train_batch_idx] = ifvp_dict[train_batch_idx]
-
-                # Process each layer across all batches in the chunks
-                for layer_idx in range(len(self.layer_names)):
-                    # Skip if layer has no data
-                    has_data = any(train_ifvps[layer_idx].numel() > 0 for train_ifvps in train_chunk_ifvps.values())
-                    has_data = has_data and any(test_grads[layer_idx].numel() > 0 for test_grads in test_chunk_grads.values())
-                    if not has_data:
+                    ifvp_path = self.disk_io.get_path('ifvp', batch_idx=train_batch_idx)
+                    if not os.path.exists(ifvp_path):
+                        print(f"Warning: IFVP file not found for batch {train_batch_idx}, skipping.")
                         continue
 
-                    # Process each test batch with this layer
-                    for test_batch_idx in test_chunk_indices:
-                        test_grads = test_chunk_grads[test_batch_idx][layer_idx]
-                        if test_grads.numel() == 0:
-                            continue
+                    train_ifvp_dict = self.disk_io.load_dict(ifvp_path)
+                    train_ifvps = [train_ifvp_dict.get(i, torch.tensor([])) for i in range(len(self.layer_names))]
+                else:
+                    # For in-memory, get from cached dictionary
+                    if not hasattr(self, 'cached_ifvp') or not self.cached_ifvp or train_batch_idx not in self.cached_ifvp:
+                        print(f"Warning: IFVP not found for batch {train_batch_idx}, skipping.")
+                        continue
+                    train_ifvps = self.cached_ifvp[train_batch_idx]
 
-                        # Get column indices for this test batch
-                        col_st, col_ed = test_batch_indices[test_batch_idx]
+                # Process each layer independently to save memory
+                for layer_idx in range(len(self.layer_names)):
+                    # Skip if either gradient or IFVP is empty
+                    if (layer_idx >= len(test_gradients) or test_gradients[layer_idx].numel() == 0 or
+                        layer_idx >= len(train_ifvps) or train_ifvps[layer_idx].numel() == 0):
+                        continue
 
-                        # Move test gradients to device
-                        test_grads_gpu = test_grads.to(self.device)
+                    # Get test gradients and train IFVP for this layer
+                    test_grad = test_gradients[layer_idx]
+                    train_ifvp = train_ifvps[layer_idx]
 
-                        # Process each train batch for this test batch and layer
-                        for train_batch_idx in train_chunk_indices:
-                            train_ifvp = train_chunk_ifvps[train_batch_idx][layer_idx]
-                            if train_ifvp.numel() == 0:
-                                continue
+                    # Move to device for computation
+                    test_grad_gpu = test_grad.to(self.device)
+                    train_ifvp_gpu = train_ifvp.to(self.device)
 
-                            # Get row indices for this train batch
-                            row_st, row_ed = batch_to_sample_mapping[train_batch_idx]
+                    # Compute influence for this layer
+                    layer_influence = torch.matmul(train_ifvp_gpu, test_grad_gpu.t())
 
-                            # Move IFVP to device
-                            train_ifvp_gpu = train_ifvp.to(self.device)
+                    # Update influence scores
+                    IF_score[train_row_st:train_row_ed, test_col_st:test_col_ed] += layer_influence.cpu()
 
-                            # Compute influence for this layer, train batch, and test batch
-                            layer_influence = torch.matmul(train_ifvp_gpu, test_grads_gpu.t())
-
-                            # Update influence scores
-                            IF_score[row_st:row_ed, col_st:col_ed] += layer_influence.cpu()
-
-                            # Clean up GPU memory
-                            del train_ifvp_gpu, layer_influence
-
-                        # Clean up test gradients
-                        del test_grads_gpu
-
-                    # Clear cache after processing each layer
+                    # Clean up GPU memory immediately
+                    del test_grad_gpu, train_ifvp_gpu, layer_influence
                     torch.cuda.empty_cache()
 
-                # Clean up train chunk
-                del train_chunk_ifvps
-                torch.cuda.empty_cache()
+                # Clean up memory for this train batch
+                if self.offload == "disk":
+                    del train_ifvp_dict, train_ifvps
 
-            # Clean up test chunk
-            del test_chunk_grads
+                # Force garbage collection periodically
+                if train_batch_idx % 10 == 0:
+                    gc.collect()
+                    torch.cuda.empty_cache()
+
+            # Clean up test gradients after processing all train batches
+            if self.offload == "disk":
+                del test_dict, test_gradients
+
+            # Force garbage collection after each test batch
+            gc.collect()
             torch.cuda.empty_cache()
+
+        # Final cleanup
+        if self.offload == "disk":
+            self.disk_io.wait_for_async_operations()
 
         # Return result
         if self.profile and self.profiling_stats:
@@ -1042,28 +1032,19 @@ class IFAttributor:
         else:
             return IF_score
 
-    def _get_ifvp(self, use_cached: bool = True, batch_range: Optional[Tuple[int, int]] = None) -> Dict[int, List[torch.Tensor]]:
+    def _get_ifvp(self, use_cached: bool = True) -> Dict[int, List[torch.Tensor]]:
         """
         Get IFVP - either from memory, disk, or compute new.
 
         Args:
             use_cached: Whether to use cached IFVP
-            batch_range: Optional tuple of (start_batch, end_batch) to process only a subset of batches
 
         Returns:
             Dictionary mapping batch indices to lists of tensors (one tensor per layer)
         """
-        # If IFVP are already in memory, return them (filtered by batch_range if provided)
+        # If IFVP are already in memory, return them
         if use_cached and hasattr(self, 'cached_ifvp') and self.cached_ifvp:
-            if batch_range is None:
-                return self.cached_ifvp
-            else:
-                start_batch, end_batch = batch_range
-                return {
-                    batch_idx: ifvp
-                    for batch_idx, ifvp in self.cached_ifvp.items()
-                    if start_batch <= batch_idx < end_batch
-                }
+            return self.cached_ifvp
 
         # Otherwise, try to load from disk
         if use_cached and self.offload == "disk":
@@ -1072,17 +1053,6 @@ class IFAttributor:
 
             if ifvp_files:
                 print(f"Found {len(ifvp_files)} cached IFVP files on disk.")
-
-                # Filter by batch_range if provided
-                if batch_range is not None:
-                    start_batch, end_batch = batch_range
-                    filtered_ifvp_files = []
-                    for file_path in ifvp_files:
-                        batch_idx = self.disk_io.extract_batch_idx(file_path)
-                        if start_batch <= batch_idx < end_batch:
-                            filtered_ifvp_files.append(file_path)
-                    ifvp_files = filtered_ifvp_files
-                    print(f"Filtered to {len(ifvp_files)} files within batch range {start_batch} to {end_batch-1}.")
 
                 # Just check that files exist, don't actually load them
                 # They will be loaded on demand during attribution
@@ -1099,7 +1069,7 @@ class IFAttributor:
 
         # If not found, compute them
         print("IFVP not found or cached version not requested. Computing them now...")
-        result = self.compute_ifvp(batch_range=batch_range)
+        result = self.compute_ifvp()
         if self.profile:
             return result[0]
         else:

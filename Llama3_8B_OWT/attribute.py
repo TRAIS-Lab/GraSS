@@ -742,7 +742,7 @@ def main():
             # Measure precondition throughput
             torch.cuda.synchronize(device)
             precondition_start_time = time.time()
-            result = attributor.compute_ifvp()
+            result = attributor.compute_ifvp(batch_range=batch_range)
             torch.cuda.synchronize(device)
             precondition_end_time = time.time()
 
