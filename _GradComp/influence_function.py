@@ -664,7 +664,7 @@ class IFAttributor:
             print(f"Found {len(batch_files)} gradient batch files to process")
 
             # Process in smaller chunks to better manage memory
-            chunk_size = 32  # Reduced from 2 to 1 to better manage memory
+            chunk_size = 128  # Reduced from 2 to 1 to better manage memory
 
             for i in tqdm(range(0, len(batch_files), chunk_size), desc="Processing batches for IFVP"):
                 chunk_files = batch_files[i:i+chunk_size]
@@ -695,6 +695,8 @@ class IFAttributor:
                             continue
                         else:
                             precond_tensor = precond.to(self.device)
+
+                        precond_tensor = precond_tensor.to(dtype=torch.bfloat16)
 
                         # Process all batches for this layer
                         for batch_dict, batch_idx in zip(batch_grad_dicts, chunk_batch_indices):
