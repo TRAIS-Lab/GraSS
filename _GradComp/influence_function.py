@@ -440,7 +440,7 @@ class IFAttributor:
             batch_files = self.disk_io.find_batch_files('gradients')
 
             # Process in chunks to avoid memory issues
-            chunk_size = 2  # Adjust based on memory constraints
+            chunk_size = 512  # Adjust based on memory constraints
             for i in tqdm(range(0, len(batch_files), chunk_size), desc="Processing batches for preconditioners..."):
                 chunk_files = batch_files[i:i+chunk_size]
 
@@ -525,6 +525,7 @@ class IFAttributor:
             if hessian_accumulator is not None and sample_count > 0:
                 # Normalize by total number of samples
                 hessian = hessian_accumulator / sample_count
+                print(hessian)
 
                 # Compute inverse based on Hessian type
                 if self.hessian == "raw":
@@ -534,7 +535,7 @@ class IFAttributor:
                     if self.offload == "disk":
                         cpu_precond = precond.cpu()
                         file_path = self.disk_io.get_path('preconditioners', layer_idx=layer_idx)
-                        self.disk_io.save_tensor(cpu_precond, file_path)
+                        # self.disk_io.save_tensor(cpu_precond, file_path)
                         preconditioners[layer_idx] = cpu_precond
                     else:
                         # Store in memory
@@ -663,7 +664,7 @@ class IFAttributor:
             print(f"Found {len(batch_files)} gradient batch files to process")
 
             # Process in smaller chunks to better manage memory
-            chunk_size = 1  # Reduced from 2 to 1 to better manage memory
+            chunk_size = 32  # Reduced from 2 to 1 to better manage memory
 
             for i in tqdm(range(0, len(batch_files), chunk_size), desc="Processing batches for IFVP"):
                 chunk_files = batch_files[i:i+chunk_size]
