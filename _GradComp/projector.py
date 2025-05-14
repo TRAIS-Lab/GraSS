@@ -132,7 +132,6 @@ def setup_model_compressors(
 
     # Create sparsifiers and projectors for each layer
     for module_id, (module_name, module) in enumerate(model.named_modules()):
-        print("module:", module)
         if module_name in layer_names:
             idx = name_to_index[module_name]
 
@@ -292,7 +291,7 @@ def _get_active_indices(
     """
     active_indices = None
     try:
-        mask_path = f"../{setting}/Localize/mask_{dim}*{dim}/{compressor_type}/{module_name}.pt"
+        mask_path = f"../{setting}/Localize/mask_{dim}*{dim}/{module_name}.pt"
         active_indices = torch.load(mask_path, weights_only=False)
     except FileNotFoundError:
         print(f"Mask file not found for {module_name} {compressor_type}. Random indices are used.")
