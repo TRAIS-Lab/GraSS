@@ -406,3 +406,69 @@ def find_layers(model, layer_type="Linear", return_type="instance"):
         return [(name, layer) for name, layer in layers]
     else:
         raise ValueError("Invalid return_type. Choose from 'instance', 'name', and 'name_instance'.")
+
+def aggregate_influence_scores(results_dir, output_file=None, total_train_samples=None, num_test=None):
+        """
+        Aggregate partial influence scores saved by the attribute method.
+
+        Args:
+            results_dir: Directory containing partial result files
+            output_file: Path to save the aggregated results
+            total_train_samples: Total number of training samples
+            num_test: Number of test samples
+
+        Returns:
+            Aggregated influence scores tensor
+        """
+        print(f"Aggregating influence scores from {results_dir}...")
+
+        # Find all partial result files
+        result_files = [f for f in os.listdir(results_dir) if f.endswith('.pt')]
+
+        if not result_files:
+            raise ValueError(f"No result files found in {results_dir}")
+
+        # Load the first file to get metadata if not provided
+        first_file = os.path.join(results_dir, result_files[0])
+        first_data = torch.load(first_file)
+
+        if total_train_samples is None or num_test is None:
+            if 'metadata' in first_data:
+                metadata = first_data['metadata']
+                total_train_samples = metadata.get('total_train_samples')
+                num_test = metadata.get('num_test')
+
+            if total_train_samples is None or num_test is None:
+                raise ValueError("Could not determine total_train_samples or num_test. Please provide these values.")
+
+        # Initialize the full results tensor
+        IF_score = torch.zeros(total_train_samples, num_test)
+
+        # Aggregate all partial results
+        for file_name in tqdm(result_files, desc="Aggregating files"):
+            file_path = os.path.join(results_dir, file_name)
+            data = torch.load(file_path)
+
+            if 'metadata' in data and 'scores' in data:
+                scores = data['scores']
+                metadata = data['metadata']
+                min_sample = metadata['min_sample']
+                max_sample = metadata['max_sample']
+
+                # Add this chunk's scores to the full tensor
+                IF_score[min_sample:max_sample, :] += scores
+            else:
+                # Fall back to parsing file name for older format
+                parts = file_name.split('_')
+                if len(parts) >= 4:
+                    min_sample = int(parts[-2])
+                    max_sample = int(parts[-1].split('.')[0])
+                    scores = data
+                    IF_score[min_sample:max_sample, :] += scores
+
+        # Save aggregated results if output file is specified
+        if output_file is not None:
+            torch.save(IF_score, output_file)
+            print(f"Saved aggregated results to {output_file}")
+
+        return IF_score

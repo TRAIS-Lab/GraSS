@@ -724,6 +724,7 @@ def main():
             cache_dir=args.cache_dir
         )
 
+        # attributor.create_metadata_only(train_dataloader)
         if args.cache:
             # Measure cache throughput
             torch.cuda.synchronize(device)
@@ -894,11 +895,11 @@ def main():
 
     if args.precondition:
         precondition_duration = precondition_end_time - precondition_start_time
-        precondition_throughput = train_test_pairs / precondition_duration
+        precondition_throughput = train_tokens / precondition_duration
         throughput_stats["precondition"] = {
-            "train_test_pairs": train_test_pairs,
+            "tokens": train_tokens,
             "duration_seconds": precondition_duration,
-            "throughput_pair_per_second": precondition_throughput
+            "throughput_tokens_per_second": precondition_throughput
         }
 
     if args.attribute:
