@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 import torch
 from tqdm import tqdm
 
-from .base import BaseAttributor, ProfilingStats
+from .base import BaseAttributor, HessianOptions, ProfilingStats
 from ..utils.common import stable_inverse
 
 import logging
@@ -72,8 +72,8 @@ class IFAttributor(BaseAttributor):
         # Process batches - if disk offload, use dataloader, otherwise process directly
         dataloader = self.strategy.create_gradient_dataloader(
             data_type="gradients",
-            batch_size=4,
-            num_workers=16,
+            batch_size=4,  # Process multiple files at a time
+            num_workers=4,
             pin_memory=True
         )
 
@@ -91,12 +91,6 @@ class IFAttributor(BaseAttributor):
                             continue
 
                         grad = batch_dict[layer_idx]
-                        # # Ensure gradient is properly shaped [batch_size, feature_dim]
-                        # if grad.dim() > 2:
-                        #     # If shape is [batch_outer, batch_inner, feature_dim]
-                        #     original_shape = grad.shape
-                        #     grad = grad.reshape(-1, grad.shape[-1])
-                        #     logger.debug(f"Reshaped gradient from {original_shape} to {grad.shape}")
 
                         layer_gradients.append(grad)
 
@@ -291,11 +285,22 @@ class IFAttributor(BaseAttributor):
         else:
             batch_indices = sorted(self.metadata.batch_info.keys())
 
+        # Load all preconditioners at once to avoid repeated loading
+        logger.info("Loading preconditioners for all layers")
+        preconditioners = []
+        for layer_idx in range(len(self.layer_names)):
+            precond = self.strategy.retrieve_preconditioner(layer_idx)
+            preconditioners.append(precond)  # Will be None if not available
+
+        # Log how many preconditioners were loaded
+        valid_preconditioners = sum(1 for p in preconditioners if p is not None)
+        logger.info(f"Loaded {valid_preconditioners} preconditioners out of {len(self.layer_names)} layers")
+
         # Process batches - if disk offload, use dataloader, otherwise process directly
         dataloader = self.strategy.create_gradient_dataloader(
             data_type="gradients",
-            batch_size=2,
-            num_workers=16,
+            batch_size=4,
+            num_workers=32,
             pin_memory=True,
             batch_range=batch_range
         )
@@ -311,8 +316,8 @@ class IFAttributor(BaseAttributor):
 
                 # Process each layer
                 for layer_idx in range(len(self.layer_names)):
-                    # Load preconditioner for this layer
-                    precond = self.strategy.retrieve_preconditioner(layer_idx)
+                    # Get preconditioner for this layer from our preloaded list
+                    precond = preconditioners[layer_idx]
 
                     # Skip if preconditioner is None
                     if precond is None:
@@ -331,12 +336,6 @@ class IFAttributor(BaseAttributor):
 
                         grad = batch_grad_dict[layer_idx]
 
-                        # # Handle multi-dimensional gradients if needed
-                        # if grad.dim() > 2:
-                        #     original_shape = grad.shape
-                        #     grad = grad.reshape(-1, grad.shape[-1])
-                        #     logger.debug(f"Reshaped gradient from {original_shape} to {grad.shape}")
-
                         # Save the gradient along with its batch info
                         batch_gradients.append(grad)
                         batch_dict_indices.append(batch_dict_idx)
@@ -354,11 +353,12 @@ class IFAttributor(BaseAttributor):
                     # Concatenate all gradients for efficient processing
                     concatenated_gradients = torch.cat(device_gradients, dim=0)
 
-                    # Make sure types match
-                    precond = precond.to(dtype=concatenated_gradients.dtype)
+                    # Move preconditioner to device and ensure types match
+                    device_precond = self.strategy.move_to_device(precond)
+                    device_precond = device_precond.to(dtype=concatenated_gradients.dtype)
 
                     # Compute IFVP for all gradients at once
-                    result = torch.matmul(precond, concatenated_gradients.t()).t()
+                    result = torch.matmul(device_precond, concatenated_gradients.t()).t()
 
                     # Split result back to individual batch results
                     split_results = torch.split(result, original_shapes)
@@ -368,7 +368,7 @@ class IFAttributor(BaseAttributor):
                         batch_ifvp_dicts[dict_idx][layer_idx] = self.strategy.move_from_device(split_result)
 
                     # Clean up memory
-                    del device_gradients, concatenated_gradients, result, split_results, precond
+                    del device_gradients, concatenated_gradients, result, split_results, device_precond
                     torch.cuda.empty_cache()
 
                 # Save all computed IFVP results
@@ -405,30 +405,28 @@ class IFAttributor(BaseAttributor):
                     if layer_idx >= len(batch_grads) or batch_grads[layer_idx].numel() == 0:
                         continue
 
-                    # Get preconditioner for this layer
-                    precond = self.strategy.retrieve_preconditioner(layer_idx)
+                    # Get preconditioner for this layer from preloaded list
+                    precond = preconditioners[layer_idx]
 
                     # Skip if preconditioner is None
                     if precond is None:
                         continue
 
                     # Get gradient and ensure it's on the device
-                    grad = batch_grads[layer_idx]
+                    grad = self.strategy.move_to_device(batch_grads[layer_idx])
 
-                    # # Handle multi-dimensional gradients if needed
-                    # if grad.dim() > 2:
-                    #     original_shape = grad.shape
-                    #     grad = grad.reshape(-1, grad.shape[-1])
-                    #     logger.debug(f"Reshaped gradient from {original_shape} to {grad.shape}")
+                    # Move preconditioner to device and ensure types match
+                    device_precond = self.strategy.move_to_device(precond)
+                    device_precond = device_precond.to(dtype=grad.dtype)
 
                     # Compute IFVP
-                    ifvp = torch.matmul(precond, grad.t()).t()
+                    ifvp = torch.matmul(device_precond, grad.t()).t()
 
                     # Store result
                     batch_ifvp[layer_idx] = self.strategy.move_from_device(ifvp)
 
                     # Clean up
-                    del grad, ifvp, precond
+                    del grad, ifvp, device_precond
                     torch.cuda.empty_cache()
 
                 # Store in strategy
@@ -436,6 +434,11 @@ class IFAttributor(BaseAttributor):
 
                 # Add to result dictionary
                 result_dict[batch_idx] = batch_ifvp
+
+        # Clean up preloaded preconditioners
+        del preconditioners
+        gc.collect()
+        torch.cuda.empty_cache()
 
         # Wait for async operations to complete
         self.strategy.wait_for_async_operations()
@@ -451,6 +454,7 @@ class IFAttributor(BaseAttributor):
         self,
         batch_range: Optional[Tuple[int, int]] = None,
         precondition: bool = True,
+        damping: Optional[float] = None
     ) -> torch.Tensor:
         """
         Compute self-influence scores for training examples.
@@ -459,6 +463,7 @@ class IFAttributor(BaseAttributor):
         Args:
             batch_range: Optional tuple of (start_batch, end_batch) to process only a subset of batches
             precondition: Whether to use preconditioned gradients
+            damping: Optional damping parameter (uses self.damping if None)
 
         Returns:
             Tensor containing self-influence scores for all examples
@@ -491,8 +496,8 @@ class IFAttributor(BaseAttributor):
         # Process batches - if disk offload, use dataloader, otherwise process directly
         dataloader = self.strategy.create_gradient_dataloader(
             data_type="gradients",
-            batch_size=4,
-            num_workers=16,
+            batch_size=8,
+            num_workers=32,
             pin_memory=True,
             batch_range=batch_range
         )
@@ -517,13 +522,6 @@ class IFAttributor(BaseAttributor):
 
                         # Get gradient and move to device
                         grad = self.strategy.move_to_device(batch_grad_dict[layer_idx])
-
-                        # # Handle multi-dimensional gradients
-                        # if grad.dim() > 2:
-                        #     if grad.shape[0] != num_samples:
-                        #         original_shape = grad.shape
-                        #         grad = grad.reshape(num_samples, -1)
-                        #         logger.debug(f"Reshaped gradient from {original_shape} to {grad.shape}")
 
                         if precondition:
                             # Get preconditioner
@@ -584,13 +582,6 @@ class IFAttributor(BaseAttributor):
 
                     # Get gradient
                     grad = batch_grads[layer_idx]
-
-                    # # Handle multi-dimensional gradients
-                    # if grad.dim() > 2:
-                    #     if grad.shape[0] != num_samples:
-                    #         original_shape = grad.shape
-                    #         grad = grad.reshape(num_samples, -1)
-                    #         logger.debug(f"Reshaped gradient from {original_shape} to {grad.shape}")
 
                     if precondition:
                         # Get preconditioner
@@ -666,10 +657,8 @@ class IFAttributor(BaseAttributor):
             self.cache_gradients(train_dataloader)
 
         # Set sparsifiers in the hook manager
-        if self.sparsifiers is None and self.projectors is None and train_dataloader is not None:
-            self._setup_compressors(train_dataloader)
-        elif self.sparsifiers is None and self.projectors is None and self.full_train_dataloader is not None:
-            self._setup_compressors(self.full_train_dataloader)
+        if self.sparsifiers is None and self.projectors is None:
+            self._setup_compressors(test_dataloader)
 
         # Get or compute IFVP
         if use_cached_ifvp and self.strategy.has_ifvp():
@@ -700,7 +689,6 @@ class IFAttributor(BaseAttributor):
         current_index = 0
 
         # Organize test gradients by layer for efficiency
-        # This allows us to keep all test gradients in memory and only iterate through train batches once
         test_grads_by_layer = {}
 
         # First pass: determine sample indices for each test batch
@@ -730,13 +718,6 @@ class IFAttributor(BaseAttributor):
                 if grad.numel() == 0:
                     continue
 
-                # # Handle multi-dimensional test gradients if needed
-                # if grad.dim() > 2:
-                #     test_samples = col_ed - col_st
-                #     original_shape = grad.shape
-                #     grad = grad.reshape(test_samples, -1)
-                #     logger.debug(f"Reshaped test gradient from {original_shape} to {grad.shape}")
-
                 # Store gradient with its column range
                 if layer_idx not in test_grads_by_layer:
                     test_grads_by_layer[layer_idx] = []
@@ -752,8 +733,8 @@ class IFAttributor(BaseAttributor):
         train_batch_indices = sorted(self.metadata.batch_info.keys())
         dataloader = self.strategy.create_gradient_dataloader(
             data_type="ifvp",
-            batch_size=4,
-            num_workers=16,
+            batch_size=8,  # Process multiple files at a time
+            num_workers=32,
             pin_memory=True
         )
 
@@ -787,15 +768,7 @@ class IFAttributor(BaseAttributor):
                         row_st, row_ed = batch_to_sample_mapping[train_batch_idx]
                         train_samples = row_ed - row_st
 
-                        # Get IFVP for this batch
                         train_ifvp = train_batch_dict[layer_idx]
-
-                        # # Handle multi-dimensional IFVP if needed
-                        # if train_ifvp.dim() > 2:
-                        #     original_shape = train_ifvp.shape
-                        #     train_ifvp = train_ifvp.reshape(train_samples, -1)
-                        #     logger.debug(f"Reshaped train IFVP from {original_shape} to {train_ifvp.shape}")
-
                         layer_train_ifvps.append(train_ifvp)
                         layer_train_row_ranges.append((row_st, row_ed))
 
@@ -808,15 +781,10 @@ class IFAttributor(BaseAttributor):
 
                     # Process all test gradients for this layer
                     for test_grad, col_st, col_ed in layer_test_grads:
-                        # Move test gradient to device
                         test_grad_gpu = self.strategy.move_to_device(test_grad)
 
-                        # Process each train batch with this test gradient
                         for ifvp_gpu, (row_st, row_ed) in zip(layer_train_ifvps_gpu, layer_train_row_ranges):
-                            # Compute influence for this pair
                             layer_influence = torch.matmul(ifvp_gpu, test_grad_gpu.t())
-
-                            # Update influence scores
                             IF_score[row_st:row_ed, col_st:col_ed] += layer_influence.cpu()
 
                             # Clean up
@@ -856,28 +824,13 @@ class IFAttributor(BaseAttributor):
                     if layer_idx >= len(train_ifvp) or train_ifvp[layer_idx].numel() == 0:
                         continue
 
-                    # Get IFVP for this layer
                     layer_ifvp = train_ifvp[layer_idx]
-
-                    # # Handle multi-dimensional IFVP if needed
-                    # if layer_ifvp.dim() > 2:
-                    #     train_samples = row_ed - row_st
-                    #     original_shape = layer_ifvp.shape
-                    #     layer_ifvp = layer_ifvp.reshape(train_samples, -1)
-                    #     logger.debug(f"Reshaped train IFVP from {original_shape} to {layer_ifvp.shape}")
-
-                    # Move to device
                     layer_ifvp = self.strategy.move_to_device(layer_ifvp)
 
                     # Process all test gradients for this layer
                     for test_grad, col_st, col_ed in test_grads_by_layer[layer_idx]:
-                        # Move test gradient to device
                         test_grad = self.strategy.move_to_device(test_grad)
-
-                        # Compute influence
                         layer_influence = torch.matmul(layer_ifvp, test_grad.t())
-
-                        # Update influence scores
                         IF_score[row_st:row_ed, col_st:col_ed] += layer_influence.cpu()
 
                         # Clean up
