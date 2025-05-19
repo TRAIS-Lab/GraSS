@@ -294,7 +294,7 @@ class IFAttributor(BaseAttributor):
         # Process batches - if disk offload, use dataloader, otherwise process directly
         dataloader = self.strategy.create_gradient_dataloader(
             data_type="gradients",
-            batch_size=4,
+            batch_size=2,
             num_workers=16,
             pin_memory=True,
             batch_range=batch_range

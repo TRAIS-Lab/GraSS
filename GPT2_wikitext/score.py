@@ -705,8 +705,6 @@ def main():
             attributor.compute_preconditioners(damping=damping)
             attributor.compute_ifvp()
 
-            print(attributor.compute_self_influence())
-
             # Evaluate on validation set
             if args.profile:
                 val_score, profile = attributor.attribute(test_dataloader=val_dataloader)
