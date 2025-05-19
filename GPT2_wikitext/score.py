@@ -639,7 +639,6 @@ def main():
 
     # Define the grid of damping values to search
     damping_values = [1e-4, 1e-3, 1e-2, 1e-1, 1e0, 10]
-    # damping_values = [0]
     best_damping = None
     best_lds_score = float('-inf')
     validation_results = {}
@@ -661,8 +660,9 @@ def main():
     profile = None
     if args.baseline == "GC":
         check_min_version("4.46.0")
-        from _GradComp.utils import find_layers
-        from _GradComp.influence_function import IFAttributor
+        from _GradComp.utils.common import find_layers
+        # from _GradComp.influence_function import IFAttributor
+        from _GradComp.attributor.attributor import IFAttributor
 
         # get which Hessian to use
         tda, hessian = args.tda.split("-")
@@ -705,12 +705,13 @@ def main():
             attributor.compute_preconditioners(damping=damping)
             attributor.compute_ifvp()
 
+            print(attributor.compute_self_influence())
+
             # Evaluate on validation set
             if args.profile:
                 val_score, profile = attributor.attribute(test_dataloader=val_dataloader)
             else:
                 val_score = attributor.attribute(test_dataloader=val_dataloader)
-
             # Calculate LDS for validation set
             val_lds_score = split_lds(val_score, training_setting, val_indices, original_test_len)
             validation_results[damping] = val_lds_score

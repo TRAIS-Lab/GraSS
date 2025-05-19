@@ -1,10 +1,7 @@
-"""Projection matrix constructions.
+"""
+Implementation of projection methods for dimension reduction.
 
 This file contains functions to construct all random projection methods for dimension reduction.
-
-Typically, the feature will correspond to gradient w.r.t model parameters.
-
-The code is mainly adapted from https://github.com/MadryLab/trak/blob/main/trak/ and https://github.com/TRAIS-Lab/dattri/blob/main/dattri/func/projection.py
 """
 
 from __future__ import annotations
@@ -13,23 +10,20 @@ import math
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import TYPE_CHECKING, Tuple
+import logging
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import Dict, List, Union, Optional
 
-import os
-import sys
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.append(parent_dir)
-
 import numpy as np
 import torch
 from torch import Tensor
 
-from _GradComp.utils import _vectorize as vectorize
-from _GradComp.utils import get_parameter_chunk_sizes
+from ..utils.common import vectorize, get_parameter_chunk_sizes
 
+# Configure logger
+logger = logging.getLogger(__name__)
 
 class ProjectionType(str, Enum):
     """Projection type used for projectors."""
@@ -54,18 +48,18 @@ class AbstractProjector(ABC):
         """Initializes hyperparameters for the projection.
 
         Args:
-            feature_dim (int): Dimension of the features to be projected.
+            feature_dim: Dimension of the features to be projected.
                 Typically, this equals the number of parameters in the model
                 (dimension of the gradient vectors).
-            proj_dim (int): Dimension after the projection.
-            seed (int): Random seed for the generation of the sketching
+            proj_dim: Dimension after the projection.
+            seed: Random seed for the generation of the sketching
                 (projection) matrix.
-            proj_type (Union[str, ProjectionType]): The random projection (JL
+            proj_type: The random projection (JL
                 transform) guarantees that distances will be approximately
                 preserved for a variety of choices of the random matrix. Here,
                 we provide an implementation for matrices with iid Gaussian
                 entries and iid Rademacher entries.
-            device (Union[str, torch.device]): CUDA device to use.
+            device: CUDA device to use.
         """
         self.feature_dim = feature_dim
         self.proj_dim = proj_dim
@@ -82,9 +76,9 @@ class AbstractProjector(ABC):
         matrix.
 
         Args:
-            features (Union[dict, Tensor]): A batch of features or a dictionary
+            features: A batch of features or a dictionary
                 of batch of features.
-            ensemble_id (int): A unique ID for this ensemble.
+            ensemble_id: A unique ID for this ensemble.
 
         Returns:
             Tensor: The projected features.
@@ -100,12 +94,6 @@ class BasicProjector(AbstractProjector):
 
     The projection matrix is generated on-device in blocks.
     The accumulated result across blocks is returned.
-
-    Note: This class will be significantly slower and have a larger memory
-    footprint than the CudaProjector. It is recommended that you use this method
-    only if the CudaProjector is not available to you -- e.g. if you don't have
-    a CUDA-enabled device with compute capability >=7.0 (see
-    https://developer.nvidia.com/cuda-gpus).
     """
 
     def __init__(
@@ -125,23 +113,23 @@ class BasicProjector(AbstractProjector):
         """Initializes hyperparameters for BasicProjector.
 
         Args:
-            feature_dim (int): Dimension of the features to be projected.
+            feature_dim: Dimension of the features to be projected.
                 Typically, this equals the number of parameters in the model
                 (dimension of the gradient vectors).
-            proj_dim (int): Dimension after the projection.
-            seed (int): Random seed for the generation of the sketching
+            proj_dim: Dimension after the projection.
+            seed: Random seed for the generation of the sketching
                 (projection) matrix.
-            proj_type (Union[str, ProjectionType]): The random projection (JL
+            proj_type: The random projection (JL
                 transform) guarantees that distances will be approximately
                 preserved for a variety of choices of the random matrix. Here,
                 we provide an implementation for matrices with iid Gaussian
                 entries and iid Rademacher entries.
-            device (torch.device): CUDA device to use.
-            block_size (int): Maximum number of projection dimension allowed.
+            device: CUDA device to use.
+            block_size: Maximum number of projection dimension allowed.
                 Thus, min(block_size, proj_dim) will be used as the actual
                 projection dimension.
-            dtype (torch.dtype): The dtype of the projected matrix.
-            ensemble_id (int): A unique ID for this ensemble.
+            dtype: The dtype of the projected matrix.
+            ensemble_id: A unique ID for this ensemble.
         """
         super().__init__(feature_dim, proj_dim, seed, proj_type, device)
 
@@ -166,6 +154,8 @@ class BasicProjector(AbstractProjector):
         self.get_generator_states()
         self.generate_sketch_matrix(self.generator_states[0])
 
+        logger.debug(f"Initialized BasicProjector with dimensions {feature_dim} -> {proj_dim}")
+
     def free_memory(self) -> None:
         """Delete the projection matrix."""
         del self.proj_matrix
@@ -187,7 +177,7 @@ class BasicProjector(AbstractProjector):
         """Set generator states and generate sketch matrices.
 
         Args:
-            generator_state (List): A list of generator states. Usually each
+            generator_state: A list of generator states. Usually each
                 block will be given a unique generator states.
 
         Raises:
@@ -218,9 +208,9 @@ class BasicProjector(AbstractProjector):
         """Performs the random projection on the feature matrix.
 
         Args:
-            features (Union[dict, Tensor]): A batch of features or a dictionary
+            features: A batch of features or a dictionary
                 of batch of features.
-            ensemble_id (int): A unique ID for this ensemble.
+            ensemble_id: A unique ID for this ensemble.
 
         Returns:
             Tensor: The projected features.
@@ -278,21 +268,21 @@ class CudaProjector(AbstractProjector):
         """Initializes hyperparameters for CudaProjector.
 
         Args:
-            feature_dim (int): Dimension of the features to be projected.
+            feature_dim: Dimension of the features to be projected.
                 Typically, this equals the number of parameters in the model
                 (dimension of the gradient vectors).
-            proj_dim (int): Dimension we project *to* during the projection step
-            seed (int): Random seed.
-            proj_type (ProjectionType): Type of randomness to use for
+            proj_dim: Dimension we project *to* during the projection step
+            seed: Random seed.
+            proj_type: Type of randomness to use for
                 projection matrix (rademacher or normal).
-            device (str): CUDA device to use.
-            max_batch_size (int): Explicitly constrains the batch size of
+            device: CUDA device to use.
+            max_batch_size: Explicitly constrains the batch size of
                 the CudaProjector is going to use for projection.
                 Set this if you get a 'The batch size of the CudaProjector is
                 too large for your GPU' error. Must be either 8, 16, or 32.
-            method (str): The method used for the projection.
-            active_indices (Optional[Tensor]): The indices of the features to be considered.
-            pre_compute (bool): If True, the projection construction will be pre-computed
+            method: The method used for the projection.
+            active_indices: The indices of the features to be considered.
+            pre_compute: If True, the projection construction will be pre-computed
 
         Raises:
             ValueError: When attempting to use this on a non-CUDA device.
@@ -342,7 +332,7 @@ class CudaProjector(AbstractProjector):
                 raise ModuleNotFoundError(msg) from None
         elif self.method == "SJLT":
             try:
-                from _GradComp.SJLT.sjlt_cuda import SJLTProjection
+                from .sjlt.sjlt_cuda import SJLTProjection
                 self.c = 1
                 if self.pre_compute:
                     torch.manual_seed(self.seed)
@@ -383,6 +373,8 @@ class CudaProjector(AbstractProjector):
                 indices = torch.randperm(self.active_indices.numel())[:proj_dim]
                 self.active_indices = self.active_indices[indices]
 
+        logger.debug(f"Initialized CudaProjector with method {method} and dimensions {feature_dim} -> {proj_dim}")
+
 
     def project(
         self,
@@ -392,9 +384,9 @@ class CudaProjector(AbstractProjector):
         """Performs the random projection on the feature matrix.
 
         Args:
-            features (Union[dict, Tensor]): A batch of features or a dictionary
+            features: A batch of features or a dictionary
                 of batch of features.
-            ensemble_id (int): A unique ID for this ensemble.
+            ensemble_id: A unique ID for this ensemble.
 
         Raises:
             RuntimeError: The batch size of the CudaProjector is too large for
@@ -450,7 +442,7 @@ class CudaProjector(AbstractProjector):
                     result = self.sjlt_cuda_module(features)
             else:
                 try:
-                    from _GradComp.SJLT.sjlt_cuda import SJLTProjection
+                    from .sjlt.sjlt_cuda import SJLTProjection
 
                     torch.manual_seed(self.seed)
                     active_dim = self.active_indices.numel()
@@ -533,14 +525,14 @@ class ChunkedCudaProjector:
         """Initializes hyperparameters for ChunkedCudaProjector.
 
         Args:
-            projector_per_chunk (list): A list of projectors. Specifying
+            projector_per_chunk: A list of projectors. Specifying
                 the projector used by each chunk.
-            max_chunk_size (int): The maximum size of each chunk.
-            dim_per_chunk (list): The number of feature dimensions per chunk.
-            feature_batch_size (int): The batch size of input feature.
-            proj_max_batch_size (int): The maximum batch size for each projector.
-            device (torch.device): Device to use. Will be "cuda" or "cpu".
-            dtype (torch.dtype): The dtype of the projected matrix.
+            max_chunk_size: The maximum size of each chunk.
+            dim_per_chunk: The number of feature dimensions per chunk.
+            feature_batch_size: The batch size of input feature.
+            proj_max_batch_size: The maximum batch size for each projector.
+            device: Device to use. Will be "cuda" or "cpu".
+            dtype: The dtype of the projected matrix.
         """
         self.projector_per_chunk = projector_per_chunk
         self.proj_dim = self.projector_per_chunk[0].proj_dim
@@ -552,6 +544,8 @@ class ChunkedCudaProjector:
         self.device = device
         self.dtype = dtype
         self.input_allocated = False
+
+        logger.debug(f"Initialized ChunkedCudaProjector with {len(projector_per_chunk)} chunks")
 
     def allocate_input(self) -> None:
         """Allocate zero tensor for input."""
@@ -578,9 +572,9 @@ class ChunkedCudaProjector:
         """Performs the random projection on the feature matrix.
 
         Args:
-            features (Union[dict, Tensor]): A batch of features or a dictionary
+            features: A batch of features or a dictionary
                 of batch of features.
-            ensemble_id (int): A unique ID for this ensemble.
+            ensemble_id: A unique ID for this ensemble.
 
         Raises:
             ValueError: The number of accumulated #feature dim does not match
@@ -655,9 +649,9 @@ class ChunkedCudaProjector:
         """Performs the random projection on the feature matrix.
 
         Args:
-            features (Union[dict, Tensor]): A batch of features or a dictionary
+            features: A batch of features or a dictionary
                 of batch of features.
-            ensemble_id (int): A unique ID for this ensemble.
+            ensemble_id: A unique ID for this ensemble.
 
         Returns:
             Tensor: The projected features.
@@ -703,27 +697,27 @@ def make_random_projector(
     """Initialize random projector by the info of feature about to be projected.
 
     Args:
-        param_shape_list (List): A list of numbers indicating the total number of
+        param_shape_list: A list of numbers indicating the total number of
             features to be projected. A typical example is a list of total parameter
             size of each module in a torch.nn.Module model. Total parameter size
             of each module equals to feature_batch_size * param_size of that module.
-        feature_batch_size (int): The batch size of each tensor in the feature
+        feature_batch_size: The batch size of each tensor in the feature
             about to be projected. The typical type of feature are gradients of
             torch.nn.Module model but can be restricted to this.
-        proj_dim (int): Dimension of the projected feature.
-        proj_max_batch_size (int): The maximum batch size used by fast_jl if the
+        proj_dim: Dimension of the projected feature.
+        proj_max_batch_size: The maximum batch size used by fast_jl if the
             CudaProjector is used. Must be a multiple of 8. The maximum
             batch size is 32 for A100 GPUs, 16 for V100 GPUs, 40 for H100 GPUs.
-        device (str): "cuda" or "cpu".
-        proj_seed (int): Random seed used by the projector. Defaults to 0.
-        method (str): The method used for the projection.
-        use_half_precision (bool): If True, torch.float16 will be used for all
+        device: "cuda" or "cpu".
+        proj_seed: Random seed used by the projector. Defaults to 0.
+        method: The method used for the projection.
+        use_half_precision: If True, torch.float16 will be used for all
             computations and arrays will be stored in torch.float16.
-        active_indices (Optional[Tensor]): The indices of the features to be considered.
-        pre_compute (bool): If True, the projection construction will be pre-computed
+        active_indices: The indices of the features to be considered.
+        pre_compute: If True, the projection construction will be pre-computed
 
     Returns:
-        The projected feature with shape [batch_size, proj_dim].
+        A function that takes projects feature to a smaller dimension.
 
     Raises:
         AttributeError: possible attribute error when initializing CudaProjector.
@@ -844,8 +838,8 @@ def random_project(
     feature: Union[Dict[str, Tensor], Tensor],
     feature_batch_size: int,
     proj_dim: int,
-    proj_max_batch_size: int,
-    device: str,
+    proj_max_batch_size: int = 32,
+    device: str = "cuda",
     proj_seed: int = 0,
     method: str = "Gaussian",
     *,
@@ -856,25 +850,24 @@ def random_project(
     """Randomly projects the features to a smaller dimension.
 
     Args:
-        feature (Union[Dict[str, Tensor], Tensor]): The feature needs to be
-            projected. This can simple be a tensor with size [feature_batch_size,
-            feature_dim]. Or typically, if the this is gradient of some
-            torch.nn.Module models, it will have the structure similar to the
-            result of model.named_parameters().
-        feature_batch_size (int): The batch size of each tensor in the feature
+        feature: The feature needs to be projected. This can simple be a tensor with size
+            [feature_batch_size, feature_dim]. Or typically, if this is gradient of some
+            torch.nn.Module models, it will have the structure similar to the result of
+            model.named_parameters().
+        feature_batch_size: The batch size of each tensor in the feature
             about to be projected. The typical type of feature are gradients of
             torch.nn.Module model but can restricted to this.
-        proj_dim (int): Dimension of the projected feature.
-        proj_max_batch_size (int): The maximum batch size used by fast_jl if the
+        proj_dim: Dimension of the projected feature.
+        proj_max_batch_size: The maximum batch size used by fast_jl if the
             CudaProjector is used. Must be a multiple of 8. The maximum
             batch size is 32 for A100 GPUs, 16 for V100 GPUs, 40 for H100 GPUs.
-        device (str): "cuda" or "cpu".
-        proj_seed (int): Random seed used by the projector. Defaults to 0.
-        method (str): The method used for the projection.
-        use_half_precision (bool): If True, torch.float16 will be used for all
+        device: "cuda" or "cpu".
+        proj_seed: Random seed used by the projector. Defaults to 0.
+        method: The method used for the projection.
+        use_half_precision: If True, torch.float16 will be used for all
             computations and arrays will be stored in torch.float16.
-        active_indices (Optional[Tensor]): The indices of the features to be considered.
-        pre_compute (bool): If True, the projection construction will be pre-computed
+        active_indices: The indices of the features to be considered.
+        pre_compute: If True, the projection construction will be pre-computed
 
     Returns:
         A function that takes projects feature to a smaller dimension.
@@ -907,12 +900,12 @@ def random_project(
         """The projection function using constructed projector.
 
         Args:
-            feature (Union[Dict[str, Tensor], Tensor]): The feature needs to be
+            feature: The feature needs to be
                 projected. This can simple be a tensor with size [feature_batch_size,
                 feature_dim]. Or typically, if the this is gradient of some
                 torch.nn.Module models, it will have the structure similar to the
                 result of model.named_parameters().
-            ensemble_id (int): A unique ID for this ensemble. Defaults to 0.
+            ensemble_id: A unique ID for this ensemble. Defaults to 0.
 
         Returns:
             The projected result of feature, which is a tensor with size

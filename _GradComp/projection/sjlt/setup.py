@@ -1,6 +1,9 @@
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 import torch.cuda
+import logging
+
+logger = logging.getLogger(__name__)
 
 def get_cuda_arch_flags():
     """Get CUDA architecture flags based on detected GPU capability"""
@@ -17,8 +20,10 @@ def get_cuda_arch_flags():
                 arch_flags += ["-gencode", "arch=compute_80,code=sm_80"]
             if major >= 9:  # H100/Hopper or newer
                 arch_flags += ["-gencode", "arch=compute_90,code=sm_90"]
+            logger.info(f"Detected CUDA capability: {major}.0")
         except:
             # If we can't detect the device capability, stick with the defaults
+            logger.warning("Could not detect CUDA capability, using default architecture flags")
             pass
 
     return arch_flags

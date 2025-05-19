@@ -701,7 +701,7 @@ def main():
     if args.baseline == "GC":
         check_min_version("4.46.0")
         from _GradComp.utils import find_layers
-        from _GradComp.influence_function import IFAttributor
+        from _GradComp.core.attributor import IFAttributor
 
         # get which Hessian to use
         tda, hessian = args.tda.split("-")
@@ -710,7 +710,7 @@ def main():
 
         layer_names = find_layers(model, args.layer, return_type="name")
 
-        from _GradComp.influence_function import IFAttributor
+        from _GradComp.core.attributor import IFAttributor
         attributor = IFAttributor(
             setting="Llama3_8B_OWT",
             model=model,

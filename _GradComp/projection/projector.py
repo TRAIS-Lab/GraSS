@@ -1,3 +1,7 @@
+"""
+Projector container classes for gradient compression.
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict, Any, Optional, List, Tuple
@@ -6,9 +10,13 @@ if TYPE_CHECKING:
 
 import torch
 import torch.nn as nn
+import logging
 
 from torch import Tensor
 from .projection import random_project
+
+# Configure logger
+logger = logging.getLogger(__name__)
 
 class BaseContainer:
     """
@@ -97,6 +105,7 @@ def setup_model_compressors(
         projector_kwargs_copy = {}
 
     # Run a forward pass to initialize model
+    logger.info("Running forward pass to initialize model for compressor setup")
     train_batch = next(iter(train_dataloader))
     if isinstance(train_batch, dict):
         inputs = {k: v.to(device) for k, v in train_batch.items()}
@@ -275,6 +284,8 @@ def setup_model_compressors(
 
                 projectors[idx] = projector
 
+    logger.info(f"Set up compressors for {len(layer_names)} layers")
+
     return sparsifiers, projectors
 
 def _get_active_indices(
@@ -293,8 +304,9 @@ def _get_active_indices(
     try:
         mask_path = f"../{setting}/Localize/mask_{dim}*{dim}/{module_name}.pt"
         active_indices = torch.load(mask_path, weights_only=False)
+        logger.debug(f"Loaded active indices for {module_name} from {mask_path}")
     except FileNotFoundError:
-        print(f"Mask file not found for {module_name} {compressor_type}. Random indices are used.")
+        logger.warning(f"Mask file not found for {module_name} {compressor_type}. Random indices are used.")
         active_indices = {
             "pre_activation": torch.randperm(output_tensor.shape[1])[:dim].to(device),
             "input_features": torch.randperm(input_tensor.shape[1])[:dim].to(device)
@@ -592,97 +604,6 @@ def _setup_linear_compressor_after_sparse(
         projector_grad = random_project(
             dumb_grad_full,
             dumb_grad_full.shape[0],
-            proj_seed=base_seed,
-            pre_compute=True,
-            **kwargs
-        )
-
-        projector.projector_grad = torch.compile(projector_grad)
-
-
-def _setup_layernorm_compressor_after_sparse(
-    projector: ProjectorContainer,
-    sparsifier: SparsifierContainer,
-    layer: nn.LayerNorm,
-    layer_input: Tensor,
-    pre_activation: Tensor,
-    base_seed: int,
-    kwargs: Dict[str, Any],
-    factorize: bool = True
-) -> None:
-    """
-    Set up projector for a LayerNorm layer after sparsification
-
-    Args:
-        projector: ProjectorContainer to store the projectors
-        sparsifier: SparsifierContainer with sparsification functions
-        layer: LayerNorm layer
-        layer_input: Input tensor to the layer
-        pre_activation: Output tensor from the layer
-        base_seed: Base seed for random projection
-        kwargs: Keyword arguments for the projection
-        factorize: Whether to factorize the projection
-    """
-    if not layer.elementwise_affine:
-        return
-
-    if pre_activation is None:
-        return
-
-    # Extract sparsifier components
-    sparsifier_grad_comp_1, sparsifier_grad_comp_2 = sparsifier.projector_grad_comp
-
-    # Get sample tensors to determine output dimensions of sparsifiers
-    sample_pre_activation = pre_activation[:1]
-    sparse_sample_pre_activation = sparsifier_grad_comp_1(sample_pre_activation)
-    sparsified_dim = sparse_sample_pre_activation.shape[-1]
-
-    if factorize:
-        # Create dummy tensors with sparsified dimensions for component projectors
-        dumb_grad_comp_1 = torch.zeros(
-            (pre_activation.shape[0], sparsified_dim),
-            device=pre_activation.device,
-            dtype=pre_activation.dtype
-        )
-
-        projector_grad_comp_1 = random_project(
-            dumb_grad_comp_1,
-            dumb_grad_comp_1.shape[0],
-            proj_seed=base_seed,
-            pre_compute=True,
-            **kwargs
-        )
-
-        dumb_grad_comp_2 = torch.zeros(
-            (pre_activation.shape[0], sparsified_dim),
-            device=pre_activation.device,
-            dtype=pre_activation.dtype
-        )
-
-        projector_grad_comp_2 = random_project(
-            dumb_grad_comp_2,
-            dumb_grad_comp_2.shape[0],
-            proj_seed=base_seed + 1,
-            pre_compute=True,
-            **kwargs
-        )
-
-        projector.projector_grad_comp = (
-            torch.compile(projector_grad_comp_1),
-            torch.compile(projector_grad_comp_2)
-        )
-    else:
-        # For full projector after component sparsifier
-        # The gradient will have dimension sparsified_dim * 2 (for weight and bias)
-        dumb_grad_comp = torch.zeros(
-            (pre_activation.shape[0], sparsified_dim * 2),
-            device=pre_activation.device,
-            dtype=pre_activation.dtype
-        )
-
-        projector_grad = random_project(
-            dumb_grad_comp,
-            dumb_grad_comp.shape[0],
             proj_seed=base_seed,
             pre_compute=True,
             **kwargs

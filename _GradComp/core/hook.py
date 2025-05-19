@@ -1,3 +1,7 @@
+"""
+Hook manager for efficient gradient component capture and projection.
+"""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict, Callable, Any, Optional, Tuple, List
@@ -10,8 +14,12 @@ import torch.nn.functional as F
 from torch import Tensor
 import functools
 import time
+import logging
 
 import torch.jit as jit
+
+# Configure logger
+logger = logging.getLogger(__name__)
 
 @jit.script
 def compute_linear_gradients_2d(grad_pre_activation: Tensor, input_features: Tensor) -> Tensor:
@@ -94,6 +102,8 @@ class HookManager:
         # Register hooks
         self._register_hooks()
 
+        logger.info(f"Initialized HookManager with {len(layer_names)} layer hooks")
+
     def _register_hooks(self):
         """Register forward and backward hooks to target layers"""
         for name, module in self.model.named_modules():
@@ -108,6 +118,8 @@ class HookManager:
                 self.forward_hooks[idx] = module.register_forward_hook(forward_hook)
                 self.backward_hooks[idx] = module.register_full_backward_hook(backward_hook)
 
+                logger.debug(f"Registered hooks for layer: {name}")
+
     def set_sparsifiers(self, sparsifiers: List[Any]) -> None:
         """
         Set specifier objects for each layer
@@ -116,6 +128,7 @@ class HookManager:
             sparsifiers: List of projector objects, ordered by layer_names
         """
         self.sparsifiers = sparsifiers
+        logger.debug(f"Set {len(sparsifiers)} sparsifiers for HookManager")
 
     def set_projectors(self, projectors: List[Any]) -> None:
         """
@@ -125,6 +138,7 @@ class HookManager:
             projectors: List of projector objects, ordered by layer_names
         """
         self.projectors = projectors
+        logger.debug(f"Set {len(projectors)} projectors for HookManager")
 
     def get_compressed_grads(self) -> List[Tensor]:
         """
@@ -771,3 +785,4 @@ class HookManager:
                 hook.remove()
         self.forward_hooks = [None] * len(self.layer_names)
         self.backward_hooks = [None] * len(self.layer_names)
+        logger.debug("Removed all hooks from HookManager")

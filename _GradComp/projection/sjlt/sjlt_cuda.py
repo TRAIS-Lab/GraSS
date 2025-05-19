@@ -1,17 +1,34 @@
+"""
+SJLT CUDA implementation for sparse projections.
+"""
+
 import torch
 import math
 import os
 import subprocess
+import logging
+
+# Configure logger
+logger = logging.getLogger(__name__)
 
 # Check if the CUDA extension is already compiled
 try:
     import sjlt_cuda_ext
+    logger.info("SJLT CUDA extension loaded successfully")
 except ImportError:
     # If not, compile it now
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    print(f"Compiling CUDA extension in {current_dir}")
-    subprocess.check_call(['pip', 'install', '-e', current_dir])
-    import sjlt_cuda_ext
+    logger.info(f"Compiling SJLT CUDA extension in {current_dir}")
+    try:
+        subprocess.check_call(['pip', 'install', '-e', current_dir])
+        import sjlt_cuda_ext
+        logger.info("SJLT CUDA extension compiled and loaded successfully")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to compile SJLT CUDA extension: {e}")
+        logger.warning("SJLT projections will not be available")
+    except ImportError as e:
+        logger.error(f"Failed to import SJLT CUDA extension after compilation: {e}")
+        logger.warning("SJLT projections will not be available")
 
 class SJLTProjection(torch.nn.Module):
     """Sparse Johnson-Lindenstrauss Transform implemented with CUDA kernels"""
@@ -47,6 +64,8 @@ class SJLTProjection(torch.nn.Module):
             (torch.randint(0, 2, (original_dim, c), device=device) * 2 - 1).to(torch.int8)
         )
 
+        logger.debug(f"Initialized SJLT projection with dimensions {original_dim} -> {proj_dim}")
+
     def forward(self, x):
         """
         Apply SJLT projection to input tensor
@@ -55,6 +74,10 @@ class SJLTProjection(torch.nn.Module):
         Returns:
             Projected tensor of shape [batch_size, proj_dim]
         """
+        # Check if SJLT is available
+        if 'sjlt_cuda_ext' not in globals():
+            raise ImportError("SJLT CUDA extension is not available")
+
         # Move input to the specified device if necessary
         if x.device != self.rand_indices.device:
             x = x.to(self.device)
