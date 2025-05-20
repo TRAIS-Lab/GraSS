@@ -667,7 +667,7 @@ class IFAttributor(BaseAttributor):
             logger.info("Computing IFVP")
             self.compute_ifvp()
 
-        # Compute test gradients
+        # Compute test gradients using disk offload if in disk offload mode
         test_grads_dict, _ = self._compute_gradients(
             test_dataloader,
             is_test=True,
@@ -675,6 +675,9 @@ class IFAttributor(BaseAttributor):
         )
 
         torch.cuda.empty_cache()
+
+        # Check if using disk offload strategy
+        using_disk_offload = self.offload == "disk"
 
         # Calculate total training samples and map batches to sample indices
         batch_to_sample_mapping = self.metadata.get_batch_to_sample_mapping()
@@ -693,12 +696,27 @@ class IFAttributor(BaseAttributor):
 
         # First pass: determine sample indices for each test batch
         for test_batch_idx in sorted(test_grads_dict.keys()):
-            # Find first non-empty layer to get batch size
-            batch_size = 0
-            for layer_grads in test_grads_dict[test_batch_idx]:
-                if layer_grads.numel() > 0:
-                    batch_size = layer_grads.shape[0]
-                    break
+            if using_disk_offload:
+                # For disk offload, retrieve the actual gradients for this batch
+                batch_grads = self.strategy.retrieve_gradients(test_batch_idx, is_test=True)
+
+                # Find first non-empty layer to get batch size
+                batch_size = 0
+                for layer_grads in batch_grads:
+                    if layer_grads.numel() > 0:
+                        batch_size = layer_grads.shape[0]
+                        break
+
+                # Store for later use
+                test_grads_dict[test_batch_idx] = batch_grads
+            else:
+                # For non-disk offload, use the gradients already in memory
+                # Find first non-empty layer to get batch size
+                batch_size = 0
+                for layer_grads in test_grads_dict[test_batch_idx]:
+                    if layer_grads.numel() > 0:
+                        batch_size = layer_grads.shape[0]
+                        break
 
             if batch_size == 0:
                 logger.warning(f"Could not determine batch size for test batch {test_batch_idx}")

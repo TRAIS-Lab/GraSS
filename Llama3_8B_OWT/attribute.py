@@ -658,6 +658,7 @@ def main():
     if args.debug: # toy dataset
         train_dataset = train_dataset.select(range(int(1_000_000 / block_size)))
 
+
     train_sampler = SubsetSampler(range(len(train_dataset)))
     train_dataloader = DataLoader(
         train_dataset, collate_fn=default_data_collator, batch_size=train_batch_size, sampler=train_sampler

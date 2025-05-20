@@ -365,7 +365,7 @@ class CudaProjector(AbstractProjector):
                     active_dim,
                     proj_dim,
                     device=device,
-                    # dtype=torch.bfloat16 #Add
+                    dtype=torch.bfloat16 #Add
                 )
         elif self.method == "Random":
             if self.active_indices.numel() > proj_dim:
@@ -486,7 +486,7 @@ class CudaProjector(AbstractProjector):
                     active_dim,
                     self.proj_dim,
                     device=self.device,
-                    # dtype=torch.bfloat16 #Add
+                    dtype=torch.bfloat16 #Add
                 )
 
             features = features[:, self.active_indices]

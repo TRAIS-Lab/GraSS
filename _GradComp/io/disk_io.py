@@ -59,7 +59,7 @@ class DiskIOManager:
           └── ...
     """
 
-    def __init__(self, cache_dir: str, setting: str, num_threads: int = 32, hessian: HessianOptions = "raw"):
+    def __init__(self, cache_dir: str, setting: str, num_threads: int = 16, hessian: HessianOptions = "raw"):
         """
         Initialize the DiskIOManager.
 
@@ -93,11 +93,13 @@ class DiskIOManager:
 
         logger.info(f"Initialized DiskIOManager with {num_threads} worker threads")
 
-    def get_path(self,
-                 data_type: DataTypeOptions,
-                 batch_idx: Optional[int] = None,
-                 layer_idx: Optional[int] = None,
-                 is_test: bool = False) -> str:
+    def get_path(
+            self,
+            data_type: DataTypeOptions,
+            batch_idx: Optional[int] = None,
+            layer_idx: Optional[int] = None,
+            is_test: bool = False
+        ) -> str:
         """
         Generate standardized path for data storage.
 
@@ -139,11 +141,13 @@ class DiskIOManager:
 
         return os.path.join(self.cache_dir, subdir, filename)
 
-    def get_base_path(self,
-                    data_type: DataTypeOptions,
-                    batch_idx: Optional[int] = None,
-                    layer_idx: Optional[int] = None,
-                    is_test: bool = False) -> str:
+    def get_base_path(
+            self,
+            data_type: DataTypeOptions,
+            batch_idx: Optional[int] = None,
+            layer_idx: Optional[int] = None,
+            is_test: bool = False
+        ) -> str:
         """
         Generate base path without extension for data storage.
 
@@ -192,8 +196,13 @@ class DiskIOManager:
             else:
                 torch.save(tensor, path)
 
-    def save_dict_mmap(self, data_dict: Dict[int, torch.Tensor],
-                      path: str, batch_idx: int, async_save: bool = True) -> None:
+    def save_dict_mmap(
+            self,
+            data_dict: Dict[int, torch.Tensor],
+            path: str,
+            batch_idx: int,
+            async_save: bool = True
+        ) -> None:
         """
         Save a dictionary of tensors to a memory-mapped file.
 

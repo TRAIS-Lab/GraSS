@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 import logging
 import gc
+import itertools
 
 if TYPE_CHECKING:
     from torch.utils.data import DataLoader
@@ -142,6 +143,7 @@ class BaseAttributor(ABC):
     ) -> Tuple[Dict[int, List[torch.Tensor]], List[int]]:
         """
         Compute compressed gradients for a given dataloader.
+        Uses efficient batch range processing with itertools.islice.
 
         Args:
             dataloader: DataLoader for the data
@@ -150,20 +152,22 @@ class BaseAttributor(ABC):
 
         Returns:
             Tuple of (gradients_dict, batch_sample_counts)
-            - gradients_dict maps batch_idx to a list of tensors (one per layer)
+            - gradients_dict maps batch_idx to a list of tensors (one per layer) for non-disk offload
+            or just contains batch_idx keys with empty lists for disk offload
             - batch_sample_counts contains the number of samples in each batch
         """
         desc_prefix = "test" if is_test else "training"
         start_batch, end_batch = batch_range
-        logger.info(f"Computing gradients for {desc_prefix} data (batches {start_batch} to {end_batch-1})")
+        num_batches = end_batch - start_batch
 
-        # Create a list of batches to process
-        batch_indices = list(range(start_batch, end_batch))
-        desc = f"Computing gradients for {desc_prefix} data ({len(batch_indices)} batches)"
+        logger.info(f"Computing gradients for {desc_prefix} data (batches {start_batch} to {end_batch-1})")
 
         # Initialize storage for gradients (organized by batch)
         gradients_dict = {}
         batch_sample_counts = []
+
+        # Check if using disk offload strategy
+        using_disk_offload = self.offload == "disk"
 
         # Create hook manager if not already done
         if self.hook_manager is None:
@@ -181,21 +185,18 @@ class BaseAttributor(ABC):
             if self.projectors:
                 self.hook_manager.set_projectors(self.projectors)
 
-        # Prepare to collect batches
-        selected_batches = []
+        # Skip to start_batch and take only the batches we need
+        # This avoids iterating through the entire dataloader
+        batches = itertools.islice(dataloader, start_batch, end_batch)
 
-        # First iterate through the dataloader to collect the batches we need
-        for batch_idx, batch in enumerate(dataloader):
-            if batch_idx in batch_indices:
-                selected_batches.append((batch_idx, batch))
-            if batch_idx >= end_batch - 1:
-                break  # No need to iterate further
-
-        # Now process only the selected batches with accurate tqdm
-        batch_iterator = tqdm(selected_batches, desc=desc)
+        # Process only the selected batches with accurate tqdm
+        batch_iterator = tqdm(batches, total=num_batches, desc=f"Computing gradients for {desc_prefix} data")
 
         # Iterate through the selected batches
-        for batch_idx, batch in batch_iterator:
+        for batch_idx_relative, batch in enumerate(batch_iterator):
+            # Calculate the actual batch index
+            batch_idx = start_batch + batch_idx_relative
+
             # Zero gradients
             self.model.zero_grad()
 
@@ -252,12 +253,15 @@ class BaseAttributor(ABC):
                 # Store gradients using the strategy
                 self.strategy.store_gradients(batch_idx, batch_grads, is_test)
 
-                # Store in memory dictionary for return value
-                gradients_dict[batch_idx] = batch_grads
+                # Only store in memory dictionary if NOT using disk offload
+                if not using_disk_offload:
+                    gradients_dict[batch_idx] = batch_grads
+                else:
+                    # For disk offload, just store the batch index in the dict as a marker
+                    # but don't keep the actual tensors in memory
+                    gradients_dict[batch_idx] = []
 
-            # GPU memory management
-            if batch_idx % 10 == 0:
-                torch.cuda.empty_cache()
+            torch.cuda.empty_cache()
 
         # Collect projection time from hook manager if profiling is enabled
         if self.profile and self.profiling_stats and self.hook_manager:
@@ -283,6 +287,7 @@ class BaseAttributor(ABC):
 
         Returns:
             Dictionary mapping batch indices to lists of tensors (one tensor per layer)
+            For disk offload strategy, may contain empty lists as values
         """
         # Set default batch range if not provided
         if batch_range is None:
