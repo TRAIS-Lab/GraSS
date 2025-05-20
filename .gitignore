@@ -40,7 +40,7 @@ dist
 
 */job
 */log
-*/data/*
+# */data/*
 
 # debug
 *debug*

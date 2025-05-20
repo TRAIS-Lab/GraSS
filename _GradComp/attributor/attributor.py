@@ -733,7 +733,7 @@ class IFAttributor(BaseAttributor):
         train_batch_indices = sorted(self.metadata.batch_info.keys())
         dataloader = self.strategy.create_gradient_dataloader(
             data_type="ifvp",
-            batch_size=8,  # Process multiple files at a time
+            batch_size=4,  # Process multiple files at a time
             num_workers=32,
             pin_memory=True
         )
