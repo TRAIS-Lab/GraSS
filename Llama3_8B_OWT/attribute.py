@@ -634,7 +634,7 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from Llama3_8B_OWT.utils import SubsetSampler, FilePromptDataset, get_worker_batch_range, prompt_collate_fn, generate_responses, setup_compression_kwargs, retrieve_top_k, result_filename
+    from Llama3_8B_OWT.utils import SubsetSampler, FilePromptDataset, prompt_collate_fn, generate_responses, setup_compression_kwargs, retrieve_top_k, result_filename
 
     if args.device.startswith("cuda"):
         # Check if GPU is available
@@ -700,8 +700,8 @@ def main():
     score, profile = None, None
     if args.baseline == "GC":
         check_min_version("4.46.0")
-        from _GradComp.utils import find_layers
-        from _GradComp.core.attributor import IFAttributor
+        from _GradComp.utils.common import find_layers
+        from _GradComp.attributor.attributor import IFAttributor
 
         # get which Hessian to use
         tda, hessian = args.tda.split("-")
@@ -710,7 +710,6 @@ def main():
 
         layer_names = find_layers(model, args.layer, return_type="name")
 
-        from _GradComp.core.attributor import IFAttributor
         attributor = IFAttributor(
             setting="Llama3_8B_OWT",
             model=model,
@@ -724,7 +723,6 @@ def main():
             cache_dir=args.cache_dir
         )
 
-        # attributor.create_metadata_only(train_dataloader)
         if args.cache:
             # Measure cache throughput
             torch.cuda.synchronize(device)

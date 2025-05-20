@@ -87,57 +87,6 @@ class FilePromptDataset(Dataset):
         """Returns the file index of the prompt at the given index."""
         return self.file_indices[idx]
 
-def get_worker_batch_range(train_dataloader, worker_arg="0/1"):
-    """
-    Parse the worker argument in format "{worker_id}/{total_workers}" and
-    get the batch range for the specified worker.
-
-    Args:
-        train_dataloader: DataLoader for the training data
-        worker_arg: String in format "{worker_id}/{total_workers}" (default: "0/1")
-
-    Returns:
-        Tuple of (worker_id, (start_batch, end_batch)) for the specified worker
-    """
-    try:
-        # Parse the worker argument
-        parts = worker_arg.split('/')
-        if len(parts) != 2:
-            raise ValueError("Worker argument must be in format 'worker_id/total_workers'")
-
-        worker_id = int(parts[0])
-        num_workers = int(parts[1])
-
-        # Validate parsed values
-        if worker_id < 0 or worker_id > num_workers:
-            raise ValueError(f"worker_id must be between 0 and {num_workers-1}")
-        if num_workers <= 0:
-            raise ValueError("total_workers must be greater than 0")
-
-        # Calculate total number of batches
-        total_batches = len(train_dataloader)
-
-        # Calculate batch range size for each worker
-        batch_size_per_worker = total_batches // num_workers
-        remaining_batches = total_batches % num_workers
-
-        # Calculate start_batch for the specific worker
-        start_batch = worker_id * batch_size_per_worker
-        # Add adjustment for workers that get an extra batch (if total doesn't divide evenly)
-        start_batch += min(worker_id, remaining_batches)
-
-        # Calculate worker_batch_size
-        worker_batch_size = batch_size_per_worker + (1 if worker_id < remaining_batches else 0)
-
-        # Calculate end_batch
-        end_batch = start_batch + worker_batch_size
-
-        return (worker_id, (start_batch, end_batch))
-
-    except Exception as e:
-        print(f"Error parsing worker argument: {e}")
-        return None
-
 def setup_compression_kwargs(args, device):
     if args.sparsification is None:
         sparsifier_kwargs = None
