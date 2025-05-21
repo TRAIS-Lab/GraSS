@@ -214,7 +214,9 @@ class DiskOffloadStrategy(OffloadStrategy):
             num_workers=num_workers,
             pin_memory=pin_memory,
             shuffle=False,
-            collate_fn=custom_collate_fn
+            collate_fn=custom_collate_fn,
+            prefetch_factor=16,
+            persistent_workers=True
         )
 
     def has_preconditioners(self) -> bool:
