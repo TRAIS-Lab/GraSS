@@ -254,7 +254,7 @@ class BaseAttributor(ABC):
                 self.strategy.store_gradients(batch_idx, batch_grads, is_test)
 
                 # Only store in memory dictionary if NOT using disk offload
-                if not using_disk_offload:
+                if is_test or not using_disk_offload:
                     gradients_dict[batch_idx] = batch_grads
                 else:
                     # For disk offload, just store the batch index in the dict as a marker

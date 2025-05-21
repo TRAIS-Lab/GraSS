@@ -38,6 +38,8 @@ import sys
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(parent_dir)
 
+# os.environ["TOKENIZERS_PARALLELISM"] = "1"
+
 import datasets
 import torch
 from accelerate import Accelerator, DistributedType
@@ -614,11 +616,10 @@ def main():
 
     # Dataset
     train_dataset = lm_datasets["train"]
-    prompt_dataset = FilePromptDataset("./prompts/", tokenizer, block_size)
 
     train_batch_size, test_batch_size = 4, 4
 
-    train_dataset = train_dataset.select(range(int(1_000_000_000 / block_size)))
+    train_dataset = train_dataset.shuffle(seed=args.seed).select(range(int(1_000_000_000 / block_size)))
     if args.debug: # toy dataset
         train_dataset = train_dataset.select(range(int(1_000_000 / block_size)))
 
@@ -626,12 +627,6 @@ def main():
     train_sampler = SubsetSampler(range(len(train_dataset)))
     train_dataloader = DataLoader(
         train_dataset, collate_fn=default_data_collator, batch_size=train_batch_size, sampler=train_sampler
-    )
-    test_dataloader = DataLoader(
-        prompt_dataset,
-        collate_fn=lambda batch: prompt_collate_fn(batch, tokenizer),
-        batch_size=test_batch_size,
-        shuffle=False
     )
 
     throughput_stats = {}
@@ -703,7 +698,7 @@ def main():
         elif args.mode == "precondition":
             attributor.compute_preconditioners()
 
-        elif args.mode == "precondition":
+        elif args.mode == "ifvp":
             result = attributor.compute_ifvp(batch_range=batch_range)
             if args.profile:
                 profile = result[1]
@@ -712,6 +707,13 @@ def main():
             score = attributor.compute_self_influence()
 
         elif args.mode == "attribute":
+            prompt_dataset = FilePromptDataset("./prompts/", tokenizer, block_size)
+            test_dataloader = DataLoader(
+                prompt_dataset,
+                collate_fn=lambda batch: prompt_collate_fn(batch, tokenizer),
+                batch_size=test_batch_size,
+                shuffle=False
+            )
             result = attributor.attribute(test_dataloader=test_dataloader)
 
             if args.profile:
@@ -846,31 +848,24 @@ def main():
     train_tokens = block_size * len(train_dataset) / int(args.worker.split("/")[1])
     train_test_pairs = len(train_dataset) * len(prompt_dataset)
 
-    if args.cache:
-        cache_duration = cache_end_time - cache_start_time
-        cache_throughput = train_tokens / cache_duration
+    duration = end_time - start_time
+    if args.mode == "cache":
         throughput_stats["cache"] = {
             "tokens": train_tokens,
-            "duration_seconds": cache_duration,
-            "throughput_tokens_per_second": cache_throughput
+            "duration_seconds": duration,
+            "throughput_tokens_per_second": train_tokens / duration
         }
-
-    if args.precondition:
-        precondition_duration = precondition_end_time - precondition_start_time
-        precondition_throughput = train_tokens / precondition_duration
-        throughput_stats["precondition"] = {
-            "tokens": train_tokens,
-            "duration_seconds": precondition_duration,
-            "throughput_tokens_per_second": precondition_throughput
+    elif args.mode == "self_influence":
+        throughput_stats["self_influence"] = {
+            "train_pairs": len(train_dataset),
+            "duration_seconds": duration,
+            "throughput_pair_per_second": len(train_dataset) / duration
         }
-
-    if args.attribute:
-        attribute_duration = attribute_end_time - attribute_start_time
-        attribute_throughput = train_test_pairs / attribute_duration
-        throughput_stats["attribute"] = {
+    elif args.mode == "attribute":
+        throughput_stats["self_influence"] = {
             "train_test_pairs": train_test_pairs,
-            "duration_seconds": attribute_duration,
-            "throughput_pair_per_second": attribute_throughput
+            "duration_seconds": duration,
+            "throughput_pair_per_second": train_test_pairs / duration
         }
 
     logger.info("***** Attribution finished *****")
