@@ -638,7 +638,8 @@ def main():
     training_setting = args.output_dir.split("/")[-1]
 
     # Define the grid of damping values to search
-    damping_values = [1e-4, 1e-3, 1e-2, 1e-1, 1e0, 10]
+    # damping_values = [1e-4, 1e-3, 1e-2, 1e-1, 1e0, 10]
+    damping_values = [None]
     best_damping = None
     best_lds_score = float('-inf')
     validation_results = {}
@@ -736,6 +737,9 @@ def main():
 
                 attributor.compute_ifvp(batch_range=batch_range)
 
+            SI_score = attributor.compute_self_influence()
+            print(f"Self-influence score: {SI_score}")
+            exit()
             # Evaluate on validation set
             if args.profile:
                 val_score, profile = attributor.attribute(test_dataloader=val_dataloader)

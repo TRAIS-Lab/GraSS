@@ -450,25 +450,18 @@ class IFAttributor(BaseAttributor):
         else:
             return result_dict
 
-    def compute_self_influence(
-        self,
-        batch_range: Optional[Tuple[int, int]] = None,
-        precondition: bool = True,
-        damping: Optional[float] = None
-    ) -> torch.Tensor:
+    def compute_self_influence(self, batch_range: Optional[Tuple[int, int]] = None) -> torch.Tensor:
         """
-        Compute self-influence scores for training examples.
-        This is useful for uncertainty estimation.
+        Compute self-influence scores for training examples by using
+        the dot product of gradients and their IFVPs.
 
         Args:
             batch_range: Optional tuple of (start_batch, end_batch) to process only a subset of batches
-            precondition: Whether to use preconditioned gradients
-            damping: Optional damping parameter (uses self.damping if None)
 
         Returns:
             Tensor containing self-influence scores for all examples
         """
-        logger.info("Computing self-influence scores")
+        logger.info("Computing self-influence scores using pre-computed IFVP")
 
         # Load batch information if needed
         if not self.metadata.batch_info:
@@ -477,6 +470,11 @@ class IFAttributor(BaseAttributor):
 
         if not self.metadata.batch_info:
             raise ValueError("No batch information found. Call cache_gradients first.")
+
+        # Make sure IFVP is computed
+        if not self.strategy.has_ifvp():
+            logger.info("IFVP not found, computing it now...")
+            self.compute_ifvp(batch_range=batch_range)
 
         # Get batch mapping and determine total samples
         batch_to_sample_mapping = self.metadata.get_batch_to_sample_mapping()
@@ -489,13 +487,13 @@ class IFAttributor(BaseAttributor):
         if batch_range is not None:
             start_batch, end_batch = batch_range
             batch_indices = [idx for idx in self.metadata.batch_info.keys()
-                           if start_batch <= idx < end_batch]
+                        if start_batch <= idx < end_batch]
         else:
             batch_indices = sorted(self.metadata.batch_info.keys())
 
         # Process batches - if disk offload, use dataloader, otherwise process directly
         dataloader = self.strategy.create_gradient_dataloader(
-            data_type="gradients",
+            data_type="ifvp",  # Change to load IFVP instead of gradients
             batch_size=8,
             num_workers=32,
             pin_memory=True,
@@ -504,42 +502,33 @@ class IFAttributor(BaseAttributor):
 
         if dataloader:
             # Process batches using the dataloader (disk offload)
-            for batch_indices, batch_grad_dicts in tqdm(dataloader, desc="Computing self-influence"):
-                # Process each individual batch
-                for batch_idx, batch_grad_dict in zip(batch_indices, batch_grad_dicts):
+            for batch_indices, batch_ifvp_dicts in tqdm(dataloader, desc="Computing self-influence"):
+                # Now we need to also load the corresponding gradients
+                for batch_idx, batch_ifvp_dict in zip(batch_indices, batch_ifvp_dicts):
                     # Get sample range for this batch
                     if batch_idx not in batch_to_sample_mapping:
                         logger.warning(f"Batch {batch_idx} not found in mapping, skipping")
                         continue
+
+                    # Get gradients for this batch
+                    batch_grads = self.strategy.retrieve_gradients(batch_idx, is_test=False)
 
                     sample_start, sample_end = batch_to_sample_mapping[batch_idx]
                     num_samples = sample_end - sample_start
 
                     # Process each layer
                     for layer_idx in range(len(self.layer_names)):
-                        if layer_idx not in batch_grad_dict or batch_grad_dict[layer_idx].numel() == 0:
+                        # Skip if either IFVP or gradient is missing or empty
+                        if (layer_idx not in batch_ifvp_dict or batch_ifvp_dict[layer_idx].numel() == 0 or
+                            layer_idx >= len(batch_grads) or batch_grads[layer_idx].numel() == 0):
                             continue
 
-                        # Get gradient and move to device
-                        grad = self.strategy.move_to_device(batch_grad_dict[layer_idx])
+                        # Get IFVP and gradient
+                        ifvp = self.strategy.move_to_device(batch_ifvp_dict[layer_idx])
+                        grad = self.strategy.move_to_device(batch_grads[layer_idx])
 
-                        if precondition:
-                            # Get preconditioner
-                            precond = self.strategy.retrieve_preconditioner(layer_idx)
-
-                            if precond is not None:
-                                # Calculate preconditioned self-influence
-                                precond_grad = torch.matmul(precond, grad.t()).t()
-                                layer_self_influence = torch.sum(grad * precond_grad, dim=1)
-
-                                # Clean up
-                                del precond_grad, precond
-                            else:
-                                # Fall back to raw self-influence
-                                layer_self_influence = torch.sum(grad * grad, dim=1)
-                        else:
-                            # Calculate raw self-influence
-                            layer_self_influence = torch.sum(grad * grad, dim=1)
+                        # Calculate self-influence as dot product of IFVP and gradient
+                        layer_self_influence = torch.sum(ifvp * grad, dim=1)
 
                         # Make sure the shape is correct
                         if layer_self_influence.shape[0] != num_samples:
@@ -555,7 +544,7 @@ class IFAttributor(BaseAttributor):
                         self_influence[sample_start:sample_end] += layer_self_influence.cpu()
 
                         # Clean up
-                        del grad, layer_self_influence
+                        del ifvp, grad, layer_self_influence
                         torch.cuda.empty_cache()
 
                 # Clean up after processing each DataLoader batch
@@ -572,34 +561,23 @@ class IFAttributor(BaseAttributor):
                 sample_start, sample_end = batch_to_sample_mapping[batch_idx]
                 num_samples = sample_end - sample_start
 
-                # Get gradients for this batch
+                # Get IFVP and gradients for this batch
+                batch_ifvp = self.strategy.retrieve_ifvp(batch_idx)
                 batch_grads = self.strategy.retrieve_gradients(batch_idx, is_test=False)
 
                 # Process each layer
                 for layer_idx in range(len(self.layer_names)):
-                    if layer_idx >= len(batch_grads) or batch_grads[layer_idx].numel() == 0:
+                    # Skip if either IFVP or gradient is missing or empty
+                    if (layer_idx >= len(batch_ifvp) or batch_ifvp[layer_idx].numel() == 0 or
+                        layer_idx >= len(batch_grads) or batch_grads[layer_idx].numel() == 0):
                         continue
 
-                    # Get gradient
-                    grad = batch_grads[layer_idx]
+                    # Get IFVP and gradient
+                    ifvp = self.strategy.move_to_device(batch_ifvp[layer_idx])
+                    grad = self.strategy.move_to_device(batch_grads[layer_idx])
 
-                    if precondition:
-                        # Get preconditioner
-                        precond = self.strategy.retrieve_preconditioner(layer_idx)
-
-                        if precond is not None:
-                            # Calculate preconditioned self-influence
-                            precond_grad = torch.matmul(precond, grad.t()).t()
-                            layer_self_influence = torch.sum(grad * precond_grad, dim=1)
-
-                            # Clean up
-                            del precond_grad, precond
-                        else:
-                            # Fall back to raw self-influence
-                            layer_self_influence = torch.sum(grad * grad, dim=1)
-                    else:
-                        # Calculate raw self-influence
-                        layer_self_influence = torch.sum(grad * grad, dim=1)
+                    # Calculate self-influence as dot product of IFVP and gradient
+                    layer_self_influence = torch.sum(ifvp * grad, dim=1)
 
                     # Make sure the shape is correct
                     if layer_self_influence.shape[0] != num_samples:
@@ -615,10 +593,11 @@ class IFAttributor(BaseAttributor):
                     self_influence[sample_start:sample_end] += layer_self_influence.cpu()
 
                     # Clean up
-                    del grad, layer_self_influence
+                    del ifvp, grad, layer_self_influence
                     torch.cuda.empty_cache()
 
                 # Clean up after processing each batch
+                del batch_ifvp, batch_grads
                 gc.collect()
                 torch.cuda.empty_cache()
 
