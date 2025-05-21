@@ -680,12 +680,62 @@ def main():
 
         batch_per_worker = (len(train_dataloader) + total_workers - 1) // total_workers  # Ceiling division
 
-        for worker_id in range(total_workers):
+        # for worker_id in range(total_workers):
 
-            start_idx = worker_id * batch_per_worker
-            end_idx = min((worker_id + 1) * batch_per_worker, len(train_dataloader))
-            batch_range = (start_idx, end_idx)
+        #     start_idx = worker_id * batch_per_worker
+        #     end_idx = min((worker_id + 1) * batch_per_worker, len(train_dataloader))
+        #     batch_range = (start_idx, end_idx)
 
+        #     attributor = IFAttributor(
+        #         setting="GPT2_wikitext",
+        #         model=model,
+        #         layer_names=layer_names,
+        #         hessian=hessian,
+        #         profile=args.profile,
+        #         device=device,
+        #         sparsifier_kwargs=sparsifier_kwargs,
+        #         projector_kwargs=projector_kwargs,
+        #         offload="disk",
+        #         cache_dir="./GradComp/cache"
+        #         # cache_dir="/scratch/pbb/Project/Sparse-Influence/GPT2-wikitext/cache"
+        #     )
+
+        #     # Measure cache throughput
+        #     torch.cuda.synchronize(device)
+        #     cache_start_time = time.time()
+        #     attributor.cache_gradients(train_dataloader, batch_range=batch_range)
+        #     torch.cuda.synchronize(device)
+        #     cache_end_time = time.time()
+
+        # Grid search over damping values
+        logger.info("Starting grid search for damping values...")
+        for damping in tqdm(damping_values, desc="Damping Grid Search"):
+            logger.info(f"Evaluating damping = {damping}")
+
+            # Compute preconditioners for current damping
+            # attributor.compute_preconditioners(damping=damping)
+
+            # for worker_id in range(total_workers):
+
+            #     start_idx = worker_id * batch_per_worker
+            #     end_idx = min((worker_id + 1) * batch_per_worker, len(train_dataloader))
+            #     batch_range = (start_idx, end_idx)
+
+            #     attributor = IFAttributor(
+            #         setting="GPT2_wikitext",
+            #         model=model,
+            #         layer_names=layer_names,
+            #         hessian=hessian,
+            #         profile=args.profile,
+            #         device=device,
+            #         sparsifier_kwargs=sparsifier_kwargs,
+            #         projector_kwargs=projector_kwargs,
+            #         offload="disk",
+            #         cache_dir="./GradComp/cache"
+            #         # cache_dir="/scratch/pbb/Project/Sparse-Influence/GPT2-wikitext/cache"
+            #     )
+
+            #     attributor.compute_ifvp(batch_range=batch_range)
             attributor = IFAttributor(
                 setting="GPT2_wikitext",
                 model=model,
@@ -700,46 +750,6 @@ def main():
                 # cache_dir="/scratch/pbb/Project/Sparse-Influence/GPT2-wikitext/cache"
             )
 
-            # Measure cache throughput
-            torch.cuda.synchronize(device)
-            cache_start_time = time.time()
-            attributor.cache_gradients(train_dataloader, batch_range=batch_range)
-            torch.cuda.synchronize(device)
-            cache_end_time = time.time()
-
-        # Grid search over damping values
-        logger.info("Starting grid search for damping values...")
-        for damping in tqdm(damping_values, desc="Damping Grid Search"):
-            logger.info(f"Evaluating damping = {damping}")
-
-            # Compute preconditioners for current damping
-            attributor.compute_preconditioners(damping=damping)
-
-            for worker_id in range(total_workers):
-
-                start_idx = worker_id * batch_per_worker
-                end_idx = min((worker_id + 1) * batch_per_worker, len(train_dataloader))
-                batch_range = (start_idx, end_idx)
-
-                attributor = IFAttributor(
-                    setting="GPT2_wikitext",
-                    model=model,
-                    layer_names=layer_names,
-                    hessian=hessian,
-                    profile=args.profile,
-                    device=device,
-                    sparsifier_kwargs=sparsifier_kwargs,
-                    projector_kwargs=projector_kwargs,
-                    offload="disk",
-                    cache_dir="./GradComp/cache"
-                    # cache_dir="/scratch/pbb/Project/Sparse-Influence/GPT2-wikitext/cache"
-                )
-
-                attributor.compute_ifvp(batch_range=batch_range)
-
-            SI_score = attributor.compute_self_influence()
-            print(f"Self-influence score: {SI_score}")
-            exit()
             # Evaluate on validation set
             if args.profile:
                 val_score, profile = attributor.attribute(test_dataloader=val_dataloader)
