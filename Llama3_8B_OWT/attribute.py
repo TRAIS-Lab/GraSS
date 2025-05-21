@@ -314,7 +314,7 @@ def parse_args():
         "--mode",
         type=str,
         default="cache",
-        help="The mode of the computation. Available options: `cache`, `precondition`, `ifvp`, `self_influence`, `attribute`, and `quant`.",
+        help="The mode of the computation. Available options: 'cache', 'precondition', 'ifvp', 'self_influence', 'attribute', and 'quant'.",
     )
 
     args = parser.parse_args()
@@ -656,6 +656,7 @@ def main():
     logger.info(f"The train dataset length: {len(train_dataset)}.")
     logger.info(f"The train batch size: {train_batch_size}")
     logger.info(f"TDA Method: {args.baseline}-{args.tda}")
+    logger.info(f"Mode: {args.mode}")
     logger.info(f"Sparsifier: {sparsifier_kwargs}")
     logger.info(f"Projector: {projector_kwargs}")
     logger.info(f"Layer: {args.layer}")
@@ -691,7 +692,7 @@ def main():
         torch.cuda.synchronize(device)
         start_time = time.time()
 
-        if mode == "cache":
+        if args.mode == "cache":
             result = attributor.cache_gradients(
                     train_dataloader,
                     batch_range=batch_range,
@@ -699,18 +700,18 @@ def main():
             if args.profile:
                 profile = result[1]
 
-        elif mode == "precondition":
+        elif args.mode == "precondition":
             attributor.compute_preconditioners()
 
-        elif mode == "precondition":
+        elif args.mode == "precondition":
             result = attributor.compute_ifvp(batch_range=batch_range)
             if args.profile:
                 profile = result[1]
 
-        elif mode == "self_influence":
+        elif args.mode == "self_influence":
             score = attributor.compute_self_influence()
 
-        elif mode == "attribute":
+        elif args.mode == "attribute":
             result = attributor.attribute(test_dataloader=test_dataloader)
 
             if args.profile:
@@ -718,7 +719,7 @@ def main():
             else:
                 score = result
 
-        elif mode == "quant":
+        elif args.mode == "quant":
             logger.info("Generating the response for each prompt...")
             response_output_dir = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/response/")
             generate_responses(
@@ -740,6 +741,8 @@ def main():
                 tokenizer=tokenizer,
                 output_dir=topk_output_dir
             )
+        else:
+            raise ValueError("Invalid mode. Choose from 'cache', 'precondition', 'ifvp', 'self_influence', 'attribute', and 'quant'.")
 
         torch.cuda.synchronize(device)
         end_time = time.time()
