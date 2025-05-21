@@ -354,6 +354,6 @@ def result_filename(args):
         projection_name = "NA"
 
     # Join parts and save the file
-    result_filename = f"./results/{args.baseline}/{args.tda}/{args.layer}/{sparsification_name}->{projection_name}.pt"
+    base = f"./results/{args.baseline}/{args.tda}/{args.layer}/{sparsification_name}->{projection_name}_{args.mode}.pt"
 
     return result_filename
