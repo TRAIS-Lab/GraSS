@@ -675,26 +675,36 @@ def main():
         model = replace_conv1d_modules(model)
         layer_names = find_layers(model, args.layer, return_type="name")
 
-        attributor = IFAttributor(
-            setting="GPT2_wikitext",
-            model=model,
-            layer_names=layer_names,
-            hessian=hessian,
-            profile=args.profile,
-            device=device,
-            sparsifier_kwargs=sparsifier_kwargs,
-            projector_kwargs=projector_kwargs,
-            offload="disk",
-            cache_dir="./GradComp/cache"
-            # cache_dir="/scratch/pbb/Project/Sparse-Influence/GPT2-wikitext/cache"
-        )
+        total_workers = 5
 
-        # Measure cache throughput
-        torch.cuda.synchronize(device)
-        cache_start_time = time.time()
-        attributor.cache_gradients(train_dataloader)
-        torch.cuda.synchronize(device)
-        cache_end_time = time.time()
+        batch_per_worker = (len(train_dataloader) + total_workers - 1) // total_workers  # Ceiling division
+
+        for worker_id in range(total_workers):
+
+            start_idx = worker_id * batch_per_worker
+            end_idx = min((worker_id + 1) * batch_per_worker, len(train_dataloader))
+            batch_range = (start_idx, end_idx)
+
+            attributor = IFAttributor(
+                setting="GPT2_wikitext",
+                model=model,
+                layer_names=layer_names,
+                hessian=hessian,
+                profile=args.profile,
+                device=device,
+                sparsifier_kwargs=sparsifier_kwargs,
+                projector_kwargs=projector_kwargs,
+                offload="disk",
+                cache_dir="./GradComp/cache"
+                # cache_dir="/scratch/pbb/Project/Sparse-Influence/GPT2-wikitext/cache"
+            )
+
+            # Measure cache throughput
+            torch.cuda.synchronize(device)
+            cache_start_time = time.time()
+            attributor.cache_gradients(train_dataloader, batch_range=batch_range)
+            torch.cuda.synchronize(device)
+            cache_end_time = time.time()
 
         # Grid search over damping values
         logger.info("Starting grid search for damping values...")
@@ -703,7 +713,28 @@ def main():
 
             # Compute preconditioners for current damping
             attributor.compute_preconditioners(damping=damping)
-            attributor.compute_ifvp()
+
+            for worker_id in range(total_workers):
+
+                start_idx = worker_id * batch_per_worker
+                end_idx = min((worker_id + 1) * batch_per_worker, len(train_dataloader))
+                batch_range = (start_idx, end_idx)
+
+                attributor = IFAttributor(
+                    setting="GPT2_wikitext",
+                    model=model,
+                    layer_names=layer_names,
+                    hessian=hessian,
+                    profile=args.profile,
+                    device=device,
+                    sparsifier_kwargs=sparsifier_kwargs,
+                    projector_kwargs=projector_kwargs,
+                    offload="disk",
+                    cache_dir="./GradComp/cache"
+                    # cache_dir="/scratch/pbb/Project/Sparse-Influence/GPT2-wikitext/cache"
+                )
+
+                attributor.compute_ifvp(batch_range=batch_range)
 
             # Evaluate on validation set
             if args.profile:
