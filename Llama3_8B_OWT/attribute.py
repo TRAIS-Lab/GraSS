@@ -252,33 +252,6 @@ def parse_args():
     )
 
     # >>>>>>>>>>>>>>>>>>>>> Customize Argument begins here >>>>>>>>>>>>>>>>>>>>>
-    # Worker specific arguments
-    parser.add_argument(
-        "--worker_id",
-        type=int,
-        default=None,
-        help="Worker ID (if provided directly)"
-    )
-    parser.add_argument(
-        "--start_batch",
-        type=int,
-        default=None,
-        help="Start batch index (if provided directly)"
-    )
-    parser.add_argument(
-        "--end_batch",
-        type=int,
-        default=None,
-        help="End batch index (if provided directly)"
-    )
-    parser.add_argument(
-        "--batch_range_file",
-        type=str,
-        default=None,
-        help="JSON file containing batch range info"
-    )
-
-    # General arguments
     parser.add_argument(
         "--device",
         type=str,
@@ -338,19 +311,10 @@ def parse_args():
         help="The setup of the worker: format: {worker_id}/{total_workers}.",
     )
     parser.add_argument(
-        "--cache",
-        action="store_true",
-        help="Caching Gradient.",
-    )
-    parser.add_argument(
-        "--precondition",
-        action="store_true",
-        help="Precondition.",
-    )
-    parser.add_argument(
-        "--attribute",
-        action="store_true",
-        help="Attributing.",
+        "--mode",
+        type=str,
+        default="cache",
+        help="The mode of the computation. Available options: `cache`, `precondition`, `ifvp`, `self_influence`, `attribute`, and `quant`.",
     )
 
     args = parser.parse_args()
@@ -724,44 +688,37 @@ def main():
             cache_dir=args.cache_dir
         )
 
-        if args.cache:
-            # Measure cache throughput
-            torch.cuda.synchronize(device)
-            cache_start_time = time.time()
+        torch.cuda.synchronize(device)
+        start_time = time.time()
+
+        if mode == "cache":
             result = attributor.cache_gradients(
                     train_dataloader,
                     batch_range=batch_range,
                 )
-            torch.cuda.synchronize(device)
-            cache_end_time = time.time()
-
             if args.profile:
                 profile = result[1]
 
-        if args.precondition:
-            # Measure precondition throughput
-            torch.cuda.synchronize(device)
-            precondition_start_time = time.time()
+        elif mode == "precondition":
+            attributor.compute_preconditioners()
+
+        elif mode == "precondition":
             result = attributor.compute_ifvp(batch_range=batch_range)
-            torch.cuda.synchronize(device)
-            precondition_end_time = time.time()
-
             if args.profile:
                 profile = result[1]
 
-        if args.attribute:
-            # Measure attribute throughput
-            torch.cuda.synchronize(device)
-            attribute_start_time = time.time()
+        elif mode == "self_influence":
+            score = attributor.compute_self_influence()
+
+        elif mode == "attribute":
             result = attributor.attribute(test_dataloader=test_dataloader)
-            torch.cuda.synchronize(device)
-            attribute_end_time = time.time()
 
             if args.profile:
                 score, profile = result
             else:
                 score = result
 
+        elif mode == "quant":
             logger.info("Generating the response for each prompt...")
             response_output_dir = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/response/")
             generate_responses(
@@ -783,6 +740,9 @@ def main():
                 tokenizer=tokenizer,
                 output_dir=topk_output_dir
             )
+
+        torch.cuda.synchronize(device)
+        end_time = time.time()
 
     elif args.baseline == "LogIX": #Only used for comparing the throughput, so some of the code are sloppy (specifically, how we get the subset of dataloader)
         from _LogIX.huggingface import LogIXArguments, patch_trainer
