@@ -1042,7 +1042,7 @@ class IFAttributor(BaseAttributor):
         train_dataloader: Optional['DataLoader'] = None,
         use_cached_ifvp: bool = True
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ProfilingStats]]:
-        """Attribute influence using optimized chunked processing with efficient data loading."""
+        """Attribute influence using maximally optimized processing with single matrix multiplication."""
         logger.info("Computing influence attribution")
 
         # Load batch information if needed
@@ -1067,7 +1067,7 @@ class IFAttributor(BaseAttributor):
             logger.info("Computing IFVP")
             self.compute_ifvp()
 
-        # Compute and store ALL test gradients in memory (test data is usually small)
+        # Compute and store ALL test gradients in memory
         logger.info("Computing and caching all test gradients in memory")
         test_grads_dict, _ = self._compute_gradients_chunked(
             test_dataloader,
@@ -1075,155 +1075,200 @@ class IFAttributor(BaseAttributor):
             worker="0/1"  # Always process all test data
         )
 
-        # Organize test data efficiently
-        logger.info("Organizing test data for efficient processing")
+        # Pre-process ALL test data: concatenate layers and batches
+        logger.info("Pre-processing test data: concatenating layers and batches")
         test_batch_indices = sorted(test_grads_dict.keys())
-        all_test_gradients = []  # List of (layer_idx, tensor) for all test samples
-        test_sample_mapping = {}  # Maps test_batch_idx to (start_idx, end_idx) in flattened array
-        current_test_idx = 0
 
-        # Flatten all test gradients by layer for efficient processing
-        num_test_samples = 0
+        # Collect all test gradients and organize sample mapping
+        all_test_samples = []  # List of concatenated gradients for each test sample
+        test_sample_count = 0
+
         for test_batch_idx in test_batch_indices:
             batch_grads = test_grads_dict[test_batch_idx]
-            batch_size = 0
 
             # Find batch size from first non-empty layer
+            batch_size = 0
             for layer_grads in batch_grads:
                 if layer_grads.numel() > 0:
                     batch_size = layer_grads.shape[0]
                     break
 
-            if batch_size > 0:
-                test_sample_mapping[test_batch_idx] = (current_test_idx, current_test_idx + batch_size)
-                current_test_idx += batch_size
-                num_test_samples += batch_size
+            if batch_size == 0:
+                continue
 
-        logger.info(f"Total test samples: {num_test_samples}")
-
-        # Pre-organize test gradients by layer for efficient matrix operations
-        test_gradients_by_layer = []
-        for layer_idx in range(len(self.layer_names)):
-            layer_test_grads = []
-
-            for test_batch_idx in test_batch_indices:
-                batch_grads = test_grads_dict[test_batch_idx]
+            # Concatenate all layers for this batch: (batch_size, proj_dim) -> (batch_size, proj_dim * num_layers)
+            batch_layer_concat = []
+            for layer_idx in range(len(self.layer_names)):
                 if layer_idx < len(batch_grads) and batch_grads[layer_idx].numel() > 0:
-                    layer_test_grads.append(batch_grads[layer_idx])
+                    batch_layer_concat.append(batch_grads[layer_idx])
+                else:
+                    # Add zero tensor for missing layers to maintain consistent dimensions
+                    if batch_layer_concat:  # Use first available layer to get proj_dim
+                        proj_dim = batch_layer_concat[0].shape[1]
+                        batch_layer_concat.append(torch.zeros(batch_size, proj_dim, dtype=batch_layer_concat[0].dtype))
+                    else:
+                        # Skip this batch if no layers have data
+                        continue
 
-            if layer_test_grads:
-                # Concatenate all test gradients for this layer
-                concatenated_test_grad = torch.cat(layer_test_grads, dim=0)
-                test_gradients_by_layer.append(concatenated_test_grad)
-            else:
-                test_gradients_by_layer.append(None)
+            if batch_layer_concat:
+                # Concatenate along feature dimension: (batch_size, proj_dim * num_layers)
+                concatenated_batch = torch.cat(batch_layer_concat, dim=1)
+                all_test_samples.append(concatenated_batch)
+                test_sample_count += batch_size
 
-        # Get batch mappings
+        if not all_test_samples:
+            raise ValueError("No valid test samples found")
+
+        # Final concatenation of all test samples: (total_test_samples, proj_dim * num_layers)
+        all_test_gradients = torch.cat(all_test_samples, dim=0)
+        logger.info(f"Test data shape after concatenation: {all_test_gradients.shape}")
+
+        # Get batch mappings for training data
         batch_to_sample_mapping = self.metadata.get_batch_to_sample_mapping()
         total_train_samples = self.metadata.get_total_samples()
 
         # Initialize influence score matrix
-        IF_score = torch.zeros(total_train_samples, num_test_samples, device="cpu")
+        IF_score = torch.zeros(total_train_samples, test_sample_count, device=self.device)
 
         # Create efficient dataloader for training IFVP data
-        logger.info("Creating efficient dataloader for training data")
+        logger.info("Creating efficient dataloader for training IFVP data")
         train_ifvp_dataloader = self.strategy.create_gradient_dataloader(
             data_type="ifvp",
-            batch_size=4,  # Larger batch size for efficiency
+            batch_size=2,
             pin_memory=True
         )
 
         if train_ifvp_dataloader:
-            logger.info("Processing attribution using chunked IFVP dataloader")
+            logger.info("Processing attribution using maximally optimized approach")
 
-            # Process training data in chunks using dataloader
-            for chunk_data in tqdm(train_ifvp_dataloader, desc="Computing attribution from chunks"):
+            # Process training data in chunks
+            for chunk_data in tqdm(train_ifvp_dataloader, desc="Computing attribution (single matmul per chunk)"):
                 train_batch_indices_chunk, train_ifvp_dicts = chunk_data
 
-                # Process each layer with concatenated chunk data
-                for layer_idx in range(len(self.layer_names)):
-                    if test_gradients_by_layer[layer_idx] is None:
+                # Collect all training samples in this chunk with their sample ranges
+                chunk_train_samples = []  # List of concatenated IFVP for each training sample
+                chunk_sample_ranges = []  # List of (start_idx, end_idx) in global sample space
+
+                for batch_idx, train_batch_ifvp_dict in zip(train_batch_indices_chunk, train_ifvp_dicts):
+                    if batch_idx not in batch_to_sample_mapping:
                         continue
 
-                    # Collect all IFVP tensors and their sample ranges for this layer
-                    layer_ifvp_tensors = []
-                    sample_ranges = []
+                    train_start, train_end = batch_to_sample_mapping[batch_idx]
+                    if train_end <= train_start:
+                        continue
 
-                    for batch_idx, train_batch_ifvp_dict in zip(train_batch_indices_chunk, train_ifvp_dicts):
-                        if (batch_idx in batch_to_sample_mapping and
-                            layer_idx in train_batch_ifvp_dict and
+                    # Concatenate all layers for this training batch
+                    batch_layer_concat = []
+                    for layer_idx in range(len(self.layer_names)):
+                        if (layer_idx in train_batch_ifvp_dict and
                             train_batch_ifvp_dict[layer_idx].numel() > 0):
+                            batch_layer_concat.append(train_batch_ifvp_dict[layer_idx])
+                        else:
+                            # Add zero tensor for missing layers to maintain consistent dimensions
+                            if batch_layer_concat:  # Use first available layer to get proj_dim
+                                proj_dim = batch_layer_concat[0].shape[1]
+                                batch_size = train_end - train_start
+                                batch_layer_concat.append(torch.zeros(batch_size, proj_dim, dtype=batch_layer_concat[0].dtype))
+                            else:
+                                # Skip this batch if no layers have data
+                                continue
 
-                            train_start, train_end = batch_to_sample_mapping[batch_idx]
-                            if train_end > train_start:
-                                layer_ifvp_tensors.append(train_batch_ifvp_dict[layer_idx])
-                                sample_ranges.append((train_start, train_end))
+                    if batch_layer_concat:
+                        # Concatenate along feature dimension: (batch_size, proj_dim * num_layers)
+                        concatenated_batch = torch.cat(batch_layer_concat, dim=1)
+                        chunk_train_samples.append(concatenated_batch)
+                        chunk_sample_ranges.append((train_start, train_end))
 
-                    if not layer_ifvp_tensors:
-                        continue
+                if not chunk_train_samples:
+                    continue
 
-                    # Concatenate all IFVP tensors for this layer in the chunk
-                    concatenated_ifvp = torch.cat(layer_ifvp_tensors, dim=0)
-                    concatenated_ifvp = self.strategy.move_to_device(concatenated_ifvp)
-                    test_grad_tensor = self.strategy.move_to_device(test_gradients_by_layer[layer_idx])
+                # Concatenate all training samples in this chunk: (chunk_total_samples, proj_dim * num_layers)
+                chunk_train_ifvp = torch.cat(chunk_train_samples, dim=0)
 
-                    # Single large matrix multiplication for the entire chunk and layer
-                    chunk_influence_matrix = torch.matmul(concatenated_ifvp, test_grad_tensor.t()).cpu()
+                # Move to device for computation
+                chunk_train_ifvp = self.strategy.move_to_device(chunk_train_ifvp)
+                test_gradients_device = self.strategy.move_to_device(all_test_gradients)
 
-                    # Distribute results back to the correct positions in IF_score
-                    current_row = 0
-                    for train_start, train_end in sample_ranges:
-                        batch_size = train_end - train_start
-                        IF_score[train_start:train_end, :] += chunk_influence_matrix[current_row:current_row + batch_size, :]
-                        current_row += batch_size
+                # SINGLE MASSIVE MATRIX MULTIPLICATION for the entire chunk
+                # Shape: (chunk_total_samples, proj_dim * num_layers) @ (proj_dim * num_layers, total_test_samples)
+                # Result: (chunk_total_samples, total_test_samples)
+                chunk_influence_matrix = torch.matmul(chunk_train_ifvp, test_gradients_device.t())
 
-                    del concatenated_ifvp, test_grad_tensor, chunk_influence_matrix
-                    torch.cuda.empty_cache()
+                # Distribute results back to the correct positions in IF_score
+                current_row = 0
+                for train_start, train_end in chunk_sample_ranges:
+                    batch_size = train_end - train_start
+                    IF_score[train_start:train_end, :] += chunk_influence_matrix[current_row:current_row + batch_size, :]
+                    current_row += batch_size
+
+                # Clean up GPU memory
+                del chunk_train_ifvp, test_gradients_device, chunk_influence_matrix
+                torch.cuda.empty_cache()
 
         else:
-            # Fallback to direct processing (less efficient but still better than original)
-            logger.info("Processing attribution using direct batch access")
+            # Fallback to direct processing (still optimized with concatenation)
+            logger.info("Fallback: Processing attribution using direct batch access")
             train_batch_indices = sorted(self.metadata.batch_info.keys())
 
             for train_chunk_start in tqdm(range(0, len(train_batch_indices), self.chunk_size),
-                                        desc="Computing attribution"):
+                                        desc="Computing attribution (fallback)"):
                 train_chunk_end = min(train_chunk_start + self.chunk_size, len(train_batch_indices))
                 train_chunk_batch_indices = train_batch_indices[train_chunk_start:train_chunk_end]
+
+                # Process chunk with concatenation approach
+                chunk_train_samples = []
+                chunk_sample_ranges = []
 
                 for train_batch_idx in train_chunk_batch_indices:
                     if train_batch_idx not in batch_to_sample_mapping:
                         continue
 
                     train_start, train_end = batch_to_sample_mapping[train_batch_idx]
-                    train_count = train_end - train_start
-
-                    if train_count <= 0:
+                    if train_end <= train_start:
                         continue
 
-                    # Load training IFVP once for this batch
+                    # Load training IFVP for this batch
                     train_ifvp = self.strategy.retrieve_ifvp(train_batch_idx)
 
-                    # Process each layer efficiently
+                    # Concatenate all layers for this training batch
+                    batch_layer_concat = []
                     for layer_idx in range(len(self.layer_names)):
-                        if (layer_idx >= len(train_ifvp) or train_ifvp[layer_idx].numel() == 0 or
-                            test_gradients_by_layer[layer_idx] is None):
-                            continue
+                        if (layer_idx < len(train_ifvp) and train_ifvp[layer_idx].numel() > 0):
+                            batch_layer_concat.append(train_ifvp[layer_idx])
+                        else:
+                            # Add zero tensor for missing layers
+                            if batch_layer_concat:
+                                proj_dim = batch_layer_concat[0].shape[1]
+                                batch_size = train_end - train_start
+                                batch_layer_concat.append(torch.zeros(batch_size, proj_dim, dtype=batch_layer_concat[0].dtype))
 
-                        # Move data to device
-                        train_ifvp_tensor = self.strategy.move_to_device(train_ifvp[layer_idx])
-                        test_grad_tensor = self.strategy.move_to_device(test_gradients_by_layer[layer_idx])
+                    if batch_layer_concat:
+                        concatenated_batch = torch.cat(batch_layer_concat, dim=1)
+                        chunk_train_samples.append(concatenated_batch)
+                        chunk_sample_ranges.append((train_start, train_end))
 
-                        # Efficient matrix multiplication for all test samples at once
-                        influence_matrix = torch.matmul(train_ifvp_tensor, test_grad_tensor.t()).cpu()
+                if not chunk_train_samples:
+                    continue
 
-                        # Add to influence score matrix
-                        IF_score[train_start:train_end, :] += influence_matrix
+                # Process this chunk with single matrix multiplication
+                chunk_train_ifvp = torch.cat(chunk_train_samples, dim=0)
+                chunk_train_ifvp = self.strategy.move_to_device(chunk_train_ifvp)
+                test_gradients_device = self.strategy.move_to_device(all_test_gradients)
 
-                        del train_ifvp_tensor, test_grad_tensor, influence_matrix
-                        torch.cuda.empty_cache()
+                chunk_influence_matrix = torch.matmul(chunk_train_ifvp, test_gradients_device.t()).cpu()
 
-        # Clean up test gradients from memory
-        del test_grads_dict, test_gradients_by_layer
+                # Distribute results
+                current_row = 0
+                for train_start, train_end in chunk_sample_ranges:
+                    batch_size = train_end - train_start
+                    IF_score[train_start:train_end, :] += chunk_influence_matrix[current_row:current_row + batch_size, :]
+                    current_row += batch_size
+
+                del chunk_train_ifvp, test_gradients_device, chunk_influence_matrix
+                torch.cuda.empty_cache()
+
+        # Clean up
+        del test_grads_dict, all_test_gradients, all_test_samples
         gc.collect()
         torch.cuda.empty_cache()
 

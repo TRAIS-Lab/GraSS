@@ -765,8 +765,8 @@ def main():
         )
 
         # Compute preconditioners for best damping value
-        attributor.compute_preconditioners(damping=best_damping)
-        attributor.compute_ifvp()
+        # attributor.compute_preconditioners(damping=best_damping)
+        # attributor.compute_ifvp()
 
         # Measure attribute throughput
         torch.cuda.synchronize(device)
