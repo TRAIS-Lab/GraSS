@@ -1,5 +1,5 @@
 """
-Concrete implementation of the Influence Function Attributor.
+Enhanced concrete implementation of the Influence Function Attributor with chunked I/O optimization.
 """
 
 from typing import TYPE_CHECKING, Dict, List, Optional, Union, Tuple, Any
@@ -20,28 +20,18 @@ logger = logging.getLogger(__name__)
 
 class IFAttributor(BaseAttributor):
     """
-    Influence function calculator using hooks for efficient gradient projection.
-    Works with standard PyTorch layers with support for different offloading strategies.
+    Enhanced Influence function calculator with chunked I/O and optimized batch processing.
+    Uses deterministic chunking with flexible worker-based batch range allocation.
     """
 
     def compute_preconditioners(self, damping: Optional[float] = None) -> List[torch.Tensor]:
-        """
-        Compute preconditioners (inverse Hessian) from gradients.
-        Supports batch_size > 1 by properly aggregating gradients before computing the preconditioner.
-
-        Args:
-            damping: (Adaptive) damping factor for Hessian inverse
-
-        Returns:
-            List of preconditioners for each layer
-        """
+        """Compute preconditioners (inverse Hessian) from gradients using chunked processing."""
         logger.info(f"Computing preconditioners with hessian type: {self.hessian}")
 
-        # Use instance damping if not provided
         if damping is None:
             damping = self.damping
 
-        # Validation code
+        # Load batch information if needed
         if not self.metadata.batch_info:
             logger.info("Loading batch information from metadata...")
             self.metadata._load_metadata_if_exists()
@@ -52,14 +42,12 @@ class IFAttributor(BaseAttributor):
         # If hessian type is "none", no preconditioners needed
         if self.hessian == "none":
             logger.info("Hessian type is 'none', skipping preconditioner computation")
-            # Store None preconditioners in the strategy
             for layer_idx in range(len(self.layer_names)):
                 self.strategy.store_preconditioner(layer_idx, None)
             return [None] * len(self.layer_names)
 
-        # Calculate total samples across all batches
         total_samples = self.metadata.get_total_samples()
-        logger.info(f"Total samples across all batches: {total_samples}")
+        logger.info(f"Computing preconditioners from {total_samples} total samples")
 
         if self.profile and self.profiling_stats:
             torch.cuda.synchronize(self.device)
@@ -69,120 +57,138 @@ class IFAttributor(BaseAttributor):
         hessian_accumulators = [None] * len(self.layer_names)
         sample_counts = [0] * len(self.layer_names)
 
-        # Process batches - if disk offload, use dataloader, otherwise process directly
+        # Use chunked dataloader for efficient processing
         dataloader = self.strategy.create_gradient_dataloader(
             data_type="gradients",
-            batch_size=4,  # Process multiple files at a time
-            num_workers=4,
+            batch_size=4,
             pin_memory=True
         )
 
         if dataloader:
-            # Process batches using the dataloader (disk offload)
-            for batch_indices, batch_dicts in tqdm(dataloader, desc="Processing batches for preconditioners"):
-                # Process each layer
+            logger.info("Processing gradients using chunked dataloader")
+
+            # Process chunks deterministically
+            for chunk_data in tqdm(dataloader, desc="Computing preconditioners from chunks"):
+                batch_indices, batch_dicts = chunk_data
+
+                # Process each layer across all batches in the chunk
                 for layer_idx in range(len(self.layer_names)):
-                    # Collect all gradients for this layer from the batch
                     layer_gradients = []
 
-                    for i, batch_dict in enumerate(batch_dicts):
-                        # Check if this layer exists in the batch and has data
+                    # Collect gradients for this layer from all batches in chunk
+                    for batch_dict in batch_dicts:
                         if layer_idx not in batch_dict or batch_dict[layer_idx].numel() == 0:
                             continue
+                        layer_gradients.append(batch_dict[layer_idx])
 
-                        grad = batch_dict[layer_idx]
-
-                        layer_gradients.append(grad)
-
-                    # If no gradients for this layer, skip
                     if not layer_gradients:
                         continue
 
-                    # Aggregate all gradients into one tensor
-                    aggregated_gradients = torch.cat(layer_gradients, dim=0)
+                    try:
+                        aggregated_gradients = torch.cat(layer_gradients, dim=0)
+                        aggregated_gradients = self.strategy.move_to_device(aggregated_gradients)
 
-                    # Move aggregated gradients to device
-                    aggregated_gradients = self.strategy.move_to_device(aggregated_gradients)
+                        sample_counts[layer_idx] += aggregated_gradients.shape[0]
 
-                    # Update sample count
-                    sample_counts[layer_idx] += aggregated_gradients.shape[0]
+                        # Compute Hessian contribution efficiently
+                        batch_hessian = torch.matmul(aggregated_gradients.t(), aggregated_gradients)
 
-                    # Compute Hessian contribution from the aggregated batch
-                    batch_hessian = torch.matmul(aggregated_gradients.t(), aggregated_gradients)
-
-                    # Update the Hessian accumulator
-                    if hessian_accumulators[layer_idx] is None:
-                        hessian_accumulators[layer_idx] = batch_hessian
-                    else:
-                        hessian_accumulators[layer_idx] += batch_hessian
-
-                    # Clean up memory
-                    del aggregated_gradients, batch_hessian, layer_gradients
-                    torch.cuda.empty_cache()
-
-                # Clean up memory after processing all layers for this batch
-                gc.collect()
-                torch.cuda.empty_cache()
-        else:
-            # Get all batch indices from metadata
-            batch_indices = sorted(self.metadata.batch_info.keys())
-            chunk_size = self.default_chunk_size
-
-            # Process in chunks to manage memory
-            for chunk_start in range(0, len(batch_indices), chunk_size):
-                chunk_end = min(chunk_start + chunk_size, len(batch_indices))
-                chunk_batch_indices = batch_indices[chunk_start:chunk_end]
-
-                # Process each layer for all batches in the chunk
-                for layer_idx in range(len(self.layer_names)):
-                    gradients_list = []
-
-                    # Collect gradients for this layer from all batches in the chunk
-                    for batch_idx in chunk_batch_indices:
-                        batch_grads = self.strategy.retrieve_gradients(batch_idx, is_test=False)
-                        if layer_idx < len(batch_grads) and batch_grads[layer_idx].numel() > 0:
-                            gradients_list.append(batch_grads[layer_idx])
-
-                    if not gradients_list:
-                        continue
-
-                    # Process in smaller batches if many gradients
-                    grad_batch_size = 100  # Adjust based on memory constraints
-                    for i in range(0, len(gradients_list), grad_batch_size):
-                        batch_grads = gradients_list[i:i+grad_batch_size]
-
-                        # Combine gradients
-                        combined_gradients = torch.cat(batch_grads, dim=0)
-
-                        # Compute Hessian contribution
-                        batch_hessian = torch.matmul(combined_gradients.t(), combined_gradients)
-
-                        # Update accumulator
+                        # Update the Hessian accumulator
                         if hessian_accumulators[layer_idx] is None:
                             hessian_accumulators[layer_idx] = batch_hessian
                         else:
                             hessian_accumulators[layer_idx] += batch_hessian
 
-                        # Update sample count
-                        sample_counts[layer_idx] += combined_gradients.shape[0]
+                        del aggregated_gradients, batch_hessian
 
-                        # Clean up
-                        del combined_gradients, batch_hessian
+                    except RuntimeError as e:
+                        if "out of memory" in str(e):
+                            logger.warning(f"GPU memory overflow for layer {layer_idx}, processing individually")
+                            for grad in layer_gradients:
+                                grad_device = self.strategy.move_to_device(grad)
+                                sample_counts[layer_idx] += grad_device.shape[0]
+                                small_hessian = torch.matmul(grad_device.t(), grad_device)
+                                if hessian_accumulators[layer_idx] is None:
+                                    hessian_accumulators[layer_idx] = small_hessian
+                                else:
+                                    hessian_accumulators[layer_idx] += small_hessian
+                                del grad_device, small_hessian
+                        else:
+                            raise
+
+                    del layer_gradients
+                    torch.cuda.empty_cache()
+
+                gc.collect()
+                torch.cuda.empty_cache()
+
+        else:
+            # Fallback to direct processing
+            logger.info("Processing gradients using direct batch access")
+            batch_indices = sorted(self.metadata.batch_info.keys())
+
+            for chunk_start in tqdm(range(0, len(batch_indices), self.chunk_size),
+                                  desc="Computing preconditioners"):
+                chunk_end = min(chunk_start + self.chunk_size, len(batch_indices))
+                chunk_batch_indices = batch_indices[chunk_start:chunk_end]
+
+                for layer_idx in range(len(self.layer_names)):
+                    layer_gradients = []
+
+                    for batch_idx in chunk_batch_indices:
+                        batch_grads = self.strategy.retrieve_gradients(batch_idx, is_test=False)
+                        if layer_idx < len(batch_grads) and batch_grads[layer_idx].numel() > 0:
+                            layer_gradients.append(batch_grads[layer_idx])
+
+                    if not layer_gradients:
+                        continue
+
+                    # Process layer gradients in fixed sub-batches
+                    grad_batch_size = 50
+                    for i in range(0, len(layer_gradients), grad_batch_size):
+                        batch_grads = layer_gradients[i:i+grad_batch_size]
+
+                        try:
+                            combined_gradients = torch.cat(batch_grads, dim=0)
+                            combined_gradients = self.strategy.move_to_device(combined_gradients)
+
+                            batch_hessian = torch.matmul(combined_gradients.t(), combined_gradients)
+
+                            if hessian_accumulators[layer_idx] is None:
+                                hessian_accumulators[layer_idx] = batch_hessian
+                            else:
+                                hessian_accumulators[layer_idx] += batch_hessian
+
+                            sample_counts[layer_idx] += combined_gradients.shape[0]
+
+                            del combined_gradients, batch_hessian
+
+                        except RuntimeError as e:
+                            if "out of memory" in str(e):
+                                for grad in batch_grads:
+                                    grad_device = self.strategy.move_to_device(grad)
+                                    sample_counts[layer_idx] += grad_device.shape[0]
+                                    small_hessian = torch.matmul(grad_device.t(), grad_device)
+                                    if hessian_accumulators[layer_idx] is None:
+                                        hessian_accumulators[layer_idx] = small_hessian
+                                    else:
+                                        hessian_accumulators[layer_idx] += small_hessian
+                                    del grad_device, small_hessian
+                            else:
+                                raise
+
                         torch.cuda.empty_cache()
 
-                # Clean up memory after processing the chunk
                 gc.collect()
                 torch.cuda.empty_cache()
 
         # Compute preconditioners from accumulated Hessians
         preconditioners = [None] * len(self.layer_names)
 
-        # Process each layer's accumulated Hessian
-        for layer_idx in tqdm(range(len(self.layer_names)), desc="Computing preconditioners"):
+        for layer_idx in tqdm(range(len(self.layer_names)), desc="Computing inverses"):
             hessian_accumulator = hessian_accumulators[layer_idx]
             sample_count = sample_counts[layer_idx]
 
-            # If we have accumulated Hessian, compute preconditioner
             if hessian_accumulator is not None and sample_count > 0:
                 # Normalize by total number of samples
                 hessian = hessian_accumulator / sample_count
@@ -191,21 +197,13 @@ class IFAttributor(BaseAttributor):
                 if self.hessian == "raw":
                     precond = stable_inverse(hessian, damping=damping)
                     preconditioners[layer_idx] = precond
-
-                    # Store in strategy
                     self.strategy.store_preconditioner(layer_idx, precond)
-
-                    # Clean up
                     del precond
 
                 elif self.hessian in ["kfac", "ekfac"]:
-                    # Store Hessian itself for KFAC-type preconditioners
                     preconditioners[layer_idx] = hessian
-
-                    # Store in strategy
                     self.strategy.store_preconditioner(layer_idx, hessian)
 
-                # Clean up
                 del hessian_accumulator, hessian
                 torch.cuda.empty_cache()
 
@@ -213,7 +211,6 @@ class IFAttributor(BaseAttributor):
             torch.cuda.synchronize(self.device)
             self.profiling_stats.precondition += time.time() - start_time
 
-        # Wait for async operations to complete
         self.strategy.wait_for_async_operations()
 
         if self.profile and self.profiling_stats:
@@ -221,21 +218,15 @@ class IFAttributor(BaseAttributor):
         else:
             return preconditioners
 
-    def compute_ifvp(
-        self,
-        batch_range: Optional[Tuple[int, int]] = None
-    ) -> Dict[int, List[torch.Tensor]]:
+    def compute_ifvp(self, worker: str = "0/1") -> Dict[int, List[torch.Tensor]]:
         """
-        Compute inverse-Hessian-vector products (IFVP) from gradients and preconditioners.
-        Optimized for minimal memory usage with batch processing.
-
-        Args:
-            batch_range: Optional tuple of (start_batch, end_batch) to process only a subset of batches
-
-        Returns:
-            Dictionary mapping batch indices to lists of tensors (one tensor per layer)
+        Compute inverse-Hessian-vector products (IFVP) using chunked processing.
+        Automatically determines batch range from worker specification and metadata.
         """
-        logger.info("Computing inverse-Hessian-vector products (IFVP)")
+        logger.info(f"Worker {worker}: Computing IFVP with chunked processing")
+
+        # Clear IFVP cache first to avoid conflicts with previous computations
+        # self.clear_ifvp_cache()
 
         # Load batch information if needed
         if not self.metadata.batch_info:
@@ -243,136 +234,138 @@ class IFAttributor(BaseAttributor):
             self.metadata._load_metadata_if_exists()
 
         if not self.metadata.batch_info:
-            raise ValueError("No batch information found. Call cache_gradients first.")
+            raise ValueError("No batch information found. Call cache_gradients first or ensure metadata exists.")
 
-        # Process batch range
-        batch_msg = ""
-        if batch_range is not None:
-            start_batch, end_batch = batch_range
-            batch_msg = f" (processing batches {start_batch} to {end_batch-1})"
-        logger.info(f"Computing IFVP with offload strategy: {self.offload}{batch_msg}")
+        # Calculate total batches from metadata instead of dataloader
+        batch_indices = sorted(self.metadata.batch_info.keys())
+        if not batch_indices:
+            raise ValueError("No batches found in metadata")
+
+        # Calculate total batches based on the range of batch indices in metadata
+        min_batch_idx = min(batch_indices)
+        max_batch_idx = max(batch_indices)
+        total_batches = max_batch_idx + 1  # Assuming batch indices start from 0
+
+        logger.info(f"Found {len(batch_indices)} batches in metadata (range: {min_batch_idx}-{max_batch_idx})")
+
+        # Calculate worker batch range using metadata-derived total
+        start_batch, end_batch = self._get_worker_batch_range(total_batches, worker)
+
+        # Start batch range processing for disk offload
+        if self.offload == "disk" and hasattr(self.strategy, 'start_batch_range_processing'):
+            self.strategy.start_batch_range_processing(start_batch, end_batch)
+
+        logger.info(f"Processing batch range: [{start_batch}, {end_batch}) ({end_batch - start_batch} batches)")
 
         # Return raw gradients if Hessian type is "none"
         if self.hessian == "none":
             logger.info("Using raw gradients as IFVP since hessian type is 'none'")
-
-            # Get all batch indices from metadata
-            if batch_range is not None:
-                start_batch, end_batch = batch_range
-                batch_indices = [idx for idx in self.metadata.batch_info.keys()
-                              if start_batch <= idx < end_batch]
-            else:
-                batch_indices = sorted(self.metadata.batch_info.keys())
-
-            # Copy gradients to IFVP storage
-            for batch_idx in tqdm(batch_indices, desc="Copying gradients to IFVP"):
-                gradients = self.strategy.retrieve_gradients(batch_idx, is_test=False)
-                self.strategy.store_ifvp(batch_idx, gradients)
-
-            # Create minimal result dictionary
-            result_dict = {batch_idx: None for batch_idx in batch_indices}
-            return result_dict
+            return self._copy_gradients_to_ifvp(start_batch, end_batch)
 
         if self.profile and self.profiling_stats:
             torch.cuda.synchronize(self.device)
             start_time = time.time()
 
-        # Get all batch indices from metadata
-        if batch_range is not None:
-            start_batch, end_batch = batch_range
-            batch_indices = [idx for idx in self.metadata.batch_info.keys()
-                          if start_batch <= idx < end_batch]
-        else:
-            batch_indices = sorted(self.metadata.batch_info.keys())
+        # Get batch indices for this worker from metadata
+        worker_batch_indices = [idx for idx in batch_indices
+                            if start_batch <= idx < end_batch]
 
-        # Load all preconditioners at once to avoid repeated loading
-        logger.info("Loading preconditioners for all layers")
+        if not worker_batch_indices:
+            logger.warning(f"No batches found in range [{start_batch}, {end_batch}) for worker {worker}")
+            return {}
+
+        logger.info(f"Processing {len(worker_batch_indices)} batches for this worker: {worker_batch_indices[:5]}{'...' if len(worker_batch_indices) > 5 else ''}")
+
+        # Pre-load all preconditioners
+        logger.info("Pre-loading preconditioners for all layers")
         preconditioners = []
         for layer_idx in range(len(self.layer_names)):
             precond = self.strategy.retrieve_preconditioner(layer_idx)
-            preconditioners.append(precond)  # Will be None if not available
+            preconditioners.append(precond)
 
-        # Log how many preconditioners were loaded
         valid_preconditioners = sum(1 for p in preconditioners if p is not None)
         logger.info(f"Loaded {valid_preconditioners} preconditioners out of {len(self.layer_names)} layers")
 
-        # Process batches - if disk offload, use dataloader, otherwise process directly
+        # Use chunked dataloader for efficient processing
         dataloader = self.strategy.create_gradient_dataloader(
             data_type="gradients",
-            batch_size=4,
-            num_workers=32,
+            batch_size=2,
             pin_memory=True,
-            batch_range=batch_range
+            batch_range=(start_batch, end_batch)
         )
 
-        # Initialize result dictionary
         result_dict = {}
 
         if dataloader:
-            # Process batches using the dataloader (disk offload)
-            for batch_indices, batch_grad_dicts in tqdm(dataloader, desc="Computing IFVP"):
-                # First, organize all the batch info for tracking
-                batch_ifvp_dicts = [{} for _ in range(len(batch_indices))]
+            logger.info("Processing IFVP using chunked dataloader")
 
-                # Process each layer
+            # Process chunks deterministically
+            for chunk_data in tqdm(dataloader, desc="Computing IFVP from chunks"):
+                batch_indices_chunk, batch_grad_dicts = chunk_data
+                batch_ifvp_dicts = [{} for _ in range(len(batch_indices_chunk))]
+
+                # Process each layer across all batches in the chunk
                 for layer_idx in range(len(self.layer_names)):
-                    # Get preconditioner for this layer from our preloaded list
                     precond = preconditioners[layer_idx]
-
-                    # Skip if preconditioner is None
                     if precond is None:
+                        for i in range(len(batch_indices_chunk)):
+                            batch_ifvp_dicts[i][layer_idx] = torch.tensor([])
                         continue
 
-                    # Collect all gradients for this layer from all batches
-                    batch_gradients = []
-                    batch_dict_indices = []  # To track which position in the batch each gradient came from
+                    # Collect gradients and track their batch positions
+                    layer_gradients = []
+                    gradient_batch_map = []
 
-                    # Get info for each batch
                     for batch_dict_idx, batch_grad_dict in enumerate(batch_grad_dicts):
-                        # Skip if layer not in gradient dictionary or empty
                         if layer_idx not in batch_grad_dict or batch_grad_dict[layer_idx].numel() == 0:
                             batch_ifvp_dicts[batch_dict_idx][layer_idx] = torch.tensor([])
                             continue
 
-                        grad = batch_grad_dict[layer_idx]
+                        layer_gradients.append(batch_grad_dict[layer_idx])
+                        gradient_batch_map.append(batch_dict_idx)
 
-                        # Save the gradient along with its batch info
-                        batch_gradients.append(grad)
-                        batch_dict_indices.append(batch_dict_idx)
-
-                    # If no valid gradients for this layer, continue to next layer
-                    if not batch_gradients:
+                    if not layer_gradients:
                         continue
 
-                    # Move gradients to device and concatenate
-                    device_gradients = [self.strategy.move_to_device(grad) for grad in batch_gradients]
+                    try:
+                        # Move to device and concatenate for efficient processing
+                        device_gradients = [self.strategy.move_to_device(grad) for grad in layer_gradients]
+                        original_shapes = [grad.shape[0] for grad in device_gradients]
+                        concatenated_gradients = torch.cat(device_gradients, dim=0)
 
-                    # Store original shapes for splitting results later
-                    original_shapes = [grad.shape[0] for grad in device_gradients]
+                        # Move preconditioner to device and ensure type compatibility
+                        device_precond = self.strategy.move_to_device(precond)
+                        device_precond = device_precond.to(dtype=concatenated_gradients.dtype)
 
-                    # Concatenate all gradients for efficient processing
-                    concatenated_gradients = torch.cat(device_gradients, dim=0)
+                        # Compute IFVP efficiently for all gradients at once
+                        ifvp_result = torch.matmul(device_precond, concatenated_gradients.t()).t()
 
-                    # Move preconditioner to device and ensure types match
-                    device_precond = self.strategy.move_to_device(precond)
-                    device_precond = device_precond.to(dtype=concatenated_gradients.dtype)
+                        # Split results back to individual batches
+                        split_results = torch.split(ifvp_result, original_shapes)
 
-                    # Compute IFVP for all gradients at once
-                    result = torch.matmul(device_precond, concatenated_gradients.t()).t()
+                        # Distribute results back to batch dictionaries
+                        for i, (split_result, dict_idx) in enumerate(zip(split_results, gradient_batch_map)):
+                            batch_ifvp_dicts[dict_idx][layer_idx] = self.strategy.move_from_device(split_result)
 
-                    # Split result back to individual batch results
-                    split_results = torch.split(result, original_shapes)
+                        del device_gradients, concatenated_gradients, ifvp_result, split_results, device_precond
 
-                    # Distribute results back to their respective batch dictionaries
-                    for i, (split_result, dict_idx) in enumerate(zip(split_results, batch_dict_indices)):
-                        batch_ifvp_dicts[dict_idx][layer_idx] = self.strategy.move_from_device(split_result)
+                    except RuntimeError as e:
+                        if "out of memory" in str(e):
+                            logger.warning(f"GPU memory overflow for layer {layer_idx}, processing individually")
+                            for grad, dict_idx in zip(layer_gradients, gradient_batch_map):
+                                device_grad = self.strategy.move_to_device(grad)
+                                device_precond = self.strategy.move_to_device(precond)
+                                device_precond = device_precond.to(dtype=device_grad.dtype)
+                                ifvp = torch.matmul(device_precond, device_grad.t()).t()
+                                batch_ifvp_dicts[dict_idx][layer_idx] = self.strategy.move_from_device(ifvp)
+                                del device_grad, device_precond, ifvp
+                        else:
+                            raise
 
-                    # Clean up memory
-                    del device_gradients, concatenated_gradients, result, split_results, device_precond
                     torch.cuda.empty_cache()
 
-                # Save all computed IFVP results
-                for i, (batch_idx, batch_ifvp_dict) in enumerate(zip(batch_indices, batch_ifvp_dicts)):
+                # Store computed IFVP results
+                for i, (batch_idx, batch_ifvp_dict) in enumerate(zip(batch_indices_chunk, batch_ifvp_dicts)):
                     # Convert to list for consistent interface
                     batch_ifvp_list = []
                     for layer_idx in range(len(self.layer_names)):
@@ -383,64 +376,52 @@ class IFAttributor(BaseAttributor):
 
                     # Store in strategy
                     self.strategy.store_ifvp(batch_idx, batch_ifvp_list)
-
-                    # Add to result dictionary
                     result_dict[batch_idx] = batch_ifvp_list
 
-                # Clean up memory after processing all layers for these batches
-                gc.collect()
-                torch.cuda.empty_cache()
         else:
-            # Process batches directly (memory or CPU offload)
-            for batch_idx in tqdm(batch_indices, desc="Computing IFVP"):
-                # Initialize IFVP list for this batch
-                batch_ifvp = [torch.tensor([]) for _ in range(len(self.layer_names))]
+            # Fallback to direct processing using metadata batch indices
+            logger.info("Processing IFVP using direct batch access")
 
-                # Get gradients for this batch
-                batch_grads = self.strategy.retrieve_gradients(batch_idx, is_test=False)
+            for chunk_start in tqdm(range(0, len(worker_batch_indices), self.chunk_size),
+                                desc="Computing IFVP"):
+                chunk_end = min(chunk_start + self.chunk_size, len(worker_batch_indices))
+                chunk_batch_indices = worker_batch_indices[chunk_start:chunk_end]
 
-                # Process each layer
-                for layer_idx in range(len(self.layer_names)):
-                    # Skip if gradient is empty
-                    if layer_idx >= len(batch_grads) or batch_grads[layer_idx].numel() == 0:
-                        continue
+                for batch_idx in chunk_batch_indices:
+                    batch_ifvp = [torch.tensor([]) for _ in range(len(self.layer_names))]
+                    batch_grads = self.strategy.retrieve_gradients(batch_idx, is_test=False)
 
-                    # Get preconditioner for this layer from preloaded list
-                    precond = preconditioners[layer_idx]
+                    # Process each layer
+                    for layer_idx in range(len(self.layer_names)):
+                        if (layer_idx >= len(batch_grads) or
+                            batch_grads[layer_idx].numel() == 0 or
+                            preconditioners[layer_idx] is None):
+                            continue
 
-                    # Skip if preconditioner is None
-                    if precond is None:
-                        continue
+                        # Compute IFVP
+                        grad = self.strategy.move_to_device(batch_grads[layer_idx])
+                        device_precond = self.strategy.move_to_device(preconditioners[layer_idx])
+                        device_precond = device_precond.to(dtype=grad.dtype)
 
-                    # Get gradient and ensure it's on the device
-                    grad = self.strategy.move_to_device(batch_grads[layer_idx])
+                        ifvp = torch.matmul(device_precond, grad.t()).t()
+                        batch_ifvp[layer_idx] = self.strategy.move_from_device(ifvp)
 
-                    # Move preconditioner to device and ensure types match
-                    device_precond = self.strategy.move_to_device(precond)
-                    device_precond = device_precond.to(dtype=grad.dtype)
+                        del grad, ifvp, device_precond
+                        torch.cuda.empty_cache()
 
-                    # Compute IFVP
-                    ifvp = torch.matmul(device_precond, grad.t()).t()
+                    # Store results
+                    self.strategy.store_ifvp(batch_idx, batch_ifvp)
+                    result_dict[batch_idx] = batch_ifvp
 
-                    # Store result
-                    batch_ifvp[layer_idx] = self.strategy.move_from_device(ifvp)
-
-                    # Clean up
-                    del grad, ifvp, device_precond
-                    torch.cuda.empty_cache()
-
-                # Store in strategy
-                self.strategy.store_ifvp(batch_idx, batch_ifvp)
-
-                # Add to result dictionary
-                result_dict[batch_idx] = batch_ifvp
+        # Finalize batch range processing for disk offload
+        if self.offload == "disk" and hasattr(self.strategy, 'finish_batch_range_processing'):
+            self.strategy.finish_batch_range_processing()
 
         # Clean up preloaded preconditioners
         del preconditioners
         gc.collect()
         torch.cuda.empty_cache()
 
-        # Wait for async operations to complete
         self.strategy.wait_for_async_operations()
 
         if self.profile and self.profiling_stats:
@@ -450,26 +431,28 @@ class IFAttributor(BaseAttributor):
         else:
             return result_dict
 
-    def compute_self_influence(
-        self,
-        batch_range: Optional[Tuple[int, int]] = None,
-    ) -> torch.Tensor:
-        """
-        Compute self-influence scores for training examples by using
-        the dot product of gradients and their IFVPs.
+    def _copy_gradients_to_ifvp(self, start_batch: int, end_batch: int) -> Dict[int, List[torch.Tensor]]:
+        """Copy gradients to IFVP storage when hessian type is 'none'."""
+        # Use metadata to get actual batch indices instead of assuming continuous range
+        batch_indices = [idx for idx in self.metadata.batch_info.keys()
+                        if start_batch <= idx < end_batch]
 
-        Optimized by:
-        1. Processing in dataloader chunks
-        2. Processing each layer separately
-        3. Concatenating all batches in a chunk for each layer
+        result_dict = {}
+        for chunk_start in tqdm(range(0, len(batch_indices), self.chunk_size),
+                            desc="Copying gradients to IFVP"):
+            chunk_end = min(chunk_start + self.chunk_size, len(batch_indices))
+            chunk_batch_indices = batch_indices[chunk_start:chunk_end]
 
-        Args:
-            batch_range: Optional tuple of (start_batch, end_batch) to process only a subset of batches
+            for batch_idx in chunk_batch_indices:
+                gradients = self.strategy.retrieve_gradients(batch_idx, is_test=False)
+                self.strategy.store_ifvp(batch_idx, gradients)
+                result_dict[batch_idx] = None
 
-        Returns:
-            Tensor containing self-influence scores for all examples
-        """
-        logger.info("Computing self-influence scores using pre-computed IFVP")
+        return result_dict
+
+    def compute_self_influence(self, worker: str = "0/1") -> torch.Tensor:
+        """Compute self-influence scores using optimized chunked processing."""
+        logger.info(f"Worker {worker}: Computing self-influence scores")
 
         # Load batch information if needed
         if not self.metadata.batch_info:
@@ -482,256 +465,574 @@ class IFAttributor(BaseAttributor):
         # Make sure IFVP is computed
         if not self.strategy.has_ifvp():
             logger.info("IFVP not found, computing it now...")
-            self.compute_ifvp(batch_range=batch_range)
+            self.compute_ifvp(worker=worker)
 
-        # Get batch mapping and determine total samples
+        # Get batch mapping and worker range
         batch_to_sample_mapping = self.metadata.get_batch_to_sample_mapping()
         total_samples = self.metadata.get_total_samples()
-
-        # Initialize result tensor
         self_influence = torch.zeros(total_samples, device="cpu")
 
-        # Filter batch indices based on batch_range
-        if batch_range is not None:
-            start_batch, end_batch = batch_range
-            batch_indices = [idx for idx in self.metadata.batch_info.keys()
+        # Get worker batch range
+        total_batches = len(self.full_train_dataloader)
+        start_batch, end_batch = self._get_worker_batch_range(total_batches, worker)
+
+        batch_indices = [idx for idx in self.metadata.batch_info.keys()
                         if start_batch <= idx < end_batch]
-        else:
-            batch_indices = sorted(self.metadata.batch_info.keys())
 
-        # Verify batches are continuous
-        if len(batch_indices) > 1:
-            for i in range(len(batch_indices) - 1):
-                if batch_indices[i] + 1 != batch_indices[i+1]:
-                    raise ValueError(f"Batch indices must be continuous. Found gap between "
-                                f"batch {batch_indices[i]} and {batch_indices[i+1]}.")
+        # Process batches in fixed chunks
+        for chunk_start in tqdm(range(0, len(batch_indices), self.chunk_size),
+                              desc="Computing self-influence"):
+            chunk_end = min(chunk_start + self.chunk_size, len(batch_indices))
+            chunk_batch_indices = batch_indices[chunk_start:chunk_end]
 
-        # Create dataloaders with larger batch size for better efficiency
-        dataloader_batch_size = 128  # Process larger chunks
-        grad_dataloader = self.strategy.create_gradient_dataloader(
-            data_type="gradients",
-            batch_size=dataloader_batch_size,
-            num_workers=4,  # More workers for parallel I/O
-            pin_memory=True,
-            batch_range=batch_range
-        )
-
-        ifvp_dataloader = self.strategy.create_gradient_dataloader(
-            data_type="ifvp",
-            batch_size=dataloader_batch_size,
-            num_workers=4,
-            pin_memory=True,
-            batch_range=batch_range
-        )
-
-        # Process batches with dataloader
-        if grad_dataloader and ifvp_dataloader:
-            # First loop: Process chunks from the dataloader
-            for (grad_batch_indices, grad_batch_dicts), (ifvp_batch_indices, ifvp_batch_dicts) in tqdm(
-                zip(grad_dataloader, ifvp_dataloader),
-                desc="Processing batch chunks",
-                total=len(grad_dataloader)
-            ):
-                # Verify batch indices match
-                if grad_batch_indices != ifvp_batch_indices:
-                    raise ValueError(f"Batch indices mismatch: {grad_batch_indices} vs {ifvp_batch_indices}")
-
-                # Collect sample information for this chunk
-                sample_info = []  # List of (batch_idx, batch_pos, sample_start, num_samples)
-
-                for batch_pos, batch_idx in enumerate(grad_batch_indices):
-                    if batch_idx not in batch_to_sample_mapping:
-                        continue
-
-                    sample_start, sample_end = batch_to_sample_mapping[batch_idx]
-                    num_samples = sample_end - sample_start
-
-                    if num_samples <= 0:
-                        continue
-
-                    sample_info.append((batch_idx, batch_pos, sample_start, num_samples))
-
-                # Skip if no valid batches in chunk
-                if not sample_info:
+            for batch_idx in chunk_batch_indices:
+                if batch_idx not in batch_to_sample_mapping:
                     continue
 
-                # Second loop: Process each layer separately for the entire chunk
+                sample_start, sample_end = batch_to_sample_mapping[batch_idx]
+                num_samples = sample_end - sample_start
+
+                if num_samples <= 0:
+                    continue
+
+                # Load gradients and IFVP
+                gradients = self.strategy.retrieve_gradients(batch_idx, is_test=False)
+                ifvp = self.strategy.retrieve_ifvp(batch_idx)
+
+                # Compute self-influence for each layer
                 for layer_idx in range(len(self.layer_names)):
-                    # Collect gradients and IFVPs for this layer across all batches in the chunk
-                    layer_grads = []
-                    layer_ifvps = []
-                    layer_sample_starts = []
-                    layer_sample_counts = []
-
-                    # Gather data for this layer from all batches in the chunk
-                    for batch_idx, batch_pos, sample_start, num_samples in sample_info:
-                        # Skip if layer data is missing in this batch
-                        if (layer_idx not in grad_batch_dicts[batch_pos] or
-                            grad_batch_dicts[batch_pos][layer_idx].numel() == 0 or
-                            layer_idx not in ifvp_batch_dicts[batch_pos] or
-                            ifvp_batch_dicts[batch_pos][layer_idx].numel() == 0):
-                            continue
-
-                        # Get data for this layer/batch
-                        grad = grad_batch_dicts[batch_pos][layer_idx]
-                        ifvp = ifvp_batch_dicts[batch_pos][layer_idx]
-
-                        # Validate shapes
-                        if grad.shape[0] != num_samples or ifvp.shape[0] != num_samples:
-                            raise ValueError(f"Shape mismatch for batch {batch_idx}, layer {layer_idx}. "
-                                            f"Expected {num_samples}, got {grad.shape[0]}/{ifvp.shape[0]}")
-
-                        # Add to collection
-                        layer_grads.append(grad)
-                        layer_ifvps.append(ifvp)
-                        layer_sample_starts.append(sample_start)
-                        layer_sample_counts.append(num_samples)
-
-                    # Skip layer if no valid data in any batch
-                    if not layer_grads:
+                    if (layer_idx >= len(gradients) or gradients[layer_idx].numel() == 0 or
+                        layer_idx >= len(ifvp) or ifvp[layer_idx].numel() == 0):
                         continue
 
-                    # Concatenate all batch data for this layer
-                    try:
-                        cat_grads = torch.cat(layer_grads, dim=0)
-                        cat_ifvps = torch.cat(layer_ifvps, dim=0)
+                    grad = self.strategy.move_to_device(gradients[layer_idx])
+                    ifvp_tensor = self.strategy.move_to_device(ifvp[layer_idx])
 
-                        # Move to device
-                        device_grads = self.strategy.move_to_device(cat_grads)
-                        device_ifvps = self.strategy.move_to_device(cat_ifvps)
+                    # Compute dot product
+                    layer_influence = torch.sum(grad * ifvp_tensor, dim=1).cpu()
+                    self_influence[sample_start:sample_start + num_samples] += layer_influence
 
-                        # Compute dot products for all samples at once
-                        layer_influence = torch.sum(device_grads * device_ifvps, dim=1).cpu()
-
-                        # Map results back to the original sample positions
-                        start_idx = 0
-                        for sample_start, sample_count in zip(layer_sample_starts, layer_sample_counts):
-                            end_idx = start_idx + sample_count
-                            self_influence[sample_start:sample_start + sample_count] += layer_influence[start_idx:end_idx]
-                            start_idx = end_idx
-
-                        # Clean up
-                        del device_grads, device_ifvps, cat_grads, cat_ifvps, layer_influence
-                        torch.cuda.empty_cache()
-
-                    except RuntimeError as e:
-                        logger.error(f"Error processing layer {layer_idx}: {e}")
-                        # Fall back to per-batch processing if we run out of memory
-                        for i, (grad, ifvp, sample_start, num_samples) in enumerate(
-                                zip(layer_grads, layer_ifvps, layer_sample_starts, layer_sample_counts)):
-                            try:
-                                # Move to device
-                                device_grad = self.strategy.move_to_device(grad)
-                                device_ifvp = self.strategy.move_to_device(ifvp)
-
-                                # Compute dot product
-                                batch_influence = torch.sum(device_grad * device_ifvp, dim=1).cpu()
-
-                                # Add to result
-                                self_influence[sample_start:sample_start + num_samples] += batch_influence
-
-                                # Clean up
-                                del device_grad, device_ifvp, batch_influence
-                                torch.cuda.empty_cache()
-                            except RuntimeError as e:
-                                logger.error(f"Error processing batch {i} in layer {layer_idx}: {e}")
-
-                    # Clean up layer data
-                    del layer_grads, layer_ifvps
+                    del grad, ifvp_tensor, layer_influence
                     torch.cuda.empty_cache()
 
-                # Force cleanup after processing all layers for this chunk
+        return self_influence
+
+    """
+Enhanced concrete implementation of the Influence Function Attributor with chunked I/O optimization.
+"""
+
+from typing import TYPE_CHECKING, Dict, List, Optional, Union, Tuple, Any
+import time
+import gc
+
+if TYPE_CHECKING:
+    from torch.utils.data import DataLoader
+
+import torch
+from tqdm import tqdm
+
+from .base import BaseAttributor, HessianOptions, ProfilingStats
+from ..utils.common import stable_inverse
+
+import logging
+logger = logging.getLogger(__name__)
+
+class IFAttributor(BaseAttributor):
+    """
+    Enhanced Influence function calculator with chunked I/O and optimized batch processing.
+    Uses deterministic chunking with flexible worker-based batch range allocation.
+    """
+
+    def compute_preconditioners(self, damping: Optional[float] = None) -> List[torch.Tensor]:
+        """Compute preconditioners (inverse Hessian) from gradients using chunked processing."""
+        logger.info(f"Computing preconditioners with hessian type: {self.hessian}")
+
+        if damping is None:
+            damping = self.damping
+
+        # Load batch information if needed
+        if not self.metadata.batch_info:
+            logger.info("Loading batch information from metadata...")
+            self.metadata._load_metadata_if_exists()
+
+        if not self.metadata.batch_info:
+            raise ValueError("No batch information found. Call cache_gradients first.")
+
+        # If hessian type is "none", no preconditioners needed
+        if self.hessian == "none":
+            logger.info("Hessian type is 'none', skipping preconditioner computation")
+            for layer_idx in range(len(self.layer_names)):
+                self.strategy.store_preconditioner(layer_idx, None)
+            return [None] * len(self.layer_names)
+
+        total_samples = self.metadata.get_total_samples()
+        logger.info(f"Computing preconditioners from {total_samples} total samples")
+
+        if self.profile and self.profiling_stats:
+            torch.cuda.synchronize(self.device)
+            start_time = time.time()
+
+        # Initialize Hessian accumulators for all layers
+        hessian_accumulators = [None] * len(self.layer_names)
+        sample_counts = [0] * len(self.layer_names)
+
+        # Use chunked dataloader for efficient processing
+        dataloader = self.strategy.create_gradient_dataloader(
+            data_type="gradients",
+            batch_size=4,
+            pin_memory=True
+        )
+
+        if dataloader:
+            logger.info("Processing gradients using chunked dataloader")
+
+            # Process chunks deterministically
+            for chunk_data in tqdm(dataloader, desc="Computing preconditioners from chunks"):
+                batch_indices, batch_dicts = chunk_data
+
+                # Process each layer across all batches in the chunk
+                for layer_idx in range(len(self.layer_names)):
+                    layer_gradients = []
+
+                    # Collect gradients for this layer from all batches in chunk
+                    for batch_dict in batch_dicts:
+                        if layer_idx not in batch_dict or batch_dict[layer_idx].numel() == 0:
+                            continue
+                        layer_gradients.append(batch_dict[layer_idx])
+
+                    if not layer_gradients:
+                        continue
+
+                    try:
+                        aggregated_gradients = torch.cat(layer_gradients, dim=0)
+                        aggregated_gradients = self.strategy.move_to_device(aggregated_gradients)
+
+                        sample_counts[layer_idx] += aggregated_gradients.shape[0]
+
+                        # Compute Hessian contribution efficiently
+                        batch_hessian = torch.matmul(aggregated_gradients.t(), aggregated_gradients)
+
+                        # Update the Hessian accumulator
+                        if hessian_accumulators[layer_idx] is None:
+                            hessian_accumulators[layer_idx] = batch_hessian
+                        else:
+                            hessian_accumulators[layer_idx] += batch_hessian
+
+                        del aggregated_gradients, batch_hessian
+
+                    except RuntimeError as e:
+                        if "out of memory" in str(e):
+                            logger.warning(f"GPU memory overflow for layer {layer_idx}, processing individually")
+                            for grad in layer_gradients:
+                                grad_device = self.strategy.move_to_device(grad)
+                                sample_counts[layer_idx] += grad_device.shape[0]
+                                small_hessian = torch.matmul(grad_device.t(), grad_device)
+                                if hessian_accumulators[layer_idx] is None:
+                                    hessian_accumulators[layer_idx] = small_hessian
+                                else:
+                                    hessian_accumulators[layer_idx] += small_hessian
+                                del grad_device, small_hessian
+                        else:
+                            raise
+
+                    del layer_gradients
+                    torch.cuda.empty_cache()
+
                 gc.collect()
                 torch.cuda.empty_cache()
-        else:
-            # Direct processing (no dataloader) - use chunked processing
-            logger.info("Processing batches directly...")
 
-            # Process in chunks for memory efficiency
-            chunk_size = dataloader_batch_size
-            for chunk_start in tqdm(range(0, len(batch_indices), chunk_size), desc="Processing batch chunks"):
-                chunk_end = min(chunk_start + chunk_size, len(batch_indices))
+        else:
+            # Fallback to direct processing
+            logger.info("Processing gradients using direct batch access")
+            batch_indices = sorted(self.metadata.batch_info.keys())
+
+            for chunk_start in tqdm(range(0, len(batch_indices), self.chunk_size),
+                                  desc="Computing preconditioners"):
+                chunk_end = min(chunk_start + self.chunk_size, len(batch_indices))
                 chunk_batch_indices = batch_indices[chunk_start:chunk_end]
 
-                # Process layers one at a time
                 for layer_idx in range(len(self.layer_names)):
-                    # Collect data for this layer
-                    layer_grads = []
-                    layer_ifvps = []
-                    layer_sample_starts = []
-                    layer_sample_counts = []
+                    layer_gradients = []
 
                     for batch_idx in chunk_batch_indices:
-                        if batch_idx not in batch_to_sample_mapping:
-                            continue
+                        batch_grads = self.strategy.retrieve_gradients(batch_idx, is_test=False)
+                        if layer_idx < len(batch_grads) and batch_grads[layer_idx].numel() > 0:
+                            layer_gradients.append(batch_grads[layer_idx])
 
-                        sample_start, sample_end = batch_to_sample_mapping[batch_idx]
-                        num_samples = sample_end - sample_start
-
-                        if num_samples <= 0:
-                            continue
-
-                        # Retrieve gradients and IFVP
-                        grad_list = self.strategy.retrieve_gradients(batch_idx, is_test=False)
-                        ifvp_list = self.strategy.retrieve_ifvp(batch_idx)
-
-                        # Skip if layer is missing or empty
-                        if (layer_idx >= len(grad_list) or grad_list[layer_idx].numel() == 0 or
-                            layer_idx >= len(ifvp_list) or ifvp_list[layer_idx].numel() == 0):
-                            continue
-
-                        # Add to collection
-                        layer_grads.append(grad_list[layer_idx])
-                        layer_ifvps.append(ifvp_list[layer_idx])
-                        layer_sample_starts.append(sample_start)
-                        layer_sample_counts.append(num_samples)
-
-                    # Skip if no data
-                    if not layer_grads:
+                    if not layer_gradients:
                         continue
 
-                    # Process all batches for this layer together
-                    try:
-                        cat_grads = torch.cat(layer_grads, dim=0)
-                        cat_ifvps = torch.cat(layer_ifvps, dim=0)
+                    # Process layer gradients in fixed sub-batches
+                    grad_batch_size = 50
+                    for i in range(0, len(layer_gradients), grad_batch_size):
+                        batch_grads = layer_gradients[i:i+grad_batch_size]
 
-                        # Move to device
-                        device_grads = self.strategy.move_to_device(cat_grads)
-                        device_ifvps = self.strategy.move_to_device(cat_ifvps)
+                        try:
+                            combined_gradients = torch.cat(batch_grads, dim=0)
+                            combined_gradients = self.strategy.move_to_device(combined_gradients)
 
-                        # Compute dot products efficiently
-                        layer_influence = torch.sum(device_grads * device_ifvps, dim=1).cpu()
+                            batch_hessian = torch.matmul(combined_gradients.t(), combined_gradients)
 
-                        # Map results back
-                        start_idx = 0
-                        for sample_start, sample_count in zip(layer_sample_starts, layer_sample_counts):
-                            end_idx = start_idx + sample_count
-                            self_influence[sample_start:sample_start + sample_count] += layer_influence[start_idx:end_idx]
-                            start_idx = end_idx
+                            if hessian_accumulators[layer_idx] is None:
+                                hessian_accumulators[layer_idx] = batch_hessian
+                            else:
+                                hessian_accumulators[layer_idx] += batch_hessian
 
-                        # Clean up
-                        del device_grads, device_ifvps, cat_grads, cat_ifvps, layer_influence
-                    except RuntimeError as e:
-                        # Fallback to individual batch processing
-                        logger.error(f"Error processing layer {layer_idx}: {e}")
-                        for i, (grad, ifvp, sample_start, num_samples) in enumerate(
-                                zip(layer_grads, layer_ifvps, layer_sample_starts, layer_sample_counts)):
-                            try:
-                                device_grad = self.strategy.move_to_device(grad)
-                                device_ifvp = self.strategy.move_to_device(ifvp)
-                                batch_influence = torch.sum(device_grad * device_ifvp, dim=1).cpu()
-                                self_influence[sample_start:sample_start + num_samples] += batch_influence
-                                del device_grad, device_ifvp, batch_influence
-                            except RuntimeError as e:
-                                logger.error(f"Error processing batch {i} in layer {layer_idx}: {e}")
+                            sample_counts[layer_idx] += combined_gradients.shape[0]
 
-                    # Clean up
-                    del layer_grads, layer_ifvps
-                    torch.cuda.empty_cache()
+                            del combined_gradients, batch_hessian
 
-                # Force cleanup
+                        except RuntimeError as e:
+                            if "out of memory" in str(e):
+                                for grad in batch_grads:
+                                    grad_device = self.strategy.move_to_device(grad)
+                                    sample_counts[layer_idx] += grad_device.shape[0]
+                                    small_hessian = torch.matmul(grad_device.t(), grad_device)
+                                    if hessian_accumulators[layer_idx] is None:
+                                        hessian_accumulators[layer_idx] = small_hessian
+                                    else:
+                                        hessian_accumulators[layer_idx] += small_hessian
+                                    del grad_device, small_hessian
+                            else:
+                                raise
+
+                        torch.cuda.empty_cache()
+
                 gc.collect()
                 torch.cuda.empty_cache()
+
+        # Compute preconditioners from accumulated Hessians
+        preconditioners = [None] * len(self.layer_names)
+
+        for layer_idx in tqdm(range(len(self.layer_names)), desc="Computing inverses"):
+            hessian_accumulator = hessian_accumulators[layer_idx]
+            sample_count = sample_counts[layer_idx]
+
+            if hessian_accumulator is not None and sample_count > 0:
+                # Normalize by total number of samples
+                hessian = hessian_accumulator / sample_count
+
+                # Compute inverse based on Hessian type
+                if self.hessian == "raw":
+                    precond = stable_inverse(hessian, damping=damping)
+                    preconditioners[layer_idx] = precond
+                    self.strategy.store_preconditioner(layer_idx, precond)
+                    del precond
+
+                elif self.hessian in ["kfac", "ekfac"]:
+                    preconditioners[layer_idx] = hessian
+                    self.strategy.store_preconditioner(layer_idx, hessian)
+
+                del hessian_accumulator, hessian
+                torch.cuda.empty_cache()
+
+        if self.profile and self.profiling_stats:
+            torch.cuda.synchronize(self.device)
+            self.profiling_stats.precondition += time.time() - start_time
+
+        self.strategy.wait_for_async_operations()
+
+        if self.profile and self.profiling_stats:
+            return (preconditioners, self.profiling_stats)
+        else:
+            return preconditioners
+
+    def compute_ifvp(self, worker: str = "0/1") -> Dict[int, List[torch.Tensor]]:
+        """
+        Compute inverse-Hessian-vector products (IFVP) using chunked processing.
+        Automatically determines batch range from worker specification and metadata.
+        """
+        logger.info(f"Worker {worker}: Computing IFVP with chunked processing")
+
+        # Clear IFVP cache first to avoid conflicts with previous computations
+        # self.clear_ifvp_cache()
+
+        # Load batch information if needed
+        if not self.metadata.batch_info:
+            logger.info("Loading batch information from metadata...")
+            self.metadata._load_metadata_if_exists()
+
+        if not self.metadata.batch_info:
+            raise ValueError("No batch information found. Call cache_gradients first or ensure metadata exists.")
+
+        # Calculate total batches from metadata instead of dataloader
+        batch_indices = sorted(self.metadata.batch_info.keys())
+        if not batch_indices:
+            raise ValueError("No batches found in metadata")
+
+        # Calculate total batches based on the range of batch indices in metadata
+        min_batch_idx = min(batch_indices)
+        max_batch_idx = max(batch_indices)
+        total_batches = max_batch_idx + 1  # Assuming batch indices start from 0
+
+        logger.info(f"Found {len(batch_indices)} batches in metadata (range: {min_batch_idx}-{max_batch_idx})")
+
+        # Calculate worker batch range using metadata-derived total
+        start_batch, end_batch = self._get_worker_batch_range(total_batches, worker)
+
+        # Start batch range processing for disk offload
+        if self.offload == "disk" and hasattr(self.strategy, 'start_batch_range_processing'):
+            self.strategy.start_batch_range_processing(start_batch, end_batch)
+
+        logger.info(f"Processing batch range: [{start_batch}, {end_batch}) ({end_batch - start_batch} batches)")
+
+        # Return raw gradients if Hessian type is "none"
+        if self.hessian == "none":
+            logger.info("Using raw gradients as IFVP since hessian type is 'none'")
+            return self._copy_gradients_to_ifvp(start_batch, end_batch)
+
+        if self.profile and self.profiling_stats:
+            torch.cuda.synchronize(self.device)
+            start_time = time.time()
+
+        # Get batch indices for this worker from metadata
+        worker_batch_indices = [idx for idx in batch_indices
+                            if start_batch <= idx < end_batch]
+
+        if not worker_batch_indices:
+            logger.warning(f"No batches found in range [{start_batch}, {end_batch}) for worker {worker}")
+            return {}
+
+        logger.info(f"Processing {len(worker_batch_indices)} batches for this worker: {worker_batch_indices[:5]}{'...' if len(worker_batch_indices) > 5 else ''}")
+
+        # Pre-load all preconditioners
+        logger.info("Pre-loading preconditioners for all layers")
+        preconditioners = []
+        for layer_idx in range(len(self.layer_names)):
+            precond = self.strategy.retrieve_preconditioner(layer_idx)
+            preconditioners.append(precond)
+
+        valid_preconditioners = sum(1 for p in preconditioners if p is not None)
+        logger.info(f"Loaded {valid_preconditioners} preconditioners out of {len(self.layer_names)} layers")
+
+        # Use chunked dataloader for efficient processing
+        dataloader = self.strategy.create_gradient_dataloader(
+            data_type="gradients",
+            batch_size=2,
+            pin_memory=True,
+            batch_range=(start_batch, end_batch)
+        )
+
+        result_dict = {}
+
+        if dataloader:
+            logger.info("Processing IFVP using chunked dataloader")
+
+            # Process chunks deterministically
+            for chunk_data in tqdm(dataloader, desc="Computing IFVP from chunks"):
+                batch_indices_chunk, batch_grad_dicts = chunk_data
+                batch_ifvp_dicts = [{} for _ in range(len(batch_indices_chunk))]
+
+                # Process each layer across all batches in the chunk
+                for layer_idx in range(len(self.layer_names)):
+                    precond = preconditioners[layer_idx]
+                    if precond is None:
+                        for i in range(len(batch_indices_chunk)):
+                            batch_ifvp_dicts[i][layer_idx] = torch.tensor([])
+                        continue
+
+                    # Collect gradients and track their batch positions
+                    layer_gradients = []
+                    gradient_batch_map = []
+
+                    for batch_dict_idx, batch_grad_dict in enumerate(batch_grad_dicts):
+                        if layer_idx not in batch_grad_dict or batch_grad_dict[layer_idx].numel() == 0:
+                            batch_ifvp_dicts[batch_dict_idx][layer_idx] = torch.tensor([])
+                            continue
+
+                        layer_gradients.append(batch_grad_dict[layer_idx])
+                        gradient_batch_map.append(batch_dict_idx)
+
+                    if not layer_gradients:
+                        continue
+
+                    try:
+                        # Move to device and concatenate for efficient processing
+                        device_gradients = [self.strategy.move_to_device(grad) for grad in layer_gradients]
+                        original_shapes = [grad.shape[0] for grad in device_gradients]
+                        concatenated_gradients = torch.cat(device_gradients, dim=0)
+
+                        # Move preconditioner to device and ensure type compatibility
+                        device_precond = self.strategy.move_to_device(precond)
+                        device_precond = device_precond.to(dtype=concatenated_gradients.dtype)
+
+                        # Compute IFVP efficiently for all gradients at once
+                        ifvp_result = torch.matmul(device_precond, concatenated_gradients.t()).t()
+
+                        # Split results back to individual batches
+                        split_results = torch.split(ifvp_result, original_shapes)
+
+                        # Distribute results back to batch dictionaries
+                        for i, (split_result, dict_idx) in enumerate(zip(split_results, gradient_batch_map)):
+                            batch_ifvp_dicts[dict_idx][layer_idx] = self.strategy.move_from_device(split_result)
+
+                        del device_gradients, concatenated_gradients, ifvp_result, split_results, device_precond
+
+                    except RuntimeError as e:
+                        if "out of memory" in str(e):
+                            logger.warning(f"GPU memory overflow for layer {layer_idx}, processing individually")
+                            for grad, dict_idx in zip(layer_gradients, gradient_batch_map):
+                                device_grad = self.strategy.move_to_device(grad)
+                                device_precond = self.strategy.move_to_device(precond)
+                                device_precond = device_precond.to(dtype=device_grad.dtype)
+                                ifvp = torch.matmul(device_precond, device_grad.t()).t()
+                                batch_ifvp_dicts[dict_idx][layer_idx] = self.strategy.move_from_device(ifvp)
+                                del device_grad, device_precond, ifvp
+                        else:
+                            raise
+
+                    torch.cuda.empty_cache()
+
+                # Store computed IFVP results
+                for i, (batch_idx, batch_ifvp_dict) in enumerate(zip(batch_indices_chunk, batch_ifvp_dicts)):
+                    # Convert to list for consistent interface
+                    batch_ifvp_list = []
+                    for layer_idx in range(len(self.layer_names)):
+                        if layer_idx in batch_ifvp_dict:
+                            batch_ifvp_list.append(batch_ifvp_dict[layer_idx])
+                        else:
+                            batch_ifvp_list.append(torch.tensor([]))
+
+                    # Store in strategy
+                    self.strategy.store_ifvp(batch_idx, batch_ifvp_list)
+                    result_dict[batch_idx] = batch_ifvp_list
+
+        else:
+            # Fallback to direct processing using metadata batch indices
+            logger.info("Processing IFVP using direct batch access")
+
+            for chunk_start in tqdm(range(0, len(worker_batch_indices), self.chunk_size),
+                                desc="Computing IFVP"):
+                chunk_end = min(chunk_start + self.chunk_size, len(worker_batch_indices))
+                chunk_batch_indices = worker_batch_indices[chunk_start:chunk_end]
+
+                for batch_idx in chunk_batch_indices:
+                    batch_ifvp = [torch.tensor([]) for _ in range(len(self.layer_names))]
+                    batch_grads = self.strategy.retrieve_gradients(batch_idx, is_test=False)
+
+                    # Process each layer
+                    for layer_idx in range(len(self.layer_names)):
+                        if (layer_idx >= len(batch_grads) or
+                            batch_grads[layer_idx].numel() == 0 or
+                            preconditioners[layer_idx] is None):
+                            continue
+
+                        # Compute IFVP
+                        grad = self.strategy.move_to_device(batch_grads[layer_idx])
+                        device_precond = self.strategy.move_to_device(preconditioners[layer_idx])
+                        device_precond = device_precond.to(dtype=grad.dtype)
+
+                        ifvp = torch.matmul(device_precond, grad.t()).t()
+                        batch_ifvp[layer_idx] = self.strategy.move_from_device(ifvp)
+
+                        del grad, ifvp, device_precond
+                        torch.cuda.empty_cache()
+
+                    # Store results
+                    self.strategy.store_ifvp(batch_idx, batch_ifvp)
+                    result_dict[batch_idx] = batch_ifvp
+
+        # Finalize batch range processing for disk offload
+        if self.offload == "disk" and hasattr(self.strategy, 'finish_batch_range_processing'):
+            self.strategy.finish_batch_range_processing()
+
+        # Clean up preloaded preconditioners
+        del preconditioners
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        self.strategy.wait_for_async_operations()
+
+        if self.profile and self.profiling_stats:
+            torch.cuda.synchronize(self.device)
+            self.profiling_stats.precondition += time.time() - start_time
+            return (result_dict, self.profiling_stats)
+        else:
+            return result_dict
+
+    def _copy_gradients_to_ifvp(self, start_batch: int, end_batch: int) -> Dict[int, List[torch.Tensor]]:
+        """Copy gradients to IFVP storage when hessian type is 'none'."""
+        # Use metadata to get actual batch indices instead of assuming continuous range
+        batch_indices = [idx for idx in self.metadata.batch_info.keys()
+                        if start_batch <= idx < end_batch]
+
+        result_dict = {}
+        for chunk_start in tqdm(range(0, len(batch_indices), self.chunk_size),
+                            desc="Copying gradients to IFVP"):
+            chunk_end = min(chunk_start + self.chunk_size, len(batch_indices))
+            chunk_batch_indices = batch_indices[chunk_start:chunk_end]
+
+            for batch_idx in chunk_batch_indices:
+                gradients = self.strategy.retrieve_gradients(batch_idx, is_test=False)
+                self.strategy.store_ifvp(batch_idx, gradients)
+                result_dict[batch_idx] = None
+
+        return result_dict
+
+    def compute_self_influence(self, worker: str = "0/1") -> torch.Tensor:
+        """Compute self-influence scores using optimized chunked processing."""
+        logger.info(f"Worker {worker}: Computing self-influence scores")
+
+        # Load batch information if needed
+        if not self.metadata.batch_info:
+            logger.info("Loading batch information from metadata...")
+            self.metadata._load_metadata_if_exists()
+
+        if not self.metadata.batch_info:
+            raise ValueError("No batch information found. Call cache_gradients first.")
+
+        # Make sure IFVP is computed
+        if not self.strategy.has_ifvp():
+            logger.info("IFVP not found, computing it now...")
+            self.compute_ifvp(worker=worker)
+
+        # Get batch mapping and worker range
+        batch_to_sample_mapping = self.metadata.get_batch_to_sample_mapping()
+        total_samples = self.metadata.get_total_samples()
+        self_influence = torch.zeros(total_samples, device="cpu")
+
+        # Get worker batch range
+        total_batches = len(self.full_train_dataloader)
+        start_batch, end_batch = self._get_worker_batch_range(total_batches, worker)
+
+        batch_indices = [idx for idx in self.metadata.batch_info.keys()
+                        if start_batch <= idx < end_batch]
+
+        # Process batches in fixed chunks
+        for chunk_start in tqdm(range(0, len(batch_indices), self.chunk_size),
+                              desc="Computing self-influence"):
+            chunk_end = min(chunk_start + self.chunk_size, len(batch_indices))
+            chunk_batch_indices = batch_indices[chunk_start:chunk_end]
+
+            for batch_idx in chunk_batch_indices:
+                if batch_idx not in batch_to_sample_mapping:
+                    continue
+
+                sample_start, sample_end = batch_to_sample_mapping[batch_idx]
+                num_samples = sample_end - sample_start
+
+                if num_samples <= 0:
+                    continue
+
+                # Load gradients and IFVP
+                gradients = self.strategy.retrieve_gradients(batch_idx, is_test=False)
+                ifvp = self.strategy.retrieve_ifvp(batch_idx)
+
+                # Compute self-influence for each layer
+                for layer_idx in range(len(self.layer_names)):
+                    if (layer_idx >= len(gradients) or gradients[layer_idx].numel() == 0 or
+                        layer_idx >= len(ifvp) or ifvp[layer_idx].numel() == 0):
+                        continue
+
+                    grad = self.strategy.move_to_device(gradients[layer_idx])
+                    ifvp_tensor = self.strategy.move_to_device(ifvp[layer_idx])
+
+                    # Compute dot product
+                    layer_influence = torch.sum(grad * ifvp_tensor, dim=1).cpu()
+                    self_influence[sample_start:sample_start + num_samples] += layer_influence
+
+                    del grad, ifvp_tensor, layer_influence
+                    torch.cuda.empty_cache()
 
         return self_influence
 
@@ -741,22 +1042,9 @@ class IFAttributor(BaseAttributor):
         train_dataloader: Optional['DataLoader'] = None,
         use_cached_ifvp: bool = True
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ProfilingStats]]:
-        """
-        Attribute influence of training examples on test examples.
+        """Attribute influence using optimized chunked processing with efficient data loading."""
+        logger.info("Computing influence attribution")
 
-        Optimized by:
-        1. Processing dataloader chunks
-        2. Processing each layer separately
-        3. Concatenating all batches in a chunk for each layer
-
-        Args:
-            test_dataloader: DataLoader for test data
-            train_dataloader: Optional DataLoader for training data if not cached
-            use_cached_ifvp: Whether to use cached IFVP
-
-        Returns:
-            Tensor of influence scores (and profiling stats if profile=True)
-        """
         # Load batch information if needed
         if not self.metadata.batch_info:
             logger.info("Loading batch information from metadata...")
@@ -765,7 +1053,6 @@ class IFAttributor(BaseAttributor):
         if not self.metadata.batch_info:
             if train_dataloader is None:
                 raise ValueError("No batch information found and no training dataloader provided.")
-            # Cache gradients if needed
             logger.info("No batch metadata found. Caching gradients from provided dataloader...")
             self.cache_gradients(train_dataloader)
 
@@ -780,278 +1067,168 @@ class IFAttributor(BaseAttributor):
             logger.info("Computing IFVP")
             self.compute_ifvp()
 
-        # Compute test gradients
-        logger.info("Computing test gradients")
-        test_grads_dict, _ = self._compute_gradients(
+        # Compute and store ALL test gradients in memory (test data is usually small)
+        logger.info("Computing and caching all test gradients in memory")
+        test_grads_dict, _ = self._compute_gradients_chunked(
             test_dataloader,
             is_test=True,
-            batch_range=(0, len(test_dataloader))
+            worker="0/1"  # Always process all test data
         )
 
-        # Ensure we clear any temp tensors
-        torch.cuda.empty_cache()
-
-        # Get batch mapping and determine total samples
-        batch_to_sample_mapping = self.metadata.get_batch_to_sample_mapping()
-        total_train_samples = self.metadata.get_total_samples()
-
-        # Process test batch indices and create test sample mapping
-        logger.info("Organizing test data...")
+        # Organize test data efficiently
+        logger.info("Organizing test data for efficient processing")
         test_batch_indices = sorted(test_grads_dict.keys())
-        test_sample_ranges = {}  # Maps batch_idx -> (start_idx, num_samples)
-        current_index = 0
+        all_test_gradients = []  # List of (layer_idx, tensor) for all test samples
+        test_sample_mapping = {}  # Maps test_batch_idx to (start_idx, end_idx) in flattened array
+        current_test_idx = 0
 
-        # Create test sample mapping
+        # Flatten all test gradients by layer for efficient processing
+        num_test_samples = 0
         for test_batch_idx in test_batch_indices:
             batch_grads = test_grads_dict[test_batch_idx]
             batch_size = 0
 
-            # Find first non-empty layer to determine batch size
+            # Find batch size from first non-empty layer
             for layer_grads in batch_grads:
                 if layer_grads.numel() > 0:
                     batch_size = layer_grads.shape[0]
                     break
 
-            if batch_size == 0:
-                logger.warning(f"Empty batch: test batch {test_batch_idx}")
-                continue
+            if batch_size > 0:
+                test_sample_mapping[test_batch_idx] = (current_test_idx, current_test_idx + batch_size)
+                current_test_idx += batch_size
+                num_test_samples += batch_size
 
-            test_sample_ranges[test_batch_idx] = (current_index, batch_size)
-            current_index += batch_size
+        logger.info(f"Total test samples: {num_test_samples}")
 
-        # Initialize influence scores tensor
-        num_test = current_index  # Total number of test examples
-        IF_score = torch.zeros(total_train_samples, num_test, device="cpu")
+        # Pre-organize test gradients by layer for efficient matrix operations
+        test_gradients_by_layer = []
+        for layer_idx in range(len(self.layer_names)):
+            layer_test_grads = []
 
-        # Remove hooks after collecting test gradients
-        if self.hook_manager:
-            self.hook_manager.remove_hooks()
-            self.hook_manager = None
+            for test_batch_idx in test_batch_indices:
+                batch_grads = test_grads_dict[test_batch_idx]
+                if layer_idx < len(batch_grads) and batch_grads[layer_idx].numel() > 0:
+                    layer_test_grads.append(batch_grads[layer_idx])
 
-        # Create train IFVP dataloader with smaller batch size
-        train_batch_size = 16
-        ifvp_dataloader = self.strategy.create_gradient_dataloader(
+            if layer_test_grads:
+                # Concatenate all test gradients for this layer
+                concatenated_test_grad = torch.cat(layer_test_grads, dim=0)
+                test_gradients_by_layer.append(concatenated_test_grad)
+            else:
+                test_gradients_by_layer.append(None)
+
+        # Get batch mappings
+        batch_to_sample_mapping = self.metadata.get_batch_to_sample_mapping()
+        total_train_samples = self.metadata.get_total_samples()
+
+        # Initialize influence score matrix
+        IF_score = torch.zeros(total_train_samples, num_test_samples, device="cpu")
+
+        # Create efficient dataloader for training IFVP data
+        logger.info("Creating efficient dataloader for training data")
+        train_ifvp_dataloader = self.strategy.create_gradient_dataloader(
             data_type="ifvp",
-            batch_size=train_batch_size,
-            num_workers=4,
+            batch_size=4,  # Larger batch size for efficiency
             pin_memory=True
         )
 
-        # Process one layer at a time
-        logger.info("Processing influence scores layer by layer...")
-        for layer_idx in tqdm(range(len(self.layer_names)), desc="Processing layers"):
-            # First collect all test gradients for this layer
-            test_layer_grads = []
-            test_indices = []
+        if train_ifvp_dataloader:
+            logger.info("Processing attribution using chunked IFVP dataloader")
 
-            for test_batch_idx in test_batch_indices:
-                if test_batch_idx not in test_sample_ranges:
-                    continue
+            # Process training data in chunks using dataloader
+            for chunk_data in tqdm(train_ifvp_dataloader, desc="Computing attribution from chunks"):
+                train_batch_indices_chunk, train_ifvp_dicts = chunk_data
 
-                # Skip if layer doesn't exist or is empty
-                if (layer_idx >= len(test_grads_dict[test_batch_idx]) or
-                    test_grads_dict[test_batch_idx][layer_idx].numel() == 0):
-                    continue
-
-                start_idx, num_samples = test_sample_ranges[test_batch_idx]
-                grad = test_grads_dict[test_batch_idx][layer_idx]
-
-                # Add to collection
-                test_layer_grads.append(grad)
-                test_indices.extend(range(start_idx, start_idx + num_samples))
-
-            # Skip layer if no test gradients
-            if not test_layer_grads:
-                continue
-
-            # Concatenate all test gradients for this layer
-            cat_test_grads = torch.cat(test_layer_grads, dim=0)
-            device_test_grads = self.strategy.move_to_device(cat_test_grads)
-
-            # Process train batches in chunks
-            if ifvp_dataloader:
-                # Process using dataloader
-                for train_batch_indices, train_ifvp_dicts in tqdm(
-                    ifvp_dataloader,
-                    desc=f"Processing layer {layer_idx}",
-                    leave=False
-                ):
-                    # Skip empty batches
-                    if not train_batch_indices:
+                # Process each layer with concatenated chunk data
+                for layer_idx in range(len(self.layer_names)):
+                    if test_gradients_by_layer[layer_idx] is None:
                         continue
 
-                    # Collect train IFVP data for this chunk
-                    chunk_ifvps = []  # List of (ifvp, train_start, train_count)
+                    # Collect all IFVP tensors and their sample ranges for this layer
+                    layer_ifvp_tensors = []
+                    sample_ranges = []
 
-                    for batch_pos, train_batch_idx in enumerate(train_batch_indices):
-                        if train_batch_idx not in batch_to_sample_mapping:
-                            continue
+                    for batch_idx, train_batch_ifvp_dict in zip(train_batch_indices_chunk, train_ifvp_dicts):
+                        if (batch_idx in batch_to_sample_mapping and
+                            layer_idx in train_batch_ifvp_dict and
+                            train_batch_ifvp_dict[layer_idx].numel() > 0):
 
-                        # Get sample range
-                        train_start, train_end = batch_to_sample_mapping[train_batch_idx]
-                        train_count = train_end - train_start
+                            train_start, train_end = batch_to_sample_mapping[batch_idx]
+                            if train_end > train_start:
+                                layer_ifvp_tensors.append(train_batch_ifvp_dict[layer_idx])
+                                sample_ranges.append((train_start, train_end))
 
-                        # Skip empty batches
-                        if train_count <= 0:
-                            continue
-
-                        # Skip if layer doesn't exist or is empty
-                        if (layer_idx not in train_ifvp_dicts[batch_pos] or
-                            train_ifvp_dicts[batch_pos][layer_idx].numel() == 0):
-                            continue
-
-                        ifvp = train_ifvp_dicts[batch_pos][layer_idx]
-
-                        # Add to collection
-                        chunk_ifvps.append((ifvp, train_start, train_count))
-
-                    # Skip if no valid train data
-                    if not chunk_ifvps:
+                    if not layer_ifvp_tensors:
                         continue
 
-                    # Process the entire chunk for this layer
-                    try:
-                        # Concatenate all IFVP data
-                        cat_ifvps = []
-                        train_ranges = []  # List of (train_start, train_count)
+                    # Concatenate all IFVP tensors for this layer in the chunk
+                    concatenated_ifvp = torch.cat(layer_ifvp_tensors, dim=0)
+                    concatenated_ifvp = self.strategy.move_to_device(concatenated_ifvp)
+                    test_grad_tensor = self.strategy.move_to_device(test_gradients_by_layer[layer_idx])
 
-                        for ifvp, train_start, train_count in chunk_ifvps:
-                            cat_ifvps.append(ifvp)
-                            train_ranges.append((train_start, train_count))
+                    # Single large matrix multiplication for the entire chunk and layer
+                    chunk_influence_matrix = torch.matmul(concatenated_ifvp, test_grad_tensor.t()).cpu()
 
-                        # Concatenate and move to device
-                        cat_ifvps = torch.cat(cat_ifvps, dim=0)
-                        device_ifvps = self.strategy.move_to_device(cat_ifvps)
+                    # Distribute results back to the correct positions in IF_score
+                    current_row = 0
+                    for train_start, train_end in sample_ranges:
+                        batch_size = train_end - train_start
+                        IF_score[train_start:train_end, :] += chunk_influence_matrix[current_row:current_row + batch_size, :]
+                        current_row += batch_size
 
-                        # Compute influence matrix: (train_samples x test_samples)
-                        influence_matrix = torch.matmul(device_ifvps, device_test_grads.t()).cpu()
-
-                        # Map results back to original positions
-                        train_pos = 0
-                        for train_start, train_count in train_ranges:
-                            # For each test sample
-                            for test_idx, orig_test_idx in enumerate(test_indices):
-                                # Add influence scores
-                                IF_score[train_start:train_start + train_count, orig_test_idx] += influence_matrix[
-                                    train_pos:train_pos + train_count, test_idx
-                                ]
-                            train_pos += train_count
-
-                        # Clean up
-                        del device_ifvps, influence_matrix, cat_ifvps
-
-                    except RuntimeError as e:
-                        logger.error(f"Error processing chunk for layer {layer_idx}: {e}")
-                        # Fall back to individual batch processing
-                        for ifvp, train_start, train_count in chunk_ifvps:
-                            try:
-                                device_ifvp = self.strategy.move_to_device(ifvp)
-                                influence = torch.matmul(device_ifvp, device_test_grads.t()).cpu()
-                                for test_idx, orig_test_idx in enumerate(test_indices):
-                                    IF_score[train_start:train_start + train_count, orig_test_idx] += influence[:, test_idx]
-                                del device_ifvp, influence
-                            except RuntimeError as e:
-                                logger.error(f"Error processing individual batch: {e}")
-
-                    # Force cleanup
-                    torch.cuda.empty_cache()
-            else:
-                # Direct processing without dataloader - chunked approach
-                logger.info(f"Processing layer {layer_idx} without dataloader")
-
-                # Process train batches in chunks
-                train_batch_indices = sorted(self.metadata.batch_info.keys())
-                chunk_size = train_batch_size
-                for chunk_start in tqdm(
-                    range(0, len(train_batch_indices), chunk_size),
-                    desc=f"Processing layer {layer_idx} chunks",
-                    leave=False
-                ):
-                    chunk_end = min(chunk_start + chunk_size, len(train_batch_indices))
-                    chunk_batch_indices = train_batch_indices[chunk_start:chunk_end]
-
-                    # Collect IFVP data for this chunk
-                    chunk_ifvps = []  # List of (ifvp, train_start, train_count)
-
-                    for train_batch_idx in chunk_batch_indices:
-                        if train_batch_idx not in batch_to_sample_mapping:
-                            continue
-
-                        # Get sample range
-                        train_start, train_end = batch_to_sample_mapping[train_batch_idx]
-                        train_count = train_end - train_start
-
-                        # Skip empty batches
-                        if train_count <= 0:
-                            continue
-
-                        # Retrieve IFVP
-                        train_ifvp_list = self.strategy.retrieve_ifvp(train_batch_idx)
-
-                        # Skip if layer doesn't exist or is empty
-                        if (layer_idx >= len(train_ifvp_list) or
-                            train_ifvp_list[layer_idx].numel() == 0):
-                            continue
-
-                        ifvp = train_ifvp_list[layer_idx]
-
-                        # Add to collection
-                        chunk_ifvps.append((ifvp, train_start, train_count))
-
-                    # Skip if no valid data
-                    if not chunk_ifvps:
-                        continue
-
-                    # Process the chunk
-                    try:
-                        # Concatenate all IFVP data
-                        cat_ifvps = []
-                        train_ranges = []
-
-                        for ifvp, train_start, train_count in chunk_ifvps:
-                            cat_ifvps.append(ifvp)
-                            train_ranges.append((train_start, train_count))
-
-                        cat_ifvps = torch.cat(cat_ifvps, dim=0)
-                        device_ifvps = self.strategy.move_to_device(cat_ifvps)
-
-                        # Compute influence matrix efficiently
-                        influence_matrix = torch.matmul(device_ifvps, device_test_grads.t()).cpu()
-
-                        # Map results back
-                        train_pos = 0
-                        for train_start, train_count in train_ranges:
-                            for test_idx, orig_test_idx in enumerate(test_indices):
-                                IF_score[train_start:train_start + train_count, orig_test_idx] += influence_matrix[
-                                    train_pos:train_pos + train_count, test_idx
-                                ]
-                            train_pos += train_count
-
-                        # Clean up
-                        del device_ifvps, influence_matrix, cat_ifvps
-
-                    except RuntimeError as e:
-                        # Fall back to per-batch processing
-                        logger.error(f"Error processing chunk for layer {layer_idx}: {e}")
-                        for ifvp, train_start, train_count in chunk_ifvps:
-                            try:
-                                device_ifvp = self.strategy.move_to_device(ifvp)
-                                influence = torch.matmul(device_ifvp, device_test_grads.t()).cpu()
-                                for test_idx, orig_test_idx in enumerate(test_indices):
-                                    IF_score[train_start:train_start + train_count, orig_test_idx] += influence[:, test_idx]
-                                del device_ifvp, influence
-                            except RuntimeError as e:
-                                logger.error(f"Error processing individual batch: {e}")
-
-                    # Force cleanup
+                    del concatenated_ifvp, test_grad_tensor, chunk_influence_matrix
                     torch.cuda.empty_cache()
 
-            # Clean up test gradients for this layer
-            del device_test_grads, cat_test_grads
-            gc.collect()
-            torch.cuda.empty_cache()
+        else:
+            # Fallback to direct processing (less efficient but still better than original)
+            logger.info("Processing attribution using direct batch access")
+            train_batch_indices = sorted(self.metadata.batch_info.keys())
 
-        # Return result
+            for train_chunk_start in tqdm(range(0, len(train_batch_indices), self.chunk_size),
+                                        desc="Computing attribution"):
+                train_chunk_end = min(train_chunk_start + self.chunk_size, len(train_batch_indices))
+                train_chunk_batch_indices = train_batch_indices[train_chunk_start:train_chunk_end]
+
+                for train_batch_idx in train_chunk_batch_indices:
+                    if train_batch_idx not in batch_to_sample_mapping:
+                        continue
+
+                    train_start, train_end = batch_to_sample_mapping[train_batch_idx]
+                    train_count = train_end - train_start
+
+                    if train_count <= 0:
+                        continue
+
+                    # Load training IFVP once for this batch
+                    train_ifvp = self.strategy.retrieve_ifvp(train_batch_idx)
+
+                    # Process each layer efficiently
+                    for layer_idx in range(len(self.layer_names)):
+                        if (layer_idx >= len(train_ifvp) or train_ifvp[layer_idx].numel() == 0 or
+                            test_gradients_by_layer[layer_idx] is None):
+                            continue
+
+                        # Move data to device
+                        train_ifvp_tensor = self.strategy.move_to_device(train_ifvp[layer_idx])
+                        test_grad_tensor = self.strategy.move_to_device(test_gradients_by_layer[layer_idx])
+
+                        # Efficient matrix multiplication for all test samples at once
+                        influence_matrix = torch.matmul(train_ifvp_tensor, test_grad_tensor.t()).cpu()
+
+                        # Add to influence score matrix
+                        IF_score[train_start:train_end, :] += influence_matrix
+
+                        del train_ifvp_tensor, test_grad_tensor, influence_matrix
+                        torch.cuda.empty_cache()
+
+        # Clean up test gradients from memory
+        del test_grads_dict, test_gradients_by_layer
+        gc.collect()
+        torch.cuda.empty_cache()
+
+        logger.info(f"Attribution computation completed. Result shape: {IF_score.shape}")
+
         if self.profile and self.profiling_stats:
             return (IF_score, self.profiling_stats)
         else:

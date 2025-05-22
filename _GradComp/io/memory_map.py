@@ -1,325 +1,222 @@
 """
-Memory-mapped file operations for efficient tensor storage and access.
+Enhanced Memory-mapped file operations with chunking support for efficient tensor storage and access.
 """
 
+# Standard library imports
 import json
 import os
-import numpy as np
-import torch
+import logging
 from contextlib import contextmanager
 from typing import Dict, List, Tuple, Any, Optional
-import logging
+
+# Third-party imports
+import numpy as np
+import torch
 
 # Configure logger
 logger = logging.getLogger(__name__)
 
-class MemoryMapHandler:
+class ChunkedMemoryMapHandler:
     """
-    Handler for memory-mapped file operations to efficiently read and write tensor data.
-    Uses memory-mapped binary files for tensor data and JSON files for metadata.
+    Enhanced handler for memory-mapped file operations with chunking support.
+    Uses larger chunks to reduce I/O overhead and file handle count.
     """
 
-    # @staticmethod
-    # def write(save_path: str, filename: str, batch_idx: int,
-    #           tensors: Dict[int, torch.Tensor], dtype: str = 'float32') -> None:
-    #     """
-    #     Write tensors to a memory-mapped file with metadata.
-
-    #     Args:
-    #         save_path: Directory to save files
-    #         filename: Base name for the memory-mapped file
-    #         batch_idx: Batch index for metadata
-    #         tensors: Dictionary mapping layer indices to tensors
-    #         dtype: NumPy data type to use for storage
-    #     """
-    #     # Ensure directory exists
-    #     os.makedirs(save_path, exist_ok=True)
-
-    #     # Define file paths
-    #     mmap_path = os.path.join(save_path, filename)
-    #     metadata_path = os.path.join(save_path, f"{os.path.splitext(filename)[0]}_metadata.json")
-
-    #     # Calculate total size needed
-    #     total_size = sum(tensor.numel() for tensor in tensors.values())
-
-    #     # Create memory-mapped file
-    #     try:
-    #         mmap = np.memmap(mmap_path, dtype=np.dtype(dtype), mode="w+", shape=(total_size,))
-
-    #         # Prepare metadata
-    #         metadata = {
-    #             "batch_idx": batch_idx,
-    #             "layers": [],
-    #             "offsets": [],
-    #             "shapes": [],
-    #             "dtype": dtype,
-    #             "total_size": total_size
-    #         }
-
-    #         # Write tensor data and collect metadata
-    #         offset = 0
-    #         for layer_idx, tensor in sorted(tensors.items()):
-    #             # Convert to NumPy and write to mmap
-    #             array = tensor.cpu().detach().numpy().astype(dtype)
-    #             size = array.size
-    #             shape = array.shape
-
-    #             # Write to memory-mapped file
-    #             mmap[offset:offset+size] = array.ravel()
-
-    #             # Update metadata
-    #             metadata["layers"].append(int(layer_idx))
-    #             metadata["offsets"].append(int(offset))
-    #             metadata["shapes"].append(list(shape))
-
-    #             # Update offset for next tensor
-    #             offset += size
-
-    #         # Flush to disk
-    #         mmap.flush()
-
-    #         # Save metadata
-    #         with open(metadata_path, "w") as f:
-    #             json.dump(metadata, f, indent=2)
-
-    #         logger.debug(f"Successfully wrote memory-mapped file: {mmap_path}")
-
-    #     except Exception as e:
-    #         logger.error(f"Error writing memory-mapped file {mmap_path}: {str(e)}")
-    #         raise
     @staticmethod
-    def write(save_path: str, filename: str, batch_idx: int,
-            tensors: Dict[int, torch.Tensor], dtype: str = 'float32') -> None:
+    def write_chunk(save_path: str, data_type: str, chunk_data: List[Tuple[int, Dict[int, torch.Tensor]]],
+                   dtype: str = 'float32') -> str:
         """
-        Write tensors to a memory-mapped file with metadata.
+        Write multiple batches to a single chunked memory-mapped file.
 
         Args:
             save_path: Directory to save files
-            filename: Base name for the memory-mapped file
-            batch_idx: Batch index for metadata
-            tensors: Dictionary mapping layer indices to tensors
+            data_type: Type of data being stored (gradients, ifvp, etc.)
+            chunk_data: List of (batch_idx, tensor_dict) tuples
             dtype: NumPy data type to use for storage
+
+        Returns:
+            The generated chunk filename (without extension)
         """
         # Ensure directory exists
         os.makedirs(save_path, exist_ok=True)
 
-        # Define file paths
-        mmap_path = os.path.join(save_path, filename)
-        metadata_path = os.path.join(save_path, f"{os.path.splitext(filename)[0]}_metadata.json")
+        # Generate filename based on batch range
+        batch_indices = [batch_idx for batch_idx, _ in chunk_data]
+        batch_start = min(batch_indices)
+        batch_end = max(batch_indices)
 
-        # Process tensors and gather metadata
-        tensor_metadata = {}
+        chunk_filename = f"chunk_{data_type}_{batch_start}_{batch_end}"
+        mmap_path = os.path.join(save_path, f"{chunk_filename}.mmap")
+        metadata_path = os.path.join(save_path, f"{chunk_filename}_metadata.json")
+
+        # Process all batches and gather metadata
+        batch_metadata = []
         total_size = 0
 
-        for layer_idx, tensor in tensors.items():
-            # Store tensor metadata
-            tensor_metadata[layer_idx] = {
-                "dtype": str(tensor.dtype),
-                "shape": list(tensor.shape),
-                "size": tensor.numel(),
+        for batch_idx, tensor_dict in chunk_data:
+            batch_info = {
+                "batch_idx": batch_idx,
+                "tensors": {},
                 "offset": total_size
             }
-            total_size += tensor.numel()
+
+            for layer_idx, tensor in tensor_dict.items():
+                tensor_size = tensor.numel()
+                batch_info["tensors"][str(layer_idx)] = {
+                    "offset": total_size,
+                    "size": tensor_size,
+                    "shape": list(tensor.shape),
+                    "dtype": str(tensor.dtype)
+                }
+                total_size += tensor_size
+
+            batch_metadata.append(batch_info)
 
         # Create memory-mapped file
         try:
-            # Use uint16 as storage type for all tensors (compatible with bfloat16 bit width)
-            storage_dtype = 'uint16' if any(tensor.dtype == torch.bfloat16 for tensor in tensors.values()) else dtype
+            # Use appropriate storage dtype
+            storage_dtype = 'uint16' if any(
+                any(tensor.dtype == torch.bfloat16 for tensor in batch[1].values())
+                for batch in chunk_data
+            ) else dtype
+
             mmap = np.memmap(mmap_path, dtype=np.dtype(storage_dtype), mode="w+", shape=(total_size,))
 
-            # Prepare general metadata
-            metadata = {
-                "batch_idx": batch_idx,
-                "storage_dtype": storage_dtype,
-                "total_size": total_size,
-                "tensors": {}
-            }
+            # Write all tensor data
+            current_offset = 0
+            for batch_idx, tensor_dict in chunk_data:
+                for layer_idx, tensor in sorted(tensor_dict.items()):
+                    size = tensor.numel()
 
-            # Write tensor data and collect metadata
-            for layer_idx, tensor in sorted(tensors.items()):
-                offset = tensor_metadata[layer_idx]["offset"]
-                size = tensor_metadata[layer_idx]["size"]
-                tensor_dtype = str(tensor.dtype)
+                    # Handle different data types
+                    if tensor.dtype == torch.bfloat16:
+                        uint16_view = tensor.view(torch.uint16).cpu()
+                        mmap[current_offset:current_offset+size] = uint16_view.numpy().ravel()
+                    else:
+                        array = tensor.cpu().detach().numpy()
+                        mmap[current_offset:current_offset+size] = array.ravel()
 
-                # Handle different data types
-                if tensor.dtype == torch.bfloat16:
-                    # For bfloat16, convert to raw bytes representation as uint16
-                    # This preserves the exact bit pattern without conversion loss
-                    uint16_view = tensor.view(torch.uint16).cpu()
-                    mmap[offset:offset+size] = uint16_view.numpy().ravel()
-                else:
-                    # For other types, use normal numpy conversion
-                    array = tensor.cpu().detach().numpy()
-                    mmap[offset:offset+size] = array.ravel()
-
-                # Update metadata
-                metadata["tensors"][str(layer_idx)] = {
-                    "offset": int(offset),
-                    "size": int(size),
-                    "shape": tensor_metadata[layer_idx]["shape"],
-                    "dtype": tensor_dtype
-                }
+                    current_offset += size
 
             # Flush to disk
             mmap.flush()
 
             # Save metadata
+            metadata = {
+                "chunk_filename": chunk_filename,
+                "data_type": data_type,
+                "batch_start": batch_start,
+                "batch_end": batch_end,
+                "batch_indices": sorted(batch_indices),
+                "storage_dtype": storage_dtype,
+                "total_size": total_size,
+                "batch_count": len(chunk_data),
+                "batches": batch_metadata
+            }
+
             with open(metadata_path, "w") as f:
                 json.dump(metadata, f, indent=2)
 
-            logger.debug(f"Successfully wrote memory-mapped file: {mmap_path}")
+            logger.debug(f"Successfully wrote chunked memory-mapped file: {mmap_path}")
+
+            return chunk_filename
 
         except Exception as e:
-            logger.error(f"Error writing memory-mapped file {mmap_path}: {str(e)}")
+            logger.error(f"Error writing chunked memory-mapped file {mmap_path}: {str(e)}")
             raise
 
     @staticmethod
     @contextmanager
-    def read(path: str, filename: str, dtype: str = 'float32'):
+    def read_chunk(path: str, chunk_filename: str, storage_dtype: str = 'float32'):
         """
-        Context manager to read from a memory-mapped file.
+        Context manager to read from a chunked memory-mapped file.
+        Ensures proper cleanup of file handles.
 
         Args:
             path: Directory containing the memory-mapped file
-            filename: Base name of the memory-mapped file
-            dtype: NumPy data type used for storage
+            chunk_filename: Name of the chunk file
+            storage_dtype: NumPy data type used for storage
 
         Yields:
             memory-mapped array object
         """
-        mmap_path = os.path.join(path, filename)
-        mmap = np.memmap(mmap_path, dtype=np.dtype(dtype), mode="r")
+        mmap_path = os.path.join(path, f"{chunk_filename}.mmap")
+        mmap = None
         try:
+            mmap = np.memmap(mmap_path, dtype=np.dtype(storage_dtype), mode="r")
             yield mmap
         finally:
-            del mmap  # Ensure the mmap is closed
+            if mmap is not None:
+                # Explicitly delete and flush to close file handle
+                del mmap
+                # Force garbage collection to ensure cleanup
+                import gc
+                gc.collect()
 
     @staticmethod
-    def read_metadata(path: str, metadata_filename: str) -> Dict[str, Any]:
+    def read_chunk_metadata(path: str, chunk_filename: str) -> Dict[str, Any]:
         """
-        Read metadata from a JSON file.
+        Read metadata from a chunked file.
 
         Args:
             path: Directory containing the metadata file
-            metadata_filename: Name of the metadata file
+            chunk_filename: Name of the chunk file
 
         Returns:
             Metadata dictionary
         """
-        metadata_path = os.path.join(path, metadata_filename)
+        metadata_path = os.path.join(path, f"{chunk_filename}_metadata.json")
         with open(metadata_path, "r") as f:
             return json.load(f)
 
-    # @staticmethod
-    # def load_tensor_dict(path: str, filename: str) -> Dict[int, torch.Tensor]:
-    #     """
-    #     Load tensor dictionary from memory-mapped file and metadata.
-
-    #     Args:
-    #         path: Directory containing the files
-    #         filename: Base name of the memory-mapped file
-
-    #     Returns:
-    #         Dictionary mapping layer indices to tensors
-    #     """
-    #     # Define file paths
-    #     mmap_path = os.path.join(path, filename)
-    #     metadata_path = os.path.join(path, f"{os.path.splitext(filename)[0]}_metadata.json")
-
-    #     # Check if files exist
-    #     if not os.path.exists(mmap_path) or not os.path.exists(metadata_path):
-    #         raise FileNotFoundError(f"Missing files: {mmap_path} or {metadata_path}")
-
-    #     # Load metadata
-    #     with open(metadata_path, "r") as f:
-    #         metadata = json.load(f)
-
-    #     # Get data type
-    #     dtype = metadata["dtype"]
-
-    #     # Open memory-mapped file
-    #     with MemoryMapHandler.read(path, filename, dtype) as mmap:
-    #         # Extract all tensors
-    #         result = {}
-
-    #         for i, layer_idx in enumerate(metadata["layers"]):
-    #             offset = metadata["offsets"][i]
-    #             shape = metadata["shapes"][i]
-
-    #             # Calculate size
-    #             size = np.prod(shape)
-
-    #             # Extract array slice and copy to new tensor
-    #             array = np.array(mmap[offset:offset+size]).reshape(shape)
-    #             tensor = torch.from_numpy(array.copy())
-
-    #             # Store in result dictionary
-    #             result[int(layer_idx)] = tensor
-
-    #         return result
     @staticmethod
-    def load_tensor_dict(path: str, filename: str) -> Dict[int, torch.Tensor]:
+    def load_chunk_batch_dict(path: str, chunk_filename: str, batch_idx: int) -> Dict[int, torch.Tensor]:
         """
-        Load tensor dictionary from memory-mapped file and metadata.
+        Load a specific batch from a chunked memory-mapped file.
+        Optimized to minimize file handle usage.
 
         Args:
             path: Directory containing the files
-            filename: Base name of the memory-mapped file
+            chunk_filename: Name of the chunk file
+            batch_idx: Batch index to load
 
         Returns:
             Dictionary mapping layer indices to tensors
         """
-        # Define file paths
-        mmap_path = os.path.join(path, filename)
-        metadata_path = os.path.join(path, f"{os.path.splitext(filename)[0]}_metadata.json")
+        # Load metadata once
+        metadata = ChunkedMemoryMapHandler.read_chunk_metadata(path, chunk_filename)
 
-        # Check if files exist
-        if not os.path.exists(mmap_path) or not os.path.exists(metadata_path):
-            raise FileNotFoundError(f"Missing files: {mmap_path} or {metadata_path}")
+        # Find the target batch
+        target_batch = None
+        for batch_info in metadata["batches"]:
+            if batch_info["batch_idx"] == batch_idx:
+                target_batch = batch_info
+                break
 
-        # Load metadata
-        with open(metadata_path, "r") as f:
-            metadata = json.load(f)
+        if target_batch is None:
+            raise ValueError(f"Batch {batch_idx} not found in chunk {chunk_filename}")
 
-        # Support both old and new metadata formats
-        if "storage_dtype" in metadata:
-            # New format with storage_dtype
-            storage_dtype = metadata["storage_dtype"]
-            tensor_metadata = metadata["tensors"]
-        else:
-            # Old format
-            storage_dtype = metadata["dtype"]
-            tensor_metadata = {layer: {"offset": offset, "shape": shape, "dtype": storage_dtype}
-                            for layer, offset, shape in zip(
-                                metadata["layers"],
-                                metadata["offsets"],
-                                metadata["shapes"]
-                            )}
+        # Load data using context manager to ensure cleanup
+        storage_dtype = metadata["storage_dtype"]
+        result = {}
 
-        # Open memory-mapped file
-        with MemoryMapHandler.read(path, filename, storage_dtype) as mmap:
-            # Extract all tensors
-            result = {}
-
-            for layer_str, tensor_info in tensor_metadata.items():
+        with ChunkedMemoryMapHandler.read_chunk(path, chunk_filename, storage_dtype) as mmap:
+            for layer_str, tensor_info in target_batch["tensors"].items():
                 layer_idx = int(layer_str)
                 offset = tensor_info["offset"]
+                size = tensor_info["size"]
                 shape = tensor_info["shape"]
-                dtype_str = tensor_info.get("dtype", storage_dtype)
-                size = int(np.prod(shape))
+                dtype_str = tensor_info["dtype"]
 
-                # Extract array slice
-                array_data = np.array(mmap[offset:offset+size])
+                # Extract array slice and immediately copy to avoid keeping mmap reference
+                array_data = np.array(mmap[offset:offset+size], copy=True)
 
                 # Handle different dtypes
                 if dtype_str == "torch.bfloat16":
-                    # Convert uint16 back to bfloat16
-                    tensor_data = torch.from_numpy(array_data.copy())
-                    # Reinterpret the uint16 data as bfloat16
+                    tensor_data = torch.from_numpy(array_data)
                     tensor = tensor_data.view(torch.bfloat16).reshape(shape)
                 else:
-                    # Standard numpy to torch conversion
-                    tensor_data = torch.from_numpy(array_data.copy())
+                    tensor_data = torch.from_numpy(array_data)
                     tensor = tensor_data.reshape(shape)
 
                     # Convert to original dtype if needed
@@ -327,7 +224,95 @@ class MemoryMapHandler:
                         target_dtype = getattr(torch, dtype_str.replace('torch.', ''))
                         tensor = tensor.to(target_dtype)
 
-                # Store in result dictionary
                 result[layer_idx] = tensor
 
-            return result
+        return result
+
+    @staticmethod
+    def load_chunk_all_batches(path: str, chunk_filename: str) -> Dict[int, Dict[int, torch.Tensor]]:
+        """
+        Load all batches from a chunked memory-mapped file.
+        Optimized to minimize file handle usage and memory overhead.
+
+        Args:
+            path: Directory containing the files
+            chunk_filename: Name of the chunk file
+
+        Returns:
+            Dictionary mapping batch indices to tensor dictionaries
+        """
+        # Load metadata once
+        metadata = ChunkedMemoryMapHandler.read_chunk_metadata(path, chunk_filename)
+        storage_dtype = metadata["storage_dtype"]
+
+        result = {}
+
+        # Use context manager to ensure proper cleanup
+        with ChunkedMemoryMapHandler.read_chunk(path, chunk_filename, storage_dtype) as mmap:
+            for batch_info in metadata["batches"]:
+                batch_idx = batch_info["batch_idx"]
+                batch_dict = {}
+
+                for layer_str, tensor_info in batch_info["tensors"].items():
+                    layer_idx = int(layer_str)
+                    offset = tensor_info["offset"]
+                    size = tensor_info["size"]
+                    shape = tensor_info["shape"]
+                    dtype_str = tensor_info["dtype"]
+
+                    # Extract array slice and immediately copy to avoid keeping mmap reference
+                    array_data = np.array(mmap[offset:offset+size], copy=True)
+
+                    # Handle different dtypes
+                    if dtype_str == "torch.bfloat16":
+                        tensor_data = torch.from_numpy(array_data)
+                        tensor = tensor_data.view(torch.bfloat16).reshape(shape)
+                    else:
+                        tensor_data = torch.from_numpy(array_data)
+                        tensor = tensor_data.reshape(shape)
+
+                        # Convert to original dtype if needed
+                        if dtype_str != str(tensor.dtype) and hasattr(torch, dtype_str.replace('torch.', '')):
+                            target_dtype = getattr(torch, dtype_str.replace('torch.', ''))
+                            tensor = tensor.to(target_dtype)
+
+                    batch_dict[layer_idx] = tensor
+
+                result[batch_idx] = batch_dict
+
+        return result
+
+    @staticmethod
+    def find_chunk_files(path: str, data_type: str) -> List[str]:
+        """
+        Find all chunk files for a specific data type.
+
+        Args:
+            path: Directory to search
+            data_type: Type of data ('gradients', 'ifvp', etc.)
+
+        Returns:
+            List of chunk filenames (without extensions) sorted by batch range
+        """
+        if not os.path.exists(path):
+            return []
+
+        chunk_files = []
+        for filename in os.listdir(path):
+            if filename.endswith("_metadata.json") and f"chunk_{data_type}_" in filename:
+                # Extract chunk filename without _metadata.json
+                chunk_name = filename.replace("_metadata.json", "")
+                chunk_files.append(chunk_name)
+
+        # Sort by batch start index for consistent ordering
+        def extract_batch_start(chunk_name):
+            try:
+                # chunk_gradients_0_31 -> extract 0
+                parts = chunk_name.split('_')
+                if len(parts) >= 4:  # chunk_type_start_end
+                    return int(parts[2])  # batch_start
+                return 0
+            except (ValueError, IndexError):
+                return 0
+
+        return sorted(chunk_files, key=extract_batch_start)

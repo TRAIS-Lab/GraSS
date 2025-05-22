@@ -1,5 +1,17 @@
 """
-Data loading and processing module for gradient computation.
+Data module for efficient dataset operations.
 """
 
-# Empty __init__.py file to mark directory as a package
+from .dataset import (
+    ChunkedGradientDataset,
+    ChunkedBatchDataset,
+    create_chunked_dataloader,
+    custom_collate_fn
+)
+
+__all__ = [
+    "ChunkedGradientDataset",
+    "ChunkedBatchDataset",
+    "create_chunked_dataloader",
+    "custom_collate_fn"
+]

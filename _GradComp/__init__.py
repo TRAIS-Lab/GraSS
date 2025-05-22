@@ -5,6 +5,10 @@ GradComp - Efficient Gradient Computation and Influence Attribution
 import logging
 import sys
 
+# Import key components for convenience
+from .io import ChunkedDiskIOManager, ChunkedMemoryMapHandler
+from .data import ChunkedGradientDataset, create_chunked_dataloader
+
 def setup_logger(name=__name__, level=logging.INFO, log_file=None):
     """Configure and return a logger with the specified settings."""
     logger = logging.getLogger(name)
@@ -13,10 +17,10 @@ def setup_logger(name=__name__, level=logging.INFO, log_file=None):
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
     # Create console handler with a proper formatter
-    ch = logging.StreamHandler(sys.stdout)  # Fixed typo: stdouth -> stdout
+    ch = logging.StreamHandler(sys.stdout)
     formatter = logging.Formatter(
         '%(asctime)s - %(levelname)s - %(name)s - %(message)s',
-        datefmt="%m/%d/%Y %H:%M:%S"  # Added the date format you want
+        datefmt="%m/%d/%Y %H:%M:%S"
     )
     ch.setFormatter(formatter)
     logger.addHandler(ch)
@@ -33,3 +37,12 @@ logger.propagate = False
 
 # Package version
 __version__ = '0.1.0'
+
+__all__ = [
+    'ChunkedDiskIOManager',
+    'ChunkedMemoryMapHandler',
+    'ChunkedGradientDataset',
+    'create_chunked_dataloader',
+    'setup_logger',
+    'logger'
+]

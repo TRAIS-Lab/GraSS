@@ -1,3 +1,7 @@
+"""
+Enhanced disk offload strategy with chunking support.
+"""
+
 import os
 from typing import Dict, List, Optional, Tuple, Union, Set
 
@@ -5,319 +9,137 @@ import torch
 from torch.utils.data import DataLoader
 
 from .offload_strategy import OffloadStrategy
-from ...io.disk_io import DiskIOManager
-from ...data.dataset import GradientDataset, custom_collate_fn
+from ...io.disk_io import ChunkedDiskIOManager
+from ...data.dataset import create_chunked_dataloader
 
 class DiskOffloadStrategy(OffloadStrategy):
     """
-    Strategy that stores data on disk and loads when needed.
-    This minimizes memory usage but has higher I/O overhead.
+    Enhanced strategy that stores data on disk using chunking for better I/O performance.
+    This minimizes memory usage and provides efficient chunked I/O with reduced file overhead.
     """
 
-    def __init__(self, device: str, layer_names: List[str], cache_dir: Optional[str] = None):
-        """
-        Initialize the disk offload strategy.
-
-        Args:
-            device: The primary compute device
-            layer_names: Names of layers being analyzed
-            cache_dir: Directory for caching data (required for this strategy)
-        """
+    def __init__(self, device: str, layer_names: List[str], cache_dir: Optional[str] = None,
+                 chunk_size: int = 32):
         if cache_dir is None:
             raise ValueError("Cache directory must be provided for disk offload")
 
         self.device = device
         self.layer_names = layer_names
         self.cache_dir = cache_dir
-        self.disk_io = DiskIOManager(cache_dir, "default", hessian="raw")
+        self.chunk_size = chunk_size
 
-        # Lightweight sets to track available batches
-        self.train_batch_indices: Set[int] = set()
-        self.test_batch_indices: Set[int] = set()
-        self.ifvp_batch_indices: Set[int] = set()
-        self.has_stored_preconditioners = False
+        # Use the enhanced chunked disk I/O manager
+        self.disk_io = ChunkedDiskIOManager(
+            cache_dir,
+            "default",
+            hessian="raw",
+            chunk_size=chunk_size
+        )
+
+        # Track current batch range being processed
+        self.current_batch_range = None
+
+    def start_batch_range_processing(self, start_batch: int, end_batch: int):
+        """Start processing a new batch range."""
+        self.current_batch_range = (start_batch, end_batch)
+        self.disk_io.start_batch_range(start_batch, end_batch)
+
+    def finish_batch_range_processing(self):
+        """Finish processing the current batch range and write chunks."""
+        if self.current_batch_range is not None:
+            self.disk_io.finalize_batch_range()
+            self.current_batch_range = None
 
     def store_gradients(self, batch_idx: int, gradients: List[torch.Tensor], is_test: bool = False) -> None:
-        """
-        Store gradients for a batch on disk.
-
-        Args:
-            batch_idx: Batch index
-            gradients: List of gradient tensors (one per layer)
-            is_test: Whether these are test gradients
-        """
-        # Move to CPU first
-        cpu_gradients = [grad.cpu() if grad.device.type != 'cpu' else grad for grad in gradients]
-
-        # Create dictionary with layer indices as keys
-        grad_dict = {idx: grad for idx, grad in enumerate(cpu_gradients)}
-
-        # Save to disk
-        file_path = self.disk_io.get_path(
-            data_type='gradients',
-            batch_idx=batch_idx,
-            is_test=is_test
-        )
-        self.disk_io.save_dict(grad_dict, file_path, batch_idx=batch_idx)
-
-        # Update tracking
-        if is_test:
-            self.test_batch_indices.add(batch_idx)
-        else:
-            self.train_batch_indices.add(batch_idx)
+        """Store gradients for a batch on disk using chunked storage."""
+        self.disk_io.store_gradients(batch_idx, gradients, is_test)
 
     def retrieve_gradients(self, batch_idx: int, is_test: bool = False) -> List[torch.Tensor]:
-        """
-        Retrieve gradients for a batch from disk and move to device.
-
-        Args:
-            batch_idx: Batch index
-            is_test: Whether to retrieve test gradients
-
-        Returns:
-            List of gradient tensors (one per layer) on the compute device
-        """
-        file_path = self.disk_io.get_path(
-            data_type='gradients',
-            batch_idx=batch_idx,
-            is_test=is_test
-        )
-
-        if not os.path.exists(file_path):
-            return [torch.tensor([], device=self.device) for _ in self.layer_names]
-
-        # Load from disk
-        grad_dict = self.disk_io.load_dict(file_path)
-
-        # Convert to list and move to device
+        """Retrieve gradients for a batch from chunked disk storage and move to device."""
+        gradients = self.disk_io.retrieve_gradients(batch_idx, is_test)
         result = []
-        for layer_idx in range(len(self.layer_names)):
-            if layer_idx in grad_dict and grad_dict[layer_idx].numel() > 0:
-                result.append(grad_dict[layer_idx].to(self.device))
+        for grad in gradients:
+            if grad.numel() > 0:
+                result.append(grad.to(self.device))
             else:
                 result.append(torch.tensor([], device=self.device))
-
         return result
 
     def store_preconditioner(self, layer_idx: int, preconditioner: torch.Tensor) -> None:
-        """
-        Store a preconditioner for a layer on disk.
-
-        Args:
-            layer_idx: Layer index
-            preconditioner: Preconditioner tensor
-        """
-        # Move to CPU first
-        cpu_precond = preconditioner.cpu() if preconditioner.device.type != 'cpu' else preconditioner
-
-        # Save to disk
-        file_path = self.disk_io.get_path('preconditioners', layer_idx=layer_idx)
-        self.disk_io.save_tensor(cpu_precond, file_path)
-
-        # Update tracking
-        self.has_stored_preconditioners = True
+        """Store a preconditioner for a layer on disk."""
+        self.disk_io.store_preconditioner(layer_idx, preconditioner)
 
     def retrieve_preconditioner(self, layer_idx: int) -> Optional[torch.Tensor]:
-        """
-        Retrieve a preconditioner for a layer from disk and move to device.
-
-        Args:
-            layer_idx: Layer index
-
-        Returns:
-            Preconditioner tensor on the compute device, or None if not found
-        """
-        file_path = self.disk_io.get_path('preconditioners', layer_idx=layer_idx)
-
-        if not os.path.exists(file_path):
-            return None
-
-        # Load from disk and move to device
-        return self.disk_io.load_tensor(file_path).to(self.device)
+        """Retrieve a preconditioner for a layer from disk and move to device."""
+        preconditioner = self.disk_io.retrieve_preconditioner(layer_idx)
+        if preconditioner is not None:
+            return preconditioner.to(self.device)
+        return None
 
     def store_ifvp(self, batch_idx: int, ifvp: List[torch.Tensor]) -> None:
-        """
-        Store IFVP for a batch on disk.
-
-        Args:
-            batch_idx: Batch index
-            ifvp: List of IFVP tensors (one per layer)
-        """
-        # Move to CPU first
-        cpu_ifvp = [ivp.cpu() if ivp.device.type != 'cpu' else ivp for ivp in ifvp]
-
-        # Create dictionary with layer indices as keys
-        ifvp_dict = {idx: ivp for idx, ivp in enumerate(cpu_ifvp)}
-
-        # Save to disk
-        file_path = self.disk_io.get_path('ifvp', batch_idx=batch_idx)
-        self.disk_io.save_dict(ifvp_dict, file_path, batch_idx=batch_idx)
-
-        # Update tracking
-        self.ifvp_batch_indices.add(batch_idx)
+        """Store IFVP for a batch on disk using chunked storage."""
+        self.disk_io.store_ifvp(batch_idx, ifvp)
 
     def retrieve_ifvp(self, batch_idx: int) -> List[torch.Tensor]:
-        """
-        Retrieve IFVP for a batch from disk and move to device.
-
-        Args:
-            batch_idx: Batch index
-
-        Returns:
-            List of IFVP tensors (one per layer) on the compute device
-        """
-        file_path = self.disk_io.get_path('ifvp', batch_idx=batch_idx)
-
-        if not os.path.exists(file_path):
-            return [torch.tensor([], device=self.device) for _ in self.layer_names]
-
-        # Load from disk
-        ifvp_dict = self.disk_io.load_dict(file_path)
-
-        # Convert to list and move to device
+        """Retrieve IFVP for a batch from chunked disk storage and move to device."""
+        ifvp_list = self.disk_io.retrieve_ifvp(batch_idx)
         result = []
-        for layer_idx in range(len(self.layer_names)):
-            if layer_idx in ifvp_dict and ifvp_dict[layer_idx].numel() > 0:
-                result.append(ifvp_dict[layer_idx].to(self.device))
+        for ifvp in ifvp_list:
+            if ifvp.numel() > 0:
+                result.append(ifvp.to(self.device))
             else:
                 result.append(torch.tensor([], device=self.device))
-
         return result
 
     def create_gradient_dataloader(
             self,
             data_type: str,
             batch_size: int = 1,
-            num_workers: int = 4,
             pin_memory: bool = True,
             batch_range: Optional[Tuple[int, int]] = None,
             is_test: bool = False
         ) -> DataLoader:
-        """
-        Create a DataLoader for loading data from disk.
-
-        Args:
-            data_type: Type of data to load ("gradients" or "ifvp")
-            batch_size: Batch size
-            num_workers: Number of worker processes
-            pin_memory: Whether to pin memory
-            batch_range: Optional range of batches to include
-            is_test: Whether to load test data
-
-        Returns:
-            DataLoader for efficient loading of data files
-        """
-        dataset = GradientDataset(self.disk_io, data_type, batch_range, is_test, self.layer_names)
-        return torch.utils.data.DataLoader(
-            dataset,
+        """Create a DataLoader for loading chunked data from disk."""
+        return create_chunked_dataloader(
+            disk_io=self.disk_io,
+            data_type=data_type,
             batch_size=batch_size,
-            num_workers=num_workers,
             pin_memory=pin_memory,
-            shuffle=False,
-            collate_fn=custom_collate_fn,
-            prefetch_factor=16,
-            persistent_workers=True
+            batch_range=batch_range,
+            is_test=is_test,
+            use_chunk_dataset=True
         )
 
     def has_preconditioners(self) -> bool:
-        """
-        Check if preconditioners are available on disk.
-
-        Returns:
-            True if any preconditioners are available, False otherwise
-        """
-        if self.has_stored_preconditioners:
-            return True
-
-        # Check if any preconditioner file exists
-        for layer_idx in range(len(self.layer_names)):
-            file_path = self.disk_io.get_path('preconditioners', layer_idx=layer_idx)
-            if os.path.exists(file_path):
-                self.has_stored_preconditioners = True
-                return True
-
-        return False
+        """Check if preconditioners are available on disk."""
+        return self.disk_io.has_preconditioners()
 
     def has_ifvp(self) -> bool:
-        """
-        Check if IFVP are available on disk.
-
-        Returns:
-            True if any IFVP are available, False otherwise
-        """
-        if self.ifvp_batch_indices:
-            return True
-
-        # Find all IFVP files
-        ifvp_files = self.disk_io.find_batch_files('ifvp')
-        if ifvp_files:
-            # Update tracking
-            for file_path in ifvp_files:
-                batch_idx = self.disk_io.extract_batch_idx(file_path)
-                self.ifvp_batch_indices.add(batch_idx)
-            return True
-
-        return False
+        """Check if IFVP are available on disk."""
+        return self.disk_io.has_ifvp()
 
     def clear_cache(self) -> None:
-        """
-        Clear all cached data from disk.
-        """
-        # Remove gradient files
-        for batch_idx in self.train_batch_indices:
-            file_path = self.disk_io.get_path('gradients', batch_idx=batch_idx)
-            if os.path.exists(file_path):
-                os.remove(file_path)
+        """Clear all cached data from disk."""
+        self.disk_io.wait_for_async_operations()
 
-        for batch_idx in self.test_batch_indices:
-            file_path = self.disk_io.get_path('gradients', batch_idx=batch_idx, is_test=True)
-            if os.path.exists(file_path):
-                os.remove(file_path)
-
-        # Remove preconditioner files
-        for layer_idx in range(len(self.layer_names)):
-            file_path = self.disk_io.get_path('preconditioners', layer_idx=layer_idx)
-            if os.path.exists(file_path):
-                os.remove(file_path)
-
-        # Remove IFVP files
-        for batch_idx in self.ifvp_batch_indices:
-            file_path = self.disk_io.get_path('ifvp', batch_idx=batch_idx)
-            if os.path.exists(file_path):
-                os.remove(file_path)
-
-        # Reset tracking
-        self.train_batch_indices = set()
-        self.test_batch_indices = set()
-        self.has_stored_preconditioners = False
-        self.ifvp_batch_indices = set()
+        for subdir in ['grad', 'ifvp', 'precond']:
+            subdir_path = os.path.join(self.cache_dir, subdir)
+            if os.path.exists(subdir_path):
+                for filename in os.listdir(subdir_path):
+                    file_path = os.path.join(subdir_path, filename)
+                    try:
+                        os.remove(file_path)
+                    except Exception as e:
+                        logger.warning(f"Error removing {file_path}: {e}")
 
     def wait_for_async_operations(self) -> None:
-        """
-        Wait for any pending asynchronous disk operations to complete.
-        """
+        """Wait for any pending asynchronous disk operations to complete."""
         self.disk_io.wait_for_async_operations()
 
     def move_to_device(self, tensor: torch.Tensor) -> torch.Tensor:
-        """
-        Move a tensor to the compute device.
-
-        Args:
-            tensor: Input tensor (on CPU)
-
-        Returns:
-            Tensor on the compute device
-        """
+        """Move a tensor to the compute device."""
         return tensor.to(self.device) if tensor.device.type == 'cpu' else tensor
 
     def move_from_device(self, tensor: torch.Tensor) -> torch.Tensor:
-        """
-        Move a tensor from the compute device to CPU for disk storage.
-
-        Args:
-            tensor: Input tensor on compute device
-
-        Returns:
-            Tensor on CPU
-        """
+        """Move a tensor from the compute device to CPU for disk storage."""
         return tensor.cpu() if tensor.device.type != 'cpu' else tensor

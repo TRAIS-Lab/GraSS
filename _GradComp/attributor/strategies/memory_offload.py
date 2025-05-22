@@ -110,8 +110,7 @@ class MemoryOffloadStrategy(OffloadStrategy):
         return self.cached_ifvp[batch_idx]
 
     def create_gradient_dataloader(self, data_type: str, batch_size: int = 1,
-                                num_workers: int = 4, pin_memory: bool = True,
-                                batch_range: Optional[Tuple[int, int]] = None,
+                                pin_memory: bool = True, batch_range: Optional[Tuple[int, int]] = None,
                                 is_test: bool = False) -> Optional[DataLoader]:
         """
         No DataLoader needed for memory offload as we access memory directly.
