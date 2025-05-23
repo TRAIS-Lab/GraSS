@@ -1,5 +1,5 @@
 """
-Enhanced base implementation of the Influence Function Attributor with chunked I/O support.
+Clean base implementation with direct tensor support throughout the pipeline.
 """
 
 from __future__ import annotations
@@ -39,8 +39,7 @@ class ProfilingStats:
 
 class BaseAttributor(ABC):
     """
-    Enhanced base class for Influence Function Attributors with chunked I/O support.
-    Implements common functionality with optimized data loading and processing.
+    Clean base class for Influence Function Attributors with direct tensor support.
     """
 
     def __init__(
@@ -75,7 +74,7 @@ class BaseAttributor(ABC):
         self.offload = offload
         self.chunk_size = chunk_size
 
-        # Create appropriate offload strategy with chunking support
+        # Create appropriate offload strategy
         self.strategy = create_offload_strategy(
             offload_type=offload,
             device=device,
@@ -93,10 +92,13 @@ class BaseAttributor(ABC):
         self.sparsifiers: Optional[List[Any]] = None
         self.projectors: Optional[List[Any]] = None
 
+        # Track layer dimensions
+        self.layer_dims: Optional[List[int]] = None
+
         # Initialize profiling stats
         self.profiling_stats = ProfilingStats() if self.profile else None
 
-        logger.info(f"Initialized Enhanced BaseAttributor:")
+        logger.info(f"Initialized Clean BaseAttributor:")
         logger.info(f"  Offload: {offload}, Device: {device}, Chunk size: {chunk_size}")
 
     def _setup_compressors(self, train_dataloader: 'DataLoader') -> None:
@@ -122,79 +124,67 @@ class BaseAttributor(ABC):
             torch.cuda.empty_cache()
 
     def _get_worker_batch_range(self, total_batches: int, worker: str) -> Tuple[int, int]:
-        """
-        Get the chunk-aligned batch range for a specific worker.
-
-        Args:
-            total_batches: Total number of batches in dataset
-            worker: Worker specification in format "worker_id/total_workers"
-
-        Returns:
-            Tuple of (start_batch, end_batch) that is chunk-aligned
-
-        Raises:
-            ValueError: If worker specification is invalid
-        """
+        """Get chunk-aligned batch range for a worker."""
         try:
-            if '/' not in worker:
-                raise ValueError("Worker specification must be in format 'worker_id/total_workers'")
+            worker_id, total_workers = map(int, worker.split('/'))
 
-            worker_id_str, total_workers_str = worker.split('/')
-            worker_id = int(worker_id_str)
-            total_workers = int(total_workers_str)
-
-            if worker_id < 0 or total_workers <= 0:
-                raise ValueError("worker_id must be >= 0 and total_workers must be > 0")
-
-            if worker_id >= total_workers:
-                raise ValueError(f"worker_id ({worker_id}) must be < total_workers ({total_workers})")
+            if worker_id < 0 or total_workers <= 0 or worker_id >= total_workers:
+                raise ValueError("Invalid worker specification")
 
         except ValueError as e:
             raise ValueError(f"Invalid worker specification '{worker}': {e}")
 
-        # Calculate total chunks needed
+        # Calculate total chunks
         total_chunks = (total_batches + self.chunk_size - 1) // self.chunk_size
 
-        # Distribute chunks evenly among workers
+        # Distribute chunks among workers
         chunks_per_worker = total_chunks // total_workers
         remaining_chunks = total_chunks % total_workers
 
         # Calculate chunk range for this worker
         start_chunk = worker_id * chunks_per_worker + min(worker_id, remaining_chunks)
+        end_chunk = start_chunk + chunks_per_worker + (1 if worker_id < remaining_chunks else 0)
 
-        if worker_id < remaining_chunks:
-            # This worker gets an extra chunk
-            end_chunk = start_chunk + chunks_per_worker + 1
-        else:
-            end_chunk = start_chunk + chunks_per_worker
-
-        # Convert chunk range to batch range
+        # Convert to batch range
         start_batch = start_chunk * self.chunk_size
         end_batch = min(end_chunk * self.chunk_size, total_batches)
 
         return start_batch, end_batch
 
-    def _compute_gradients_chunked(
+    def _compute_gradients_direct(
         self,
         dataloader: 'DataLoader',
         is_test: bool = False,
         worker: str = "0/1",
-    ) -> Tuple[Dict[int, List[torch.Tensor]], List[int]]:
-        """Compute compressed gradients using chunked processing for efficiency."""
+    ) -> Tuple[Optional[torch.Tensor], Dict[int, Tuple[int, int]]]:
+        """
+        Compute gradients and return as concatenated tensor directly.
+        Returns:
+            - Concatenated gradient tensor of shape (total_samples, total_proj_dim)
+            - Mapping from batch_idx to (start_row, end_row) in the tensor
+        """
         total_batches = len(dataloader)
-
-        # Calculate batch range for the specified worker
         start_batch, end_batch = self._get_worker_batch_range(total_batches, worker)
 
         desc_prefix = "test" if is_test else "training"
         logger.info(f"Worker {worker}: Computing gradients for {desc_prefix} data")
         logger.info(f"  Batch range: [{start_batch}, {end_batch}) ({end_batch - start_batch} batches)")
 
-        gradients_dict = {}
-        batch_sample_counts = []
-        using_disk_offload = self.offload == "disk"
+        # For test data, accumulate in memory and return tensor
+        if is_test:
+            return self._compute_test_gradients_as_tensor(dataloader, start_batch, end_batch)
 
-        # Create hook manager if not already done
+        # For training data, use disk storage
+        return self._compute_train_gradients_with_storage(dataloader, start_batch, end_batch)
+
+    def _compute_test_gradients_as_tensor(
+        self,
+        dataloader: 'DataLoader',
+        start_batch: int,
+        end_batch: int
+    ) -> Tuple[torch.Tensor, Dict[int, Tuple[int, int]]]:
+        """Compute test gradients and return as concatenated tensor."""
+        # Create hook manager if needed
         if self.hook_manager is None:
             self.hook_manager = HookManager(
                 self.model,
@@ -202,169 +192,200 @@ class BaseAttributor(ABC):
                 profile=self.profile,
                 device=self.device
             )
-
             if self.sparsifiers:
                 self.hook_manager.set_sparsifiers(self.sparsifiers)
             if self.projectors:
                 self.hook_manager.set_projectors(self.projectors)
 
-        def process_batch_chunk(batch_chunk, chunk_start_idx):
-            """Process a chunk of batches efficiently."""
-            chunk_gradients = {}
-            chunk_sample_counts = []
+        # Accumulate gradients
+        all_gradients = []
+        batch_mapping = {}
+        current_row = 0
 
-            for batch_idx_relative, batch in enumerate(batch_chunk):
-                # Use global batch index instead of relative index
-                batch_idx = chunk_start_idx + batch_idx_relative
-
-                self.model.zero_grad()
-
-                # Prepare inputs
-                if isinstance(batch, dict):
-                    inputs = {k: v.to(self.device) for k, v in batch.items()}
-                    batch_size = next(iter(batch.values())).shape[0]
-                else:
-                    inputs = batch[0].to(self.device)
-                    batch_size = batch[0].shape[0]
-
-                chunk_sample_counts.append(batch_size)
-
-                # Forward pass
-                if self.profile and self.profiling_stats:
-                    torch.cuda.synchronize(self.device)
-                    start_time = time.time()
-
-                outputs = self.model(**inputs) if isinstance(inputs, dict) else self.model(inputs)
-
-                if self.profile and self.profiling_stats:
-                    torch.cuda.synchronize(self.device)
-                    self.profiling_stats.forward += time.time() - start_time
-
-                # Compute loss
-                logp = -outputs.loss
-                loss = logp - torch.log(1 - torch.exp(logp))
-
-                # Backward pass
-                if self.profile and self.profiling_stats:
-                    torch.cuda.synchronize(self.device)
-                    start_time = time.time()
-
-                loss.backward()
-
-                if self.profile and self.profiling_stats:
-                    torch.cuda.synchronize(self.device)
-                    self.profiling_stats.backward += time.time() - start_time
-
-                # Get compressed gradients
-                with torch.no_grad():
-                    compressed_grads = self.hook_manager.get_compressed_grads()
-
-                    batch_grads = []
-                    for grad in compressed_grads:
-                        if grad is None:
-                            batch_grads.append(torch.tensor([]))
-                        else:
-                            batch_grads.append(grad.detach())
-
-                    # Store gradients using the GLOBAL batch index
-                    self.strategy.store_gradients(batch_idx, batch_grads, is_test)
-
-                    # Only store in memory dictionary if NOT using disk offload
-                    if is_test or not using_disk_offload:
-                        chunk_gradients[batch_idx] = batch_grads
-                    else:
-                        chunk_gradients[batch_idx] = []
-
-                torch.cuda.empty_cache()
-
-            return chunk_gradients, chunk_sample_counts
-
-        # Skip to start_batch and take only the batches we need
         batches = itertools.islice(dataloader, start_batch, end_batch)
-        batch_list = list(batches)
 
-        # Process in fixed chunks (no adaptive sizing)
-        for i in tqdm(range(0, len(batch_list), self.chunk_size), desc="Processing batches", unit="chunk"):
-            chunk = batch_list[i:i + self.chunk_size]
+        for batch_idx, batch in enumerate(tqdm(batches, total=end_batch-start_batch, desc="Computing test gradients")):
+            global_batch_idx = start_batch + batch_idx
 
-            # Calculate the global starting batch index for this chunk
-            chunk_start_global_idx = start_batch + i
+            self.model.zero_grad()
 
-            chunk_grads, chunk_counts = process_batch_chunk(chunk, chunk_start_global_idx)
+            # Prepare inputs
+            if isinstance(batch, dict):
+                inputs = {k: v.to(self.device) for k, v in batch.items()}
+                batch_size = next(iter(batch.values())).shape[0]
+            else:
+                inputs = batch[0].to(self.device)
+                batch_size = batch[0].shape[0]
 
-            gradients_dict.update(chunk_grads)
-            batch_sample_counts.extend(chunk_counts)
+            # Forward and backward
+            outputs = self.model(**inputs) if isinstance(inputs, dict) else self.model(inputs)
+            logp = -outputs.loss
+            loss = logp - torch.log(1 - torch.exp(logp))
+            loss.backward()
 
-        # Collect projection time from hook manager if profiling is enabled
-        if self.profile and self.profiling_stats and self.hook_manager:
-            self.profiling_stats.projection += self.hook_manager.get_compression_time()
-            self.profiling_stats.backward -= self.hook_manager.get_compression_time()
+            # Get compressed gradients
+            with torch.no_grad():
+                compressed_grads = self.hook_manager.get_compressed_grads()
 
-        self.strategy.wait_for_async_operations()
+                # Detect layer dimensions on first batch
+                if self.layer_dims is None:
+                    self.layer_dims = []
+                    for grad in compressed_grads:
+                        if grad is not None and grad.numel() > 0:
+                            self.layer_dims.append(grad.shape[1] if grad.dim() > 1 else grad.numel())
+                        else:
+                            self.layer_dims.append(0)
 
-        return gradients_dict, batch_sample_counts
+                # Concatenate gradients for this batch
+                batch_features = []
+                for grad, dim in zip(compressed_grads, self.layer_dims):
+                    if grad is not None and grad.numel() > 0:
+                        batch_features.append(grad.cpu())
+                    else:
+                        batch_features.append(torch.zeros(batch_size, dim))
 
-    def cache_gradients(self, train_dataloader: 'DataLoader', worker: str = "0/1") -> Dict[int, List[torch.Tensor]]:
-        """Cache raw compressed gradients from training data using chunked processing."""
+                batch_tensor = torch.cat(batch_features, dim=1)
+                all_gradients.append(batch_tensor)
+
+                # Update mapping
+                batch_mapping[global_batch_idx] = (current_row, current_row + batch_size)
+                current_row += batch_size
+
+            torch.cuda.empty_cache()
+
+        # Concatenate all batches
+        if all_gradients:
+            full_tensor = torch.cat(all_gradients, dim=0)
+        else:
+            total_dim = sum(self.layer_dims) if self.layer_dims else 0
+            full_tensor = torch.empty(0, total_dim)
+
+        return full_tensor, batch_mapping
+
+    def _compute_train_gradients_with_storage(
+        self,
+        dataloader: 'DataLoader',
+        start_batch: int,
+        end_batch: int
+    ) -> Tuple[None, Dict[int, Tuple[int, int]]]:
+        """Compute training gradients and store directly to disk."""
+        # Create hook manager if needed
+        if self.hook_manager is None:
+            self.hook_manager = HookManager(
+                self.model,
+                self.layer_names,
+                profile=self.profile,
+                device=self.device
+            )
+            if self.sparsifiers:
+                self.hook_manager.set_sparsifiers(self.sparsifiers)
+            if self.projectors:
+                self.hook_manager.set_projectors(self.projectors)
+
+        batch_sample_counts = []
+        batches = itertools.islice(dataloader, start_batch, end_batch)
+
+        for batch_idx, batch in enumerate(tqdm(batches, total=end_batch-start_batch, desc="Computing gradients")):
+            global_batch_idx = start_batch + batch_idx
+
+            self.model.zero_grad()
+
+            # Prepare inputs
+            if isinstance(batch, dict):
+                inputs = {k: v.to(self.device) for k, v in batch.items()}
+                batch_size = next(iter(batch.values())).shape[0]
+            else:
+                inputs = batch[0].to(self.device)
+                batch_size = batch[0].shape[0]
+
+            batch_sample_counts.append(batch_size)
+
+            # Forward and backward
+            outputs = self.model(**inputs) if isinstance(inputs, dict) else self.model(inputs)
+            logp = -outputs.loss
+            loss = logp - torch.log(1 - torch.exp(logp))
+            loss.backward()
+
+            # Get compressed gradients
+            with torch.no_grad():
+                compressed_grads = self.hook_manager.get_compressed_grads()
+
+                # Convert to list format
+                batch_grads = []
+                for grad in compressed_grads:
+                    if grad is None:
+                        batch_grads.append(torch.tensor([]))
+                    else:
+                        batch_grads.append(grad.detach())
+
+                # Detect layer dimensions on first batch
+                if self.layer_dims is None:
+                    self.layer_dims = []
+                    for grad in batch_grads:
+                        if grad.numel() > 0:
+                            self.layer_dims.append(grad.shape[1] if grad.dim() > 1 else grad.numel())
+                        else:
+                            self.layer_dims.append(0)
+
+                    # Pass to disk IO manager
+                    if hasattr(self.strategy, 'disk_io'):
+                        self.strategy.disk_io.layer_dims = self.layer_dims
+
+                # Store gradients
+                self.strategy.store_gradients(global_batch_idx, batch_grads, is_test=False)
+
+            torch.cuda.empty_cache()
+
+        # Update metadata
+        for i, batch_idx in enumerate(range(start_batch, end_batch)):
+            if i < len(batch_sample_counts):
+                self.metadata.add_batch_info(batch_idx=batch_idx, sample_count=batch_sample_counts[i])
+
+        return None, {}
+
+    def cache_gradients(self, train_dataloader: 'DataLoader', worker: str = "0/1") -> None:
+        """Cache gradients using direct tensor storage."""
         total_batches = len(train_dataloader)
         start_batch, end_batch = self._get_worker_batch_range(total_batches, worker)
 
-        # Validate and start batch range processing for disk offload
+        # Start batch range processing
         if self.offload == "disk" and hasattr(self.strategy, 'start_batch_range_processing'):
             self.strategy.start_batch_range_processing(start_batch, end_batch)
 
         logger.info(f"Worker {worker}: Caching gradients with offload strategy: {self.offload}")
-        logger.info(f"  Processing batch range: [{start_batch}, {end_batch}) ({end_batch - start_batch} batches)")
 
         self.full_train_dataloader = train_dataloader
 
         if self.sparsifiers is None and self.projectors is None:
             self._setup_compressors(train_dataloader)
 
-        gradients_dict, batch_sample_counts = self._compute_gradients_chunked(
-            train_dataloader,
-            is_test=False,
-            worker=worker
-        )
-
-        # Store batch information in metadata
-        for i, batch_idx in enumerate(sorted(gradients_dict.keys())):
-            sample_idx = batch_idx - start_batch
-            if 0 <= sample_idx < len(batch_sample_counts):
-                sample_count = batch_sample_counts[sample_idx]
-                self.metadata.add_batch_info(batch_idx=batch_idx, sample_count=sample_count)
+        # Compute and store gradients
+        self._compute_train_gradients_with_storage(train_dataloader, start_batch, end_batch)
 
         self.metadata.save_metadata()
 
-        # Finalize batch range processing for disk offload
+        # Finalize batch range processing
         if self.offload == "disk" and hasattr(self.strategy, 'finish_batch_range_processing'):
             self.strategy.finish_batch_range_processing()
-
-            # Wait for async operations to complete
             self.strategy.wait_for_async_operations()
 
         self._cleanup_hooks()
 
-        logger.info(f"Worker {worker}: Cached gradients for {len(self.layer_names)} modules across {len(gradients_dict)} batches")
-
-        if self.profile and self.profiling_stats:
-            return (gradients_dict, self.profiling_stats)
-        else:
-            return gradients_dict
+        logger.info(f"Worker {worker}: Cached gradients for {len(self.layer_names)} modules")
 
     @abstractmethod
     def compute_preconditioners(self, damping: Optional[float] = None) -> List[torch.Tensor]:
-        """Compute preconditioners (inverse Hessian) from gradients."""
+        """Compute preconditioners from gradients."""
         pass
 
     @abstractmethod
-    def compute_ifvp(self, worker: str = "0/1") -> Dict[int, List[torch.Tensor]]:
-        """Compute inverse-Hessian-vector products (IFVP) from gradients and preconditioners."""
+    def compute_ifvp(self, worker: str = "0/1") -> None:
+        """Compute and store IFVP."""
         pass
 
     @abstractmethod
     def compute_self_influence(self, worker: str = "0/1") -> torch.Tensor:
-        """Compute self-influence scores for training examples."""
+        """Compute self-influence scores."""
         pass
 
     @abstractmethod
@@ -374,5 +395,5 @@ class BaseAttributor(ABC):
         train_dataloader: Optional['DataLoader'] = None,
         use_cached_ifvp: bool = True
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ProfilingStats]]:
-        """Attribute influence of training examples on test examples."""
+        """Attribute influence scores."""
         pass

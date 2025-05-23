@@ -700,45 +700,45 @@ def main():
             torch.cuda.synchronize(device)
             cache_end_time = time.time()
 
-        # # Grid search over damping values
-        # logger.info("Starting grid search for damping values...")
-        # for damping in tqdm(damping_values, desc="Damping Grid Search"):
-        #     logger.info(f"Evaluating damping = {damping}")
+        # Grid search over damping values
+        logger.info("Starting grid search for damping values...")
+        for damping in tqdm(damping_values, desc="Damping Grid Search"):
+            logger.info(f"Evaluating damping = {damping}")
 
-        #     # Compute preconditioners for current damping
-        #     attributor.compute_preconditioners(damping=damping)
+            # Compute preconditioners for current damping
+            attributor.compute_preconditioners(damping=damping)
 
-        #     for worker_id in range(total_workers):
-        #         attributor = IFAttributor(
-        #             setting="GPT2_wikitext",
-        #             model=model,
-        #             layer_names=layer_names,
-        #             hessian=hessian,
-        #             profile=args.profile,
-        #             device=device,
-        #             sparsifier_kwargs=sparsifier_kwargs,
-        #             projector_kwargs=projector_kwargs,
-        #             offload="disk",
-        #             cache_dir="./GradComp/cache"
-        #         )
+            for worker_id in range(total_workers):
+                attributor = IFAttributor(
+                    setting="GPT2_wikitext",
+                    model=model,
+                    layer_names=layer_names,
+                    hessian=hessian,
+                    profile=args.profile,
+                    device=device,
+                    sparsifier_kwargs=sparsifier_kwargs,
+                    projector_kwargs=projector_kwargs,
+                    offload="disk",
+                    cache_dir="./GradComp/cache"
+                )
 
-        #         attributor.compute_ifvp(worker=f"{worker_id}/{total_workers}")
+                attributor.compute_ifvp(worker=f"{worker_id}/{total_workers}")
 
-        #     # Evaluate on validation set
-        #     if args.profile:
-        #         val_score, profile = attributor.attribute(test_dataloader=val_dataloader)
-        #     else:
-        #         val_score = attributor.attribute(test_dataloader=val_dataloader)
-        #     # Calculate LDS for validation set
-        #     val_lds_score = split_lds(val_score, training_setting, val_indices, original_test_len)
-        #     validation_results[damping] = val_lds_score
+            # Evaluate on validation set
+            if args.profile:
+                val_score, profile = attributor.attribute(test_dataloader=val_dataloader)
+            else:
+                val_score = attributor.attribute(test_dataloader=val_dataloader)
+            # Calculate LDS for validation set
+            val_lds_score = split_lds(val_score, training_setting, val_indices, original_test_len)
+            validation_results[damping] = val_lds_score
 
-        #     logger.info(f"Damping: {damping}, Validation LDS: {val_lds_score}")
+            logger.info(f"Damping: {damping}, Validation LDS: {val_lds_score}")
 
-        #     # Track best damping value
-        #     if val_lds_score > best_lds_score:
-        #         best_lds_score = val_lds_score
-        #         best_damping = damping
+            # Track best damping value
+            if val_lds_score > best_lds_score:
+                best_lds_score = val_lds_score
+                best_damping = damping
 
         logger.info("\nValidation Results:")
         for damping, score in validation_results.items():

@@ -1,5 +1,5 @@
 """
-Enhanced disk offload strategy with chunking support.
+Enhanced disk offload strategy with tensor-based chunking support.
 """
 
 import os
@@ -14,8 +14,8 @@ from ...data.dataset import create_chunked_dataloader
 
 class DiskOffloadStrategy(OffloadStrategy):
     """
-    Enhanced strategy that stores data on disk using chunking for better I/O performance.
-    This minimizes memory usage and provides efficient chunked I/O with reduced file overhead.
+    Enhanced strategy that stores data on disk using tensor-based chunking.
+    Provides efficient storage with concatenated tensors.
     """
 
     def __init__(self, device: str, layer_names: List[str], cache_dir: Optional[str] = None,
@@ -51,7 +51,7 @@ class DiskOffloadStrategy(OffloadStrategy):
             self.current_batch_range = None
 
     def store_gradients(self, batch_idx: int, gradients: List[torch.Tensor], is_test: bool = False) -> None:
-        """Store gradients for a batch on disk using chunked storage."""
+        """Store gradients for a batch on disk using tensor-based chunked storage."""
         self.disk_io.store_gradients(batch_idx, gradients, is_test)
 
     def retrieve_gradients(self, batch_idx: int, is_test: bool = False) -> List[torch.Tensor]:
@@ -77,7 +77,7 @@ class DiskOffloadStrategy(OffloadStrategy):
         return None
 
     def store_ifvp(self, batch_idx: int, ifvp: List[torch.Tensor]) -> None:
-        """Store IFVP for a batch on disk using chunked storage."""
+        """Store IFVP for a batch on disk using tensor-based chunked storage."""
         self.disk_io.store_ifvp(batch_idx, ifvp)
 
     def retrieve_ifvp(self, batch_idx: int) -> List[torch.Tensor]:
@@ -97,9 +97,23 @@ class DiskOffloadStrategy(OffloadStrategy):
             batch_size: int = 1,
             pin_memory: bool = True,
             batch_range: Optional[Tuple[int, int]] = None,
-            is_test: bool = False
+            is_test: bool = False,
+            use_tensor_dataset: bool = False
         ) -> DataLoader:
-        """Create a DataLoader for loading chunked data from disk."""
+        """
+        Create a DataLoader for loading chunked data from disk.
+
+        Args:
+            data_type: Type of data to load
+            batch_size: Batch size for DataLoader
+            pin_memory: Whether to pin memory
+            batch_range: Optional batch range filter
+            is_test: Whether loading test data
+            use_tensor_dataset: If True, use efficient tensor-based dataset
+
+        Returns:
+            DataLoader instance
+        """
         return create_chunked_dataloader(
             disk_io=self.disk_io,
             data_type=data_type,
@@ -107,8 +121,11 @@ class DiskOffloadStrategy(OffloadStrategy):
             pin_memory=pin_memory,
             batch_range=batch_range,
             is_test=is_test,
-            use_chunk_dataset=True
+            use_chunk_dataset=not use_tensor_dataset,
+            use_tensor_dataset=use_tensor_dataset
         )
+
+
 
     def has_preconditioners(self) -> bool:
         """Check if preconditioners are available on disk."""
