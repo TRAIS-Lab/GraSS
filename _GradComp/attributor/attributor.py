@@ -1,8 +1,8 @@
 """
-Enhanced concrete implementation of the Influence Function Attributor with pure tensor optimization.
+Influence Function Attributor.
 """
 
-from typing import TYPE_CHECKING, Dict, List, Optional, Union, Tuple, Any
+from typing import TYPE_CHECKING, Dict, List, Optional, Union, Tuple
 import time
 import gc
 
@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 import torch
 from tqdm import tqdm
 
-from .base import BaseAttributor, HessianOptions, ProfilingStats
+from .base import BaseAttributor, ProfilingStats
 from ..utils.common import stable_inverse
 
 import logging
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 class IFAttributor(BaseAttributor):
     """
-    Enhanced Influence function calculator with pure tensor I/O for maximum performance.
+    Influence function calculator with optimized I/O managing.
     """
 
     def compute_preconditioners(self, damping: Optional[float] = None) -> List[torch.Tensor]:

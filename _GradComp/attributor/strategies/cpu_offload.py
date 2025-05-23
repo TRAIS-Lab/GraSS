@@ -1,8 +1,8 @@
 """
-CPU offload strategy with pure tensor support for consistency.
+CPU offload strategy.
 """
 
-from typing import Dict, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 
 import torch
 from torch.utils.data import DataLoader
@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 class CPUOffloadStrategy(OffloadStrategy):
     """
     Strategy that stores data on CPU and moves to device when needed.
-    Uses tensor concatenation for consistency with disk strategy.
     """
 
     def __init__(self, device: str, layer_names: List[str], cache_dir: Optional[str] = None):

@@ -1,5 +1,5 @@
 """
-Memory offload strategy with pure tensor support for consistency.
+Memory offload strategy.
 """
 
 from typing import Dict, List, Optional, Tuple, Union
@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 class MemoryOffloadStrategy(OffloadStrategy):
     """
     Strategy that keeps all data in memory on the specified device.
-    Uses tensor concatenation for consistency with disk strategy.
     """
 
     def __init__(self, device: str, layer_names: List[str], cache_dir: Optional[str] = None):

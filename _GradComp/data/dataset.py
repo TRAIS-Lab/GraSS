@@ -1,15 +1,14 @@
 """
-Optimized dataset classes for loading pure tensor-based chunked data.
+Dataset classes for loading pure chunked data.
 """
 
 import os
-import gc
-import logging
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Dict, Any
 
 import torch
 import torch.utils.data
 
+import logging
 logger = logging.getLogger(__name__)
 
 # Forward declaration for lazy imports
@@ -26,7 +25,7 @@ def _lazy_import_memory_map():
 
 class TensorChunkedDataset(torch.utils.data.Dataset):
     """
-    Optimized dataset that loads chunks as pure concatenated tensors.
+    Dataset that loads chunks as pure concatenated tensors.
     """
 
     def __init__(self, disk_io, data_type="gradients", batch_range=None):

@@ -1,21 +1,19 @@
 """
-Optimized metadata management for batches, layers, and processing state.
+Metadata management for batches, layers, and processing state.
 """
 
 import os
 import json
 import time
-import logging
 import threading
-from typing import Dict, List, Tuple, Optional
-from collections import defaultdict
+from typing import Dict, List, Tuple
 
-# Configure logger
+import logging
 logger = logging.getLogger(__name__)
 
 class MetadataManager:
     """
-    Optimized manager for batch metadata with support for layer dimensions.
+    Manager for batch metadata with support for layer dimensions.
     """
 
     def __init__(self, cache_dir: str, layer_names: List[str]):

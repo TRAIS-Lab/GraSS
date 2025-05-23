@@ -1,16 +1,15 @@
 """
-Enhanced disk offload strategy with pure tensor-based chunking support.
+Disk offload strategy.
 """
 
 import os
-from typing import Dict, List, Optional, Tuple, Union, Set
+from typing import List, Optional, Tuple
 
 import torch
 from torch.utils.data import DataLoader
 
 from .offload_strategy import OffloadStrategy
 from ...io.disk_io import ChunkedDiskIOManager
-from ...data.dataset import create_tensor_dataloader
 
 import logging
 logger = logging.getLogger(__name__)

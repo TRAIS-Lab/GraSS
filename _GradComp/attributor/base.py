@@ -1,14 +1,12 @@
 """
-Clean base implementation with pure tensor support throughout the pipeline.
+Base Attributor.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, Tuple, Literal
-import time
 from dataclasses import dataclass
-import logging
 import gc
 import itertools
 
@@ -24,6 +22,7 @@ from ..core.hook import HookManager
 from ..core.metadata import MetadataManager
 from ..projection.projector import setup_model_compressors
 
+import logging
 logger = logging.getLogger(__name__)
 
 HessianOptions = Literal["none", "raw", "kfac", "ekfac"]
@@ -39,7 +38,7 @@ class ProfilingStats:
 
 class BaseAttributor(ABC):
     """
-    Clean base class for Influence Function Attributors with pure tensor support.
+    Base class for Influence Function Attributors.
     """
 
     def __init__(

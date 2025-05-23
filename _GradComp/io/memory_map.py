@@ -1,22 +1,21 @@
 """
-Enhanced Memory-mapped file operations with pure tensor storage for maximum efficiency.
+Memory-mapped file operations.
 """
 
 import json
 import os
-import logging
 from contextlib import contextmanager
 from typing import Dict, List, Tuple, Any, Optional
 
 import numpy as np
 import torch
 
+import logging
 logger = logging.getLogger(__name__)
 
 class ChunkedMemoryMapHandler:
     """
     Optimized handler for memory-mapped file operations with pure tensor storage.
-    Stores gradients as single concatenated tensors without dict overhead.
     """
 
     @staticmethod

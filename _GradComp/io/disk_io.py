@@ -1,22 +1,19 @@
 """
-Efficient Disk I/O manager with pure tensor storage.
+Disk I/O manager.
 """
 
 import os
-import gc
-import logging
-import time
 import threading
-from typing import List, Dict, Optional, Literal, Any, Union, Tuple
+from typing import List, Dict, Optional, Literal, Any, Tuple
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import torch
-import numpy as np
 
 from .memory_map import ChunkedMemoryMapHandler
 
+import logging
 logger = logging.getLogger(__name__)
 
 DataTypeOptions = Literal["gradients", "preconditioners", "ifvp"]
@@ -33,7 +30,6 @@ class ChunkBuffer:
 class ChunkedDiskIOManager:
     """
     Disk I/O manager with pure tensor storage per chunk.
-    Stores data as concatenated tensors for maximum efficiency.
     """
 
     def __init__(self, cache_dir: str, setting: str, num_threads: int = 16,

@@ -1,5 +1,5 @@
 """
-GradComp - Efficient Gradient Computation and Influence Attribution
+GradComp - Gradient Component-Based Influence Attribution
 """
 
 import logging
