@@ -45,7 +45,7 @@ class TensorChunkedDataset(torch.utils.data.Dataset):
         # Get chunk information
         self.chunk_info = self._load_chunk_info()
 
-        logger.info(f"TensorChunkedDataset: Found {len(self.chunk_info)} chunks for {data_type}")
+        logger.debug(f"TensorChunkedDataset: Found {len(self.chunk_info)} chunks for {data_type}")
 
     def _load_chunk_info(self) -> List[Dict[str, Any]]:
         """Load information about all available chunks."""
@@ -186,7 +186,7 @@ def create_tensor_dataloader(disk_io, data_type="gradients", batch_size=1,
     return torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
-        num_workers=0,  # Always 0
+        num_workers=0,
         pin_memory=pin_memory,
         shuffle=False,
         collate_fn=tensor_collate_fn

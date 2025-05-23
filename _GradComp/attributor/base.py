@@ -103,15 +103,17 @@ class BaseAttributor(ABC):
         if self.metadata.layer_dims is not None:
             self.layer_dims = self.metadata.layer_dims
             self.total_proj_dim = self.metadata.total_proj_dim
-            logger.info(f"Loaded layer dimensions from metadata: {self.layer_dims}")
+            logger.debug(f"Loaded layer dimensions from metadata")
 
             # Sync to disk IO if using disk offload
             if self.offload == "disk" and hasattr(self.strategy, 'disk_io'):
                 self.strategy.disk_io.layer_dims = self.layer_dims
                 self.strategy.disk_io.total_proj_dim = self.total_proj_dim
 
-        logger.info(f"Initialized Pure Tensor BaseAttributor:")
-        logger.info(f"  Offload: {offload}, Device: {device}, Chunk size: {chunk_size}")
+        logger.info(f"Initialized {self.__class__.__name__}:")
+        logger.info(f"  Layers: {len(self.layer_names)}, Device: {device}, Offload: {offload}")
+        if self.layer_dims:
+            logger.info(f"  Dimensions: {len(self.layer_dims)} layers × {self.layer_dims[0] if self.layer_dims else 0} dim = {self.total_proj_dim} total")
 
     def _sync_layer_dims(self):
         """Synchronize layer dimensions between components."""
@@ -121,7 +123,7 @@ class BaseAttributor(ABC):
             if self.metadata.layer_dims is not None:
                 self.layer_dims = self.metadata.layer_dims
                 self.total_proj_dim = self.metadata.total_proj_dim
-                logger.info(f"Loaded layer dimensions from metadata: {self.layer_dims}")
+                logger.debug(f"Loaded layer dimensions from metadata")
 
             # Try from disk IO if using disk offload
             elif self.offload == "disk" and hasattr(self.strategy, 'disk_io'):
@@ -131,7 +133,7 @@ class BaseAttributor(ABC):
                     self.total_proj_dim = self.strategy.disk_io.total_proj_dim
                     # Also update metadata
                     self.metadata.set_layer_dims(self.layer_dims)
-                    logger.info(f"Loaded layer dimensions from disk IO: {self.layer_dims}")
+                    logger.debug(f"Loaded layer dimensions from disk IO")
 
         # Sync to all components
         if self.layer_dims is not None:
@@ -143,6 +145,8 @@ class BaseAttributor(ABC):
             # Update metadata if needed
             if self.metadata.layer_dims is None:
                 self.metadata.set_layer_dims(self.layer_dims)
+
+            logger.debug(f"Layer dimensions synchronized: {len(self.layer_dims)} layers, total={self.total_proj_dim}")
 
     def _setup_compressors(self, train_dataloader: 'DataLoader') -> None:
         """Set up projectors for the model layers."""
@@ -210,17 +214,17 @@ class BaseAttributor(ABC):
         start_batch, end_batch = self._get_worker_batch_range(total_batches, worker)
 
         desc_prefix = "test" if is_test else "training"
-        logger.info(f"Worker {worker}: Computing gradients for {desc_prefix} data")
-        logger.info(f"  Batch range: [{start_batch}, {end_batch}) ({end_batch - start_batch} batches)")
+        logger.debug(f"Worker {worker}: Computing gradients for {desc_prefix} data")
+        logger.debug(f"  Batch range: [{start_batch}, {end_batch}) ({end_batch - start_batch} batches)")
 
         # For test data, accumulate in memory and return tensor
         if is_test:
-            return self._compute_test_gradients_as_tensor(dataloader, start_batch, end_batch)
+            return self._compute_gradients_in_memory(dataloader, start_batch, end_batch)
 
         # For training data, use disk storage
-        return self._compute_train_gradients_with_storage(dataloader, start_batch, end_batch)
+        return self._compute_gradients_in_disk(dataloader, start_batch, end_batch)
 
-    def _compute_test_gradients_as_tensor(
+    def _compute_gradients_in_memory(
         self,
         dataloader: 'DataLoader',
         start_batch: int,
@@ -242,7 +246,7 @@ class BaseAttributor(ABC):
 
         # First pass: detect dimensions if not known
         if self.layer_dims is None:
-            logger.info("Detecting layer dimensions from first batch...")
+            logger.debug("Detecting layer dimensions from first batch...")
             first_batch = next(iter(dataloader))
 
             self.model.zero_grad()
@@ -266,7 +270,7 @@ class BaseAttributor(ABC):
                     self.layer_dims.append(0)
 
             self.total_proj_dim = sum(self.layer_dims)
-            logger.info(f"Detected layer dimensions: {self.layer_dims}, total: {self.total_proj_dim}")
+            logger.debug(f"Detected layer dimensions: {len(self.layer_dims)} layers, total={self.total_proj_dim}")
 
             # Save to metadata manager
             self.metadata.set_layer_dims(self.layer_dims)
@@ -323,7 +327,7 @@ class BaseAttributor(ABC):
 
         return all_gradients, batch_mapping
 
-    def _compute_train_gradients_with_storage(
+    def _compute_gradients_in_disk(
         self,
         dataloader: 'DataLoader',
         start_batch: int,
@@ -381,7 +385,7 @@ class BaseAttributor(ABC):
                             self.layer_dims.append(0)
 
                     self.total_proj_dim = sum(self.layer_dims)
-                    logger.info(f"Detected layer dimensions: {self.layer_dims}, total: {self.total_proj_dim}")
+                    logger.info(f"Detected layer dimensions: {len(self.layer_dims)} layers, total dimension={self.total_proj_dim}")
 
                     # Save to metadata manager
                     self.metadata.set_layer_dims(self.layer_dims)
@@ -428,7 +432,7 @@ class BaseAttributor(ABC):
             self._setup_compressors(train_dataloader)
 
         # Compute and store gradients
-        self._compute_train_gradients_with_storage(train_dataloader, start_batch, end_batch)
+        self._compute_gradients_in_disk(train_dataloader, start_batch, end_batch)
 
         # Make sure layer dimensions are saved to metadata
         if self.layer_dims is not None and self.metadata.layer_dims is None:
@@ -443,7 +447,7 @@ class BaseAttributor(ABC):
 
         self._cleanup_hooks()
 
-        logger.info(f"Worker {worker}: Cached gradients for {len(self.layer_names)} modules")
+        logger.info(f"Worker {worker}: Cached gradients for batches [{start_batch}, {end_batch})")
 
     @abstractmethod
     def compute_preconditioners(self, damping: Optional[float] = None) -> List[torch.Tensor]:
@@ -451,7 +455,7 @@ class BaseAttributor(ABC):
         pass
 
     @abstractmethod
-    def compute_ifvp(self, worker: str = "0/1") -> None:
+    def compute_ifvp(self, worker: str = "0/1") -> Dict[int, List[torch.Tensor]]:
         """Compute and store IFVP."""
         pass
 

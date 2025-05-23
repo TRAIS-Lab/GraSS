@@ -44,7 +44,7 @@ class MemoryOffloadStrategy(OffloadStrategy):
         if self.layer_dims is None:
             self.layer_dims = [g.shape[1] if g.numel() > 0 else 0 for g in gradients]
             self.total_proj_dim = sum(self.layer_dims)
-            logger.info(f"Detected layer dimensions: {self.layer_dims}, total: {self.total_proj_dim}")
+            logger.debug(f"Detected layer dimensions: {len(self.layer_dims)} layers, total={self.total_proj_dim}")
 
     def _concatenate_gradients(self, gradients: List[torch.Tensor]) -> torch.Tensor:
         """Concatenate list of gradient tensors into single tensor."""

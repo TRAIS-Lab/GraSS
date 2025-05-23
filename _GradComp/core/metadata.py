@@ -42,7 +42,7 @@ class MetadataManager:
             # Check for existing metadata
             self._load_metadata_if_exists()
 
-        logger.info(f"Initialized MetadataManager with {len(layer_names)} layers")
+        logger.debug(f"Initialized MetadataManager with {len(layer_names)} layers")
 
     def add_batch_info(self, batch_idx: int, sample_count: int) -> None:
         """
@@ -80,7 +80,7 @@ class MetadataManager:
         with self._metadata_lock:
             self.layer_dims = layer_dims
             self.total_proj_dim = sum(layer_dims) if layer_dims else None
-            logger.info(f"Set layer dimensions: {layer_dims}, total: {self.total_proj_dim}")
+            logger.debug(f"Set layer dimensions: {len(layer_dims)} layers, total={self.total_proj_dim}")
 
     def _flush_pending_batches(self) -> None:
         """Flush pending batches to the main batch_info dict."""
@@ -215,7 +215,7 @@ class MetadataManager:
                 if 'layer_dims' in metadata:
                     self.layer_dims = metadata['layer_dims']
                     self.total_proj_dim = metadata.get('total_proj_dim')
-                    logger.info(f"Loaded layer dimensions from metadata: {self.layer_dims}")
+                    logger.debug(f"Loaded layer dimensions from metadata")
 
                 logger.info(f"Loaded metadata for {len(self.batch_info)} batches")
 

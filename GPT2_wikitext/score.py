@@ -678,78 +678,78 @@ def main():
 
         total_workers = 3
 
-        for worker_id in range(total_workers):
+        # for worker_id in range(total_workers):
 
-            attributor = IFAttributor(
-                setting="GPT2_wikitext",
-                model=model,
-                layer_names=layer_names,
-                hessian=hessian,
-                profile=args.profile,
-                device=device,
-                sparsifier_kwargs=sparsifier_kwargs,
-                projector_kwargs=projector_kwargs,
-                offload="disk",
-                cache_dir="./GradComp/cache"
-            )
+        #     attributor = IFAttributor(
+        #         setting="GPT2_wikitext",
+        #         model=model,
+        #         layer_names=layer_names,
+        #         hessian=hessian,
+        #         profile=args.profile,
+        #         device=device,
+        #         sparsifier_kwargs=sparsifier_kwargs,
+        #         projector_kwargs=projector_kwargs,
+        #         offload="disk",
+        #         cache_dir="./GradComp/cache"
+        #     )
 
-            # Measure cache throughput
-            torch.cuda.synchronize(device)
-            cache_start_time = time.time()
-            attributor.cache_gradients(train_dataloader, worker=f"{worker_id}/{total_workers}")
-            torch.cuda.synchronize(device)
-            cache_end_time = time.time()
+        #     # Measure cache throughput
+        #     torch.cuda.synchronize(device)
+        #     cache_start_time = time.time()
+        #     attributor.cache_gradients(train_dataloader, worker=f"{worker_id}/{total_workers}")
+        #     torch.cuda.synchronize(device)
+        #     cache_end_time = time.time()
 
-        # Grid search over damping values
-        logger.info("Starting grid search for damping values...")
-        for damping in tqdm(damping_values, desc="Damping Grid Search"):
-            logger.info(f"Evaluating damping = {damping}")
+        # # Grid search over damping values
+        # logger.info("Starting grid search for damping values...")
+        # for damping in tqdm(damping_values, desc="Damping Grid Search"):
+        #     logger.info(f"Evaluating damping = {damping}")
 
-            # Compute preconditioners for current damping
-            attributor.compute_preconditioners(damping=damping)
+        #     # Compute preconditioners for current damping
+        #     attributor.compute_preconditioners(damping=damping)
 
-            for worker_id in range(total_workers):
-                attributor = IFAttributor(
-                    setting="GPT2_wikitext",
-                    model=model,
-                    layer_names=layer_names,
-                    hessian=hessian,
-                    profile=args.profile,
-                    device=device,
-                    sparsifier_kwargs=sparsifier_kwargs,
-                    projector_kwargs=projector_kwargs,
-                    offload="disk",
-                    cache_dir="./GradComp/cache"
-                )
+        #     for worker_id in range(total_workers):
+        #         attributor = IFAttributor(
+        #             setting="GPT2_wikitext",
+        #             model=model,
+        #             layer_names=layer_names,
+        #             hessian=hessian,
+        #             profile=args.profile,
+        #             device=device,
+        #             sparsifier_kwargs=sparsifier_kwargs,
+        #             projector_kwargs=projector_kwargs,
+        #             offload="disk",
+        #             cache_dir="./GradComp/cache"
+        #         )
 
-                attributor.compute_ifvp(worker=f"{worker_id}/{total_workers}")
+        #         attributor.compute_ifvp(worker=f"{worker_id}/{total_workers}")
 
-            # Evaluate on validation set
-            if args.profile:
-                val_score, profile = attributor.attribute(test_dataloader=val_dataloader)
-            else:
-                val_score = attributor.attribute(test_dataloader=val_dataloader)
-            # Calculate LDS for validation set
-            val_lds_score = split_lds(val_score, training_setting, val_indices, original_test_len)
-            validation_results[damping] = val_lds_score
+        #     # Evaluate on validation set
+        #     if args.profile:
+        #         val_score, profile = attributor.attribute(test_dataloader=val_dataloader)
+        #     else:
+        #         val_score = attributor.attribute(test_dataloader=val_dataloader)
+        #     # Calculate LDS for validation set
+        #     val_lds_score = split_lds(val_score, training_setting, val_indices, original_test_len)
+        #     validation_results[damping] = val_lds_score
 
-            logger.info(f"Damping: {damping}, Validation LDS: {val_lds_score}")
+        #     logger.info(f"Damping: {damping}, Validation LDS: {val_lds_score}")
 
-            # Track best damping value
-            if val_lds_score > best_lds_score:
-                best_lds_score = val_lds_score
-                best_damping = damping
+        #     # Track best damping value
+        #     if val_lds_score > best_lds_score:
+        #         best_lds_score = val_lds_score
+        #         best_damping = damping
 
-        logger.info("\nValidation Results:")
-        for damping, score in validation_results.items():
-            logger.info(f"Damping: {damping}, LDS: {score}")
+        # logger.info("\nValidation Results:")
+        # for damping, score in validation_results.items():
+        #     logger.info(f"Damping: {damping}, LDS: {score}")
 
-        logger.info(f"\nBest damping value: {best_damping} (Validation LDS: {best_lds_score})")
+        # logger.info(f"\nBest damping value: {best_damping} (Validation LDS: {best_lds_score})")
 
-        # Run final attribution with best damping value
-        logger.info("\nRunning final attribution with best damping value...")
-        torch.cuda.synchronize(device)
-        attribute_start_time = time.time()
+        # # Run final attribution with best damping value
+        # logger.info("\nRunning final attribution with best damping value...")
+        # torch.cuda.synchronize(device)
+        # attribute_start_time = time.time()
 
         attributor = IFAttributor(
             setting="GPT2_wikitext",
@@ -765,8 +765,8 @@ def main():
         )
 
         # Compute preconditioners for best damping value
-        attributor.compute_preconditioners(damping=best_damping)
-        attributor.compute_ifvp()
+        # attributor.compute_preconditioners(damping=best_damping)
+        # attributor.compute_ifvp()
 
         # Measure attribute throughput
         torch.cuda.synchronize(device)

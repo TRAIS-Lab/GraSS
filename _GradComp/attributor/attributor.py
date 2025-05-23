@@ -44,6 +44,8 @@ class IFAttributor(BaseAttributor):
         if self.layer_dims is None:
             raise ValueError("Layer dimensions not found. Ensure gradients have been computed and stored.")
 
+        logger.info(f"Computing preconditioners for {len(self.layer_names)} layers")
+
         # If hessian type is "none", no preconditioners needed
         if self.hessian == "none":
             logger.info("Hessian type is 'none', skipping preconditioner computation")
@@ -63,7 +65,7 @@ class IFAttributor(BaseAttributor):
         sample_counts = [0] * len(self.layer_names)
 
         # Use tensor-based dataloader for efficient processing
-        logger.info("Using tensor-based dataloader for preconditioner computation")
+        logger.debug("Using tensor-based dataloader for preconditioner computation")
 
         dataloader = self.strategy.create_gradient_dataloader(
             data_type="gradients",
@@ -88,35 +90,16 @@ class IFAttributor(BaseAttributor):
 
                     sample_counts[layer_idx] += layer_data.shape[0]
 
-                    try:
-                        # Compute Hessian contribution for this chunk
-                        batch_hessian = torch.matmul(layer_data.t(), layer_data)
+                    # Compute Hessian contribution for this chunk
+                    batch_hessian = torch.matmul(layer_data.t(), layer_data)
 
-                        # Accumulate to the Hessian
-                        if hessian_accumulators[layer_idx] is None:
-                            hessian_accumulators[layer_idx] = batch_hessian
-                        else:
-                            hessian_accumulators[layer_idx] += batch_hessian
+                    # Accumulate to the Hessian
+                    if hessian_accumulators[layer_idx] is None:
+                        hessian_accumulators[layer_idx] = batch_hessian
+                    else:
+                        hessian_accumulators[layer_idx] += batch_hessian
 
-                        del batch_hessian
-
-                    except RuntimeError as e:
-                        if "out of memory" in str(e):
-                            logger.warning(f"GPU memory overflow for layer {layer_idx}, processing in smaller chunks")
-                            # Process in smaller pieces
-                            chunk_size = 1000
-                            for i in range(0, layer_data.shape[0], chunk_size):
-                                small_data = layer_data[i:i+chunk_size]
-                                small_hessian = torch.matmul(small_data.t(), small_data)
-                                if hessian_accumulators[layer_idx] is None:
-                                    hessian_accumulators[layer_idx] = small_hessian
-                                else:
-                                    hessian_accumulators[layer_idx] += small_hessian
-                                del small_data, small_hessian
-                        else:
-                            raise
-
-                    del layer_data
+                    del batch_hessian, layer_data
 
                 del chunk_tensor
                 torch.cuda.empty_cache()
@@ -161,6 +144,11 @@ class IFAttributor(BaseAttributor):
     def compute_ifvp(self, worker: str = "0/1") -> Dict[int, List[torch.Tensor]]:
         """
         Compute inverse-Hessian-vector products (IFVP) using tensor-based processing.
+
+        Returns:
+            Dict mapping batch indices to IFVP tensors. For disk offload mode,
+            the dict values are None to save memory (actual data is stored on disk).
+            For memory/CPU offload modes, the dict contains the actual tensors.
         """
         logger.info(f"Worker {worker}: Computing IFVP with tensor-based processing")
 
@@ -194,7 +182,7 @@ class IFAttributor(BaseAttributor):
 
         # Return raw gradients if Hessian type is "none"
         if self.hessian == "none":
-            logger.info("Using raw gradients as IFVP since hessian type is 'none'")
+            logger.debug("Using raw gradients as IFVP since hessian type is 'none'")
             return self._copy_gradients_to_ifvp(start_batch, end_batch)
 
         if self.profile and self.profiling_stats:
@@ -208,16 +196,18 @@ class IFAttributor(BaseAttributor):
             preconditioners.append(precond)
 
         valid_preconditioners = sum(1 for p in preconditioners if p is not None)
-        logger.info(f"Loaded {valid_preconditioners} preconditioners out of {len(self.layer_names)} layers")
+        logger.debug(f"Loaded {valid_preconditioners} preconditioners out of {len(self.layer_names)} layers")
 
+        # For disk offload, we don't keep tensors in memory
+        # Instead, we just track which batches were processed
         result_dict = {}
 
         # Use tensor-based dataloader
-        logger.info("Processing IFVP using tensor-based dataloader")
+        logger.debug("Processing IFVP using tensor-based dataloader")
 
         dataloader = self.strategy.create_gradient_dataloader(
             data_type="gradients",
-            batch_size=2,  # Process 2 chunks at a time
+            batch_size=4,  # Process 4 chunks at a time
             pin_memory=True,
             batch_range=(start_batch, end_batch)
         )
@@ -259,10 +249,23 @@ class IFAttributor(BaseAttributor):
 
                     # Store IFVP for this batch
                     self.strategy.store_ifvp(batch_idx, batch_ifvp)
-                    result_dict[batch_idx] = batch_ifvp
+
+                    # For memory efficiency, especially with disk offload:
+                    # - Don't keep the actual tensors in result_dict
+                    # - Just mark that this batch was processed
+                    if self.offload == "disk":
+                        # For disk offload, don't keep tensors in memory
+                        result_dict[batch_idx] = None
+                        # Explicitly delete to free memory immediately
+                        del batch_ifvp
+                    else:
+                        # For memory/cpu offload, it's already in their cache
+                        # so keeping the reference is ok (they manage their own memory)
+                        result_dict[batch_idx] = batch_ifvp
 
                 del chunk_tensor
                 torch.cuda.empty_cache()
+                gc.collect()
 
         # Finalize batch range processing
         if self.offload == "disk" and hasattr(self.strategy, 'finish_batch_range_processing'):
@@ -314,7 +317,19 @@ class IFAttributor(BaseAttributor):
                         gradients.append(batch_tensor[:, start_col:end_col].contiguous())
 
                     self.strategy.store_ifvp(batch_idx, gradients)
-                    result_dict[batch_idx] = None
+
+                    # For memory efficiency with disk offload
+                    if self.offload == "disk":
+                        result_dict[batch_idx] = None
+                        # Explicitly free memory
+                        del gradients
+                    else:
+                        result_dict[batch_idx] = gradients
+
+                # Free chunk memory for disk offload
+                if self.offload == "disk":
+                    del chunk_tensor
+                    torch.cuda.empty_cache()
 
         return result_dict
 
@@ -406,7 +421,7 @@ class IFAttributor(BaseAttributor):
         use_cached_ifvp: bool = True
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ProfilingStats]]:
         """Attribute influence using tensor-based processing for maximum efficiency."""
-        logger.info("Computing influence attribution with pure tensor optimization")
+        logger.info("Computing influence attribution")
 
         # Load batch information if needed
         if not self.metadata.batch_info:
@@ -451,7 +466,7 @@ class IFAttributor(BaseAttributor):
         else:
             test_sample_count = test_grads_tensor.shape[0]
             all_test_gradients = test_grads_tensor
-            logger.info(f"Test data shape: {all_test_gradients.shape}")
+            logger.debug(f"Test data shape: {all_test_gradients.shape}")
 
         # Get batch mappings
         batch_to_sample_mapping = self.metadata.get_batch_to_sample_mapping()
@@ -461,7 +476,7 @@ class IFAttributor(BaseAttributor):
         IF_score = torch.zeros(total_train_samples, test_sample_count, device=self.device)
 
         # Use tensor-based attribution computation
-        logger.info("Using optimized tensor-based attribution computation")
+        logger.debug("Using tensor-based attribution computation")
 
         # Create dataloader for IFVP
         train_ifvp_dataloader = self.strategy.create_gradient_dataloader(

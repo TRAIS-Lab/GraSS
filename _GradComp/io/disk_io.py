@@ -68,7 +68,7 @@ class ChunkedDiskIOManager:
         # Try to load layer dimensions from existing data
         self._load_layer_dims_from_metadata()
 
-        logger.info(f"Initialized ChunkedDiskIOManager with pure tensor storage, chunk_size={chunk_size}")
+        logger.debug(f"Initialized ChunkedDiskIOManager with chunk_size={chunk_size}")
 
     def get_chunk_id(self, batch_idx: int) -> int:
         """Get chunk ID for a batch index."""
@@ -142,7 +142,7 @@ class ChunkedDiskIOManager:
         if self.layer_dims is None:
             self.layer_dims = [g.shape[1] if g.numel() > 0 else 0 for g in gradients]
             self.total_proj_dim = sum(self.layer_dims)
-            logger.info(f"Detected layer dimensions: {self.layer_dims}, total: {self.total_proj_dim}")
+            logger.debug(f"Detected layer dimensions: {len(self.layer_dims)} layers, total={self.total_proj_dim}")
 
         chunk_id = self.get_chunk_id(batch_idx)
         buffer_key = ('gradients', chunk_id)
