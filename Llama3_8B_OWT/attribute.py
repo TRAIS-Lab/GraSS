@@ -617,7 +617,7 @@ def main():
     # Dataset
     train_dataset = lm_datasets["train"]
 
-    train_batch_size, test_batch_size = 4, 4
+    train_batch_size, test_batch_size = 6, 6
 
     train_dataset = train_dataset.shuffle(seed=args.seed).select(range(int(1_000_000_000 / block_size)))
     if args.debug: # toy dataset
@@ -632,20 +632,6 @@ def main():
     throughput_stats = {}
 
     sparsifier_kwargs, projector_kwargs = setup_compression_kwargs(args, device)
-
-    # Get the batch range for this worker
-    # Parse worker configuration
-    worker_config = args.worker.split("/")
-    if len(worker_config) != 2:
-        raise ValueError("Worker argument must be in format 'WORKER_ID/TOTAL_WORKER'")
-
-    worker_id = int(worker_config[0])
-    total_workers = int(worker_config[1])
-
-    batch_per_worker = (len(train_dataloader) + total_workers - 1) // total_workers  # Ceiling division
-    start_idx = worker_id * batch_per_worker
-    end_idx = min((worker_id + 1) * batch_per_worker, len(train_dataloader))
-    batch_range = (start_idx, end_idx)
 
     # Logging setting
     logger.info(f"The train dataset length: {len(train_dataset)}.")
@@ -681,7 +667,8 @@ def main():
             sparsifier_kwargs=sparsifier_kwargs,
             projector_kwargs=projector_kwargs,
             offload="disk",
-            cache_dir=args.cache_dir
+            cache_dir=args.cache_dir,
+            chunk_size=32,
         )
 
         torch.cuda.synchronize(device)
@@ -690,7 +677,7 @@ def main():
         if args.mode == "cache":
             result = attributor.cache_gradients(
                     train_dataloader,
-                    batch_range=batch_range,
+                    worker=args.worker,
                 )
             if args.profile:
                 profile = result[1]
@@ -699,7 +686,7 @@ def main():
             attributor.compute_preconditioners()
 
         elif args.mode == "ifvp":
-            result = attributor.compute_ifvp(batch_range=batch_range)
+            result = attributor.compute_ifvp(worker=args.worker)
             if args.profile:
                 profile = result[1]
 
@@ -845,11 +832,10 @@ def main():
         raise ValueError("Invalid baseline implementation method. Choose from 'GC' and 'LogIX'.")
 
     # Calculate throughput
-    train_tokens = block_size * len(train_dataset) / int(args.worker.split("/")[1])
-    train_test_pairs = len(train_dataset) * len(prompt_dataset)
-
     duration = end_time - start_time
+
     if args.mode == "cache":
+        train_tokens = block_size * len(train_dataset) / int(args.worker.split("/")[1])
         throughput_stats["cache"] = {
             "tokens": train_tokens,
             "duration_seconds": duration,
@@ -862,6 +848,7 @@ def main():
             "throughput_pair_per_second": len(train_dataset) / duration
         }
     elif args.mode == "attribute":
+        train_test_pairs = len(train_dataset) * len(prompt_dataset)
         throughput_stats["self_influence"] = {
             "train_test_pairs": train_test_pairs,
             "duration_seconds": duration,

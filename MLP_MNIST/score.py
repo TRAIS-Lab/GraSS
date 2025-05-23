@@ -93,7 +93,7 @@ def main():
     args = parser.parse_args()
 
     # Define the grid of damping values to search
-    damping_values = [5e-3, 1e-3]
+    damping_values = [1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0]
 
     # Print the settings
     print("Settings: MLP + MNIST")

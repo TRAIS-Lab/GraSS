@@ -638,8 +638,8 @@ def main():
     training_setting = args.output_dir.split("/")[-1]
 
     # Define the grid of damping values to search
-    damping_values = [1e-4, 1e-3, 1e-2, 1e-1, 1e0, 10]
-    # damping_values = [None]
+    damping_values = [1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0]
+
     best_damping = None
     best_lds_score = float('-inf')
     validation_results = {}
