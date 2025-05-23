@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 class MetadataManager:
     """
-    Optimized manager for batch metadata with reduced I/O overhead.
+    Optimized manager for batch metadata with support for layer dimensions.
     """
 
     def __init__(self, cache_dir: str, layer_names: List[str]):
@@ -30,6 +30,8 @@ class MetadataManager:
         self.layer_names = layer_names
         self.batch_info = {}  # Maps batch_idx -> {sample_count, start_idx}
         self.total_samples = 0
+        self.layer_dims = None  # Store layer dimensions
+        self.total_proj_dim = None  # Total projection dimension
         self._metadata_lock = threading.Lock()
         self._pending_batches = {}  # Buffer for batches before bulk save
         self._last_save_time = 0
@@ -68,6 +70,18 @@ class MetadataManager:
             if should_save:
                 self._flush_pending_batches()
 
+    def set_layer_dims(self, layer_dims: List[int]) -> None:
+        """
+        Set the layer dimensions.
+
+        Args:
+            layer_dims: List of dimensions for each layer
+        """
+        with self._metadata_lock:
+            self.layer_dims = layer_dims
+            self.total_proj_dim = sum(layer_dims) if layer_dims else None
+            logger.info(f"Set layer dimensions: {layer_dims}, total: {self.total_proj_dim}")
+
     def _flush_pending_batches(self) -> None:
         """Flush pending batches to the main batch_info dict."""
         if not self._pending_batches:
@@ -77,9 +91,6 @@ class MetadataManager:
         self.batch_info.update(self._pending_batches)
         self._pending_batches.clear()
         self._last_save_time = time.time()
-
-        # Optional: Save to disk immediately for critical batches
-        # We'll do this less frequently to reduce I/O
 
     def get_total_samples(self) -> int:
         """
@@ -143,8 +154,10 @@ class MetadataManager:
             metadata = {
                 'batch_info': serializable_info,
                 'layer_names': self.layer_names,
+                'layer_dims': self.layer_dims,  # Save layer dimensions
+                'total_proj_dim': self.total_proj_dim,  # Save total projection dimension
                 'total_samples': current_idx,
-                'version': '1.0',  # Add version for future compatibility
+                'version': '2.0',  # Updated version for tensor format
                 'timestamp': time.time()
             }
 
@@ -160,7 +173,7 @@ class MetadataManager:
                 self.batch_info = batch_info_corrected
                 self.total_samples = current_idx
 
-            logger.debug(f"Saved metadata for {len(self.batch_info)} batches")
+            logger.debug(f"Saved metadata for {len(self.batch_info)} batches with layer_dims: {self.layer_dims}")
 
         except Exception as e:
             logger.error(f"Error saving metadata: {e}")
@@ -193,8 +206,16 @@ class MetadataManager:
                 }
 
                 self.total_samples = metadata.get('total_samples', 0)
+
+                # Load layer information
                 if 'layer_names' in metadata:
                     self.layer_names = metadata['layer_names']
+
+                # Load layer dimensions (new in version 2.0)
+                if 'layer_dims' in metadata:
+                    self.layer_dims = metadata['layer_dims']
+                    self.total_proj_dim = metadata.get('total_proj_dim')
+                    logger.info(f"Loaded layer dimensions from metadata: {self.layer_dims}")
 
                 logger.info(f"Loaded metadata for {len(self.batch_info)} batches")
 

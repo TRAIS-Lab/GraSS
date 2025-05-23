@@ -7,7 +7,7 @@ import sys
 
 # Import key components for convenience
 from .io import ChunkedDiskIOManager, ChunkedMemoryMapHandler
-from .data import ChunkedGradientDataset, create_chunked_dataloader
+from .data import TensorChunkedDataset, create_tensor_dataloader
 
 def setup_logger(name=__name__, level=logging.INFO, log_file=None):
     """Configure and return a logger with the specified settings."""
@@ -41,8 +41,8 @@ __version__ = '0.1.0'
 __all__ = [
     'ChunkedDiskIOManager',
     'ChunkedMemoryMapHandler',
-    'ChunkedGradientDataset',
-    'create_chunked_dataloader',
+    'TensorChunkedDataset',
+    'create_tensor_dataloader',
     'setup_logger',
     'logger'
 ]

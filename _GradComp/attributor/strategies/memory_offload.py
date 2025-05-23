@@ -1,3 +1,7 @@
+"""
+Memory offload strategy with pure tensor support for consistency.
+"""
+
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
@@ -5,10 +9,13 @@ from torch.utils.data import DataLoader
 
 from .offload_strategy import OffloadStrategy
 
+import logging
+logger = logging.getLogger(__name__)
+
 class MemoryOffloadStrategy(OffloadStrategy):
     """
     Strategy that keeps all data in memory on the specified device.
-    No offloading is performed - data remains on the computation device.
+    Uses tensor concatenation for consistency with disk strategy.
     """
 
     def __init__(self, device: str, layer_names: List[str], cache_dir: Optional[str] = None):
@@ -22,24 +29,73 @@ class MemoryOffloadStrategy(OffloadStrategy):
         """
         self.device = device
         self.layer_names = layer_names
-        self.cached_gradients = {}
-        self.cached_test_gradients = {}
+        self.layer_dims = None
+        self.total_proj_dim = None
+        self.cache_dir = cache_dir  # Keep for consistency
+
+        # Store as concatenated tensors for efficiency
+        self.cached_gradients = {}  # batch_idx -> tensor
+        self.cached_test_gradients = {}  # batch_idx -> tensor
         self.preconditioners = [None] * len(layer_names)
-        self.cached_ifvp = {}
+        self.cached_ifvp = {}  # batch_idx -> tensor
+
+    def _ensure_dims_set(self, gradients: List[torch.Tensor]):
+        """Ensure layer dimensions are set from first gradient batch."""
+        if self.layer_dims is None:
+            self.layer_dims = [g.shape[1] if g.numel() > 0 else 0 for g in gradients]
+            self.total_proj_dim = sum(self.layer_dims)
+            logger.info(f"Detected layer dimensions: {self.layer_dims}, total: {self.total_proj_dim}")
+
+    def _concatenate_gradients(self, gradients: List[torch.Tensor]) -> torch.Tensor:
+        """Concatenate list of gradient tensors into single tensor."""
+        self._ensure_dims_set(gradients)
+
+        batch_size = next((g.shape[0] for g in gradients if g.numel() > 0), 0)
+        if batch_size == 0:
+            return torch.empty(0, self.total_proj_dim, device=self.device)
+
+        # Pre-allocate result tensor
+        result = torch.zeros(batch_size, self.total_proj_dim, device=self.device)
+
+        # Fill in each layer's data
+        start_idx = 0
+        for layer_idx, (grad, dim) in enumerate(zip(gradients, self.layer_dims)):
+            end_idx = start_idx + dim
+            if grad.numel() > 0:
+                result[:, start_idx:end_idx] = grad.to(self.device)
+            start_idx = end_idx
+
+        return result
+
+    def _split_tensor(self, tensor: torch.Tensor) -> List[torch.Tensor]:
+        """Split concatenated tensor back into per-layer tensors."""
+        if self.layer_dims is None:
+            raise ValueError("Layer dimensions not set")
+
+        result = []
+        start_idx = 0
+        for dim in self.layer_dims:
+            end_idx = start_idx + dim
+            result.append(tensor[:, start_idx:end_idx].contiguous())
+            start_idx = end_idx
+
+        return result
 
     def store_gradients(self, batch_idx: int, gradients: List[torch.Tensor], is_test: bool = False) -> None:
         """
-        Store gradients for a batch in memory on the device.
+        Store gradients for a batch in memory as concatenated tensor.
 
         Args:
             batch_idx: Batch index
             gradients: List of gradient tensors (one per layer)
             is_test: Whether these are test gradients
         """
+        concatenated = self._concatenate_gradients(gradients)
+
         if is_test:
-            self.cached_test_gradients[batch_idx] = gradients
+            self.cached_test_gradients[batch_idx] = concatenated
         else:
-            self.cached_gradients[batch_idx] = gradients
+            self.cached_gradients[batch_idx] = concatenated
 
     def retrieve_gradients(self, batch_idx: int, is_test: bool = False) -> List[torch.Tensor]:
         """
@@ -55,11 +111,11 @@ class MemoryOffloadStrategy(OffloadStrategy):
         if is_test:
             if batch_idx not in self.cached_test_gradients:
                 return [torch.tensor([], device=self.device) for _ in self.layer_names]
-            return self.cached_test_gradients[batch_idx]
+            return self._split_tensor(self.cached_test_gradients[batch_idx])
         else:
             if batch_idx not in self.cached_gradients:
                 return [torch.tensor([], device=self.device) for _ in self.layer_names]
-            return self.cached_gradients[batch_idx]
+            return self._split_tensor(self.cached_gradients[batch_idx])
 
     def store_preconditioner(self, layer_idx: int, preconditioner: torch.Tensor) -> None:
         """
@@ -87,13 +143,14 @@ class MemoryOffloadStrategy(OffloadStrategy):
 
     def store_ifvp(self, batch_idx: int, ifvp: List[torch.Tensor]) -> None:
         """
-        Store IFVP for a batch in memory.
+        Store IFVP for a batch in memory as concatenated tensor.
 
         Args:
             batch_idx: Batch index
             ifvp: List of IFVP tensors (one per layer)
         """
-        self.cached_ifvp[batch_idx] = ifvp
+        concatenated = self._concatenate_gradients(ifvp)  # Same format as gradients
+        self.cached_ifvp[batch_idx] = concatenated
 
     def retrieve_ifvp(self, batch_idx: int) -> List[torch.Tensor]:
         """
@@ -107,18 +164,81 @@ class MemoryOffloadStrategy(OffloadStrategy):
         """
         if batch_idx not in self.cached_ifvp:
             return [torch.tensor([], device=self.device) for _ in self.layer_names]
-        return self.cached_ifvp[batch_idx]
+        return self._split_tensor(self.cached_ifvp[batch_idx])
 
     def create_gradient_dataloader(self, data_type: str, batch_size: int = 1,
                                 pin_memory: bool = True, batch_range: Optional[Tuple[int, int]] = None,
                                 is_test: bool = False) -> Optional[DataLoader]:
         """
-        No DataLoader needed for memory offload as we access memory directly.
+        Create a simple DataLoader that returns tensors from memory.
+
+        Args:
+            data_type: Type of data to load
+            batch_size: Number of batches to return at once
+            pin_memory: Whether to pin memory (ignored)
+            batch_range: Optional batch range filter
+            is_test: Whether loading test data
 
         Returns:
-            None
+            DataLoader-like iterator
         """
-        return None
+        # Select appropriate cache
+        if data_type == "gradients":
+            cache = self.cached_test_gradients if is_test else self.cached_gradients
+        elif data_type == "ifvp":
+            cache = self.cached_ifvp
+        else:
+            return None
+
+        # Filter by batch range if specified
+        batch_indices = sorted(cache.keys())
+        if batch_range is not None:
+            start_batch, end_batch = batch_range
+            batch_indices = [idx for idx in batch_indices if start_batch <= idx < end_batch]
+
+        # Create simple dataset
+        class MemoryTensorDataset(torch.utils.data.Dataset):
+            def __init__(self, cache, batch_indices):
+                self.cache = cache
+                self.batch_indices = batch_indices
+
+            def __len__(self):
+                return len(self.batch_indices)
+
+            def __getitem__(self, idx):
+                batch_idx = self.batch_indices[idx]
+                tensor = self.cache[batch_idx]
+                # Return in same format as disk loader
+                batch_mapping = {batch_idx: (0, tensor.shape[0])}
+                return tensor, batch_mapping
+
+        dataset = MemoryTensorDataset(cache, batch_indices)
+
+        # Custom collate function to combine multiple batches
+        def collate_fn(items):
+            if len(items) == 1:
+                return items[0]
+
+            tensors = []
+            combined_mapping = {}
+            row_offset = 0
+
+            for tensor, mapping in items:
+                tensors.append(tensor)
+                for batch_idx, (start, end) in mapping.items():
+                    batch_size = end - start
+                    combined_mapping[batch_idx] = (row_offset, row_offset + batch_size)
+                row_offset += tensor.shape[0]
+
+            combined_tensor = torch.cat(tensors, dim=0)
+            return combined_tensor, combined_mapping
+
+        return torch.utils.data.DataLoader(
+            dataset,
+            batch_size=batch_size,
+            shuffle=False,
+            collate_fn=collate_fn
+        )
 
     def has_preconditioners(self) -> bool:
         """
@@ -155,15 +275,15 @@ class MemoryOffloadStrategy(OffloadStrategy):
 
     def move_to_device(self, tensor: torch.Tensor) -> torch.Tensor:
         """
-        No movement needed as tensors are already on the compute device.
+        Ensure tensor is on the compute device.
 
         Args:
             tensor: Input tensor
 
         Returns:
-            Same tensor (already on the device)
+            Tensor on the device
         """
-        return tensor
+        return tensor.to(self.device) if tensor.device != self.device else tensor
 
     def move_from_device(self, tensor: torch.Tensor) -> torch.Tensor:
         """

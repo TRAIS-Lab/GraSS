@@ -1,5 +1,5 @@
 """
-Enhanced disk offload strategy with tensor-based chunking support.
+Enhanced disk offload strategy with pure tensor-based chunking support.
 """
 
 import os
@@ -10,12 +10,15 @@ from torch.utils.data import DataLoader
 
 from .offload_strategy import OffloadStrategy
 from ...io.disk_io import ChunkedDiskIOManager
-from ...data.dataset import create_chunked_dataloader
+from ...data.dataset import create_tensor_dataloader
+
+import logging
+logger = logging.getLogger(__name__)
 
 class DiskOffloadStrategy(OffloadStrategy):
     """
-    Enhanced strategy that stores data on disk using tensor-based chunking.
-    Provides efficient storage with concatenated tensors.
+    Enhanced strategy that stores data on disk using pure tensor-based chunking.
+    Provides maximum efficiency with concatenated tensor storage.
     """
 
     def __init__(self, device: str, layer_names: List[str], cache_dir: Optional[str] = None,
@@ -51,11 +54,11 @@ class DiskOffloadStrategy(OffloadStrategy):
             self.current_batch_range = None
 
     def store_gradients(self, batch_idx: int, gradients: List[torch.Tensor], is_test: bool = False) -> None:
-        """Store gradients for a batch on disk using tensor-based chunked storage."""
+        """Store gradients for a batch on disk using pure tensor storage."""
         self.disk_io.store_gradients(batch_idx, gradients, is_test)
 
     def retrieve_gradients(self, batch_idx: int, is_test: bool = False) -> List[torch.Tensor]:
-        """Retrieve gradients for a batch from chunked disk storage and move to device."""
+        """Retrieve gradients for a batch from tensor storage and move to device."""
         gradients = self.disk_io.retrieve_gradients(batch_idx, is_test)
         result = []
         for grad in gradients:
@@ -77,11 +80,11 @@ class DiskOffloadStrategy(OffloadStrategy):
         return None
 
     def store_ifvp(self, batch_idx: int, ifvp: List[torch.Tensor]) -> None:
-        """Store IFVP for a batch on disk using tensor-based chunked storage."""
+        """Store IFVP for a batch on disk using pure tensor storage."""
         self.disk_io.store_ifvp(batch_idx, ifvp)
 
     def retrieve_ifvp(self, batch_idx: int) -> List[torch.Tensor]:
-        """Retrieve IFVP for a batch from chunked disk storage and move to device."""
+        """Retrieve IFVP for a batch from tensor storage and move to device."""
         ifvp_list = self.disk_io.retrieve_ifvp(batch_idx)
         result = []
         for ifvp in ifvp_list:
@@ -98,34 +101,27 @@ class DiskOffloadStrategy(OffloadStrategy):
             pin_memory: bool = True,
             batch_range: Optional[Tuple[int, int]] = None,
             is_test: bool = False,
-            use_tensor_dataset: bool = False
         ) -> DataLoader:
         """
-        Create a DataLoader for loading chunked data from disk.
+        Create an optimized DataLoader for loading tensor-based chunked data from disk.
 
         Args:
             data_type: Type of data to load
-            batch_size: Batch size for DataLoader
+            batch_size: Number of chunks to load at once
             pin_memory: Whether to pin memory
             batch_range: Optional batch range filter
-            is_test: Whether loading test data
-            use_tensor_dataset: If True, use efficient tensor-based dataset
+            is_test: Whether loading test data (unused)
 
         Returns:
-            DataLoader instance
+            DataLoader instance for tensor chunks
         """
-        return create_chunked_dataloader(
-            disk_io=self.disk_io,
+        return self.disk_io.create_gradient_dataloader(
             data_type=data_type,
             batch_size=batch_size,
             pin_memory=pin_memory,
             batch_range=batch_range,
-            is_test=is_test,
-            use_chunk_dataset=not use_tensor_dataset,
-            use_tensor_dataset=use_tensor_dataset
+            is_test=is_test
         )
-
-
 
     def has_preconditioners(self) -> bool:
         """Check if preconditioners are available on disk."""
@@ -155,7 +151,7 @@ class DiskOffloadStrategy(OffloadStrategy):
 
     def move_to_device(self, tensor: torch.Tensor) -> torch.Tensor:
         """Move a tensor to the compute device."""
-        return tensor.to(self.device) if tensor.device.type == 'cpu' else tensor
+        return tensor.to(self.device) if tensor.device != self.device else tensor
 
     def move_from_device(self, tensor: torch.Tensor) -> torch.Tensor:
         """Move a tensor from the compute device to CPU for disk storage."""

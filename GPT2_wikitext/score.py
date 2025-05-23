@@ -696,7 +696,7 @@ def main():
             # Measure cache throughput
             torch.cuda.synchronize(device)
             cache_start_time = time.time()
-            # attributor.cache_gradients(train_dataloader, worker=f"{worker_id}/{total_workers}")
+            attributor.cache_gradients(train_dataloader, worker=f"{worker_id}/{total_workers}")
             torch.cuda.synchronize(device)
             cache_end_time = time.time()
 
@@ -765,8 +765,8 @@ def main():
         )
 
         # Compute preconditioners for best damping value
-        # attributor.compute_preconditioners(damping=best_damping)
-        # attributor.compute_ifvp()
+        attributor.compute_preconditioners(damping=best_damping)
+        attributor.compute_ifvp()
 
         # Measure attribute throughput
         torch.cuda.synchronize(device)
