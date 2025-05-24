@@ -5,7 +5,7 @@ Common utility functions for gradient computation and influence attribution.
 import torch
 import numpy as np
 import logging
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Optional
 
 # Configure logger
 logger = logging.getLogger(__name__)
