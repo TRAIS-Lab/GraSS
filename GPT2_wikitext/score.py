@@ -685,8 +685,8 @@ def main():
             device=device,
             sparsifier_kwargs=sparsifier_kwargs,
             projector_kwargs=projector_kwargs,
-            offload="cpu",
-            # cache_dir="./GradComp/cache"
+            offload="disk",
+            cache_dir="./GradComp/cache"
         )
 
         # Measure cache throughput

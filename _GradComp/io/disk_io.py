@@ -390,14 +390,13 @@ class ChunkedDiskIOManager:
                                 is_test: bool = False) -> Optional[torch.utils.data.DataLoader]:
         """Create a DataLoader for loading chunked data."""
         try:
-            from ..data.dataset import create_tensor_dataloader
+            from .dataset import create_tensor_dataloader
             return create_tensor_dataloader(
                 disk_io=self,
                 data_type=data_type,
                 batch_size=batch_size,
                 pin_memory=pin_memory,
-                batch_range=batch_range,
-                is_test=is_test
+                batch_range=batch_range
             )
         except ImportError:
             logger.error("Failed to import dataset modules")

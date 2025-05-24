@@ -6,8 +6,7 @@ import logging
 import sys
 
 # Import key components for convenience
-from .io import ChunkedDiskIOManager, ChunkedMemoryMapHandler
-from .data import TensorChunkedDataset, create_tensor_dataloader
+from .io import ChunkedDiskIOManager, ChunkedMemoryMapHandler, TensorChunkedDataset, create_tensor_dataloader
 
 def setup_logger(name=__name__, level=logging.INFO, log_file=None):
     """Configure and return a logger with the specified settings."""

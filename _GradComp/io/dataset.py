@@ -19,7 +19,7 @@ def _lazy_import_memory_map():
     global ChunkedMemoryMapHandler
     if ChunkedMemoryMapHandler is None:
         try:
-            from ..io.memory_map import ChunkedMemoryMapHandler
+            from .memory_map import ChunkedMemoryMapHandler
         except ImportError:
             logger.warning("Failed to import ChunkedMemoryMapHandler")
 
@@ -158,9 +158,13 @@ def tensor_collate_fn(batch):
 
     return combined_tensor, combined_mapping
 
-def create_tensor_dataloader(disk_io, data_type="gradients", batch_size=1,
-                            pin_memory=True, batch_range=None, is_test=False,
-                            num_workers=0) -> torch.utils.data.DataLoader:
+def create_tensor_dataloader(
+        disk_io,
+        data_type="gradients",
+        batch_size=4,
+        pin_memory=True,
+        batch_range=None,
+    ) -> torch.utils.data.DataLoader:
     """
     Create an optimized DataLoader for tensor-based chunked data.
 
