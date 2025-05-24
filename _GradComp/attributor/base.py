@@ -30,11 +30,10 @@ HessianOptions = Literal["none", "raw", "kfac", "ekfac"]
 @dataclass
 class ProfilingStats:
     """Statistics for profiling the algorithm performance."""
-    projection: float = 0.0
+    compression: float = 0.0
     forward: float = 0.0
     backward: float = 0.0
     precondition: float = 0.0
-    disk_io: float = 0.0
 
 @dataclass
 class ProcessingInfo:
@@ -312,6 +311,12 @@ class BaseAttributor(ABC):
             for i, batch_idx in enumerate(range(start_batch, end_batch)):
                 if i < len(batch_sample_counts):
                     self.metadata.add_batch_info(batch_idx=batch_idx, sample_count=batch_sample_counts[i])
+
+        # Record compression time from hook manager
+        if self.profile and self.profiling_stats and self.hook_manager:
+            compression_time = self.hook_manager.get_compression_time()
+            self.profiling_stats.compression += compression_time
+            logger.debug(f"Compression time for batch range [{start_batch}, {end_batch}): {compression_time:.3f}s")
 
         # Return appropriate values
         if is_test:
