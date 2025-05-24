@@ -126,7 +126,6 @@ class ChunkedMemoryMapHandler:
             # Open memory map
             mmap = np.memmap(mmap_path, dtype=np.dtype(storage_dtype), mode="r+", shape=shape)
 
-            # ✅ Create tensor view WITHOUT copying!
             if storage_dtype == "uint16":
                 # For bfloat16, we need special handling
                 # Create a tensor that shares memory with the mmap
@@ -210,7 +209,6 @@ class ChunkedMemoryMapHandler:
         """
         with ChunkedMemoryMapHandler.read_chunk(path, chunk_filename) as (tensor, metadata):
             if batch_range is None:
-                # ✅ Return tensor directly - no clone needed for read-only access
                 batch_mapping = {
                     info["batch_idx"]: (info["start_row"], info["end_row"])
                     for info in metadata["batches"]
