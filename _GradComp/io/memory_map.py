@@ -19,9 +19,14 @@ class ChunkedMemoryMapHandler:
     """
 
     @staticmethod
-    def write_chunk(save_path: str, data_type: str, tensor: torch.Tensor,
-                   batch_info: List[Dict[str, Any]], layer_dims: List[int],
-                   dtype: str = 'float32') -> str:
+    def write_chunk(
+            save_path: str,
+            data_type: str,
+            tensor: torch.Tensor,
+            batch_info: List[Dict[str, Any]],
+            layer_dims: List[int],
+            dtype: str = 'float32'
+        ) -> str:
         """
         Write a tensor chunk directly to memory-mapped file.
 
@@ -183,8 +188,11 @@ class ChunkedMemoryMapHandler:
             return None
 
     @staticmethod
-    def load_chunk_batch_range(path: str, chunk_filename: str,
-                              batch_range: Optional[Tuple[int, int]] = None) -> Tuple[torch.Tensor, Dict[int, Tuple[int, int]]]:
+    def load_chunk_batch_range(
+            path: str,
+            chunk_filename: str,
+            batch_range: Optional[Tuple[int, int]] = None
+        ) -> Tuple[torch.Tensor, Dict[int, Tuple[int, int]]]:
         """
         Load chunk with optional batch filtering.
 

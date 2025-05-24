@@ -174,8 +174,6 @@ def create_tensor_dataloader(
         batch_size: Number of chunks to load at once
         pin_memory: Whether to pin memory
         batch_range: Optional range of batches to include
-        is_test: Whether to load test data (unused)
-        num_workers: Number of workers (always 0)
 
     Returns:
         DataLoader for efficient loading of chunked tensor data

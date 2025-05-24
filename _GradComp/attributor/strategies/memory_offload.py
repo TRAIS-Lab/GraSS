@@ -175,9 +175,14 @@ class MemoryOffloadStrategy(OffloadStrategy):
                 return [torch.zeros(0, dim, device=self.device) for dim in self.layer_dims]
         return self._split_tensor(self.cached_ifvp[batch_idx])
 
-    def create_gradient_dataloader(self, data_type: str, batch_size: int = 1,
-                                pin_memory: bool = True, batch_range: Optional[Tuple[int, int]] = None,
-                                is_test: bool = False) -> Optional[DataLoader]:
+    def create_gradient_dataloader(
+            self,
+            data_type: str,
+            batch_size: int = 1,
+            pin_memory: bool = True,
+            batch_range: Optional[Tuple[int, int]] = None,
+            is_test: bool = False
+        ) -> Optional[DataLoader]:
         """
         Create a simple DataLoader that returns tensors from memory.
 

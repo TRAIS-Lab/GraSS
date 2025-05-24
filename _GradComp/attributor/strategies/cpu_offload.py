@@ -180,9 +180,14 @@ class CPUOffloadStrategy(OffloadStrategy):
         # Split and move to device
         return self._split_tensor(self.cached_ifvp[batch_idx], to_device=True)
 
-    def create_gradient_dataloader(self, data_type: str, batch_size: int = 1,
-                                pin_memory: bool = True, batch_range: Optional[Tuple[int, int]] = None,
-                                is_test: bool = False) -> Optional[DataLoader]:
+    def create_gradient_dataloader(
+            self,
+            data_type: str,
+            batch_size: int = 1,
+            pin_memory: bool = True,
+            batch_range: Optional[Tuple[int, int]] = None,
+            is_test: bool = False
+        ) -> Optional[DataLoader]:
         """
         Create a DataLoader that returns CPU tensors and moves them to device.
 

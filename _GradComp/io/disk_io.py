@@ -390,7 +390,7 @@ class ChunkedDiskIOManager:
                                 is_test: bool = False) -> Optional[torch.utils.data.DataLoader]:
         """Create a DataLoader for loading chunked data."""
         try:
-            from .dataset import create_tensor_dataloader
+            from .prefetch_dataset import create_tensor_dataloader
             return create_tensor_dataloader(
                 disk_io=self,
                 data_type=data_type,

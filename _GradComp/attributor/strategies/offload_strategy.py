@@ -97,10 +97,15 @@ class OffloadStrategy(ABC):
         pass
 
     @abstractmethod
-    def create_gradient_dataloader(self, data_type: str, batch_size: int = 1,
-                                num_workers: int = 4, pin_memory: bool = True,
-                                batch_range: Optional[Tuple[int, int]] = None,
-                                is_test: bool = False) -> Optional[DataLoader]:
+    def create_gradient_dataloader(
+            self,
+            data_type: str,
+            batch_size: int = 1,
+            num_workers: int = 4,
+            pin_memory: bool = True,
+            batch_range: Optional[Tuple[int, int]] = None,
+            is_test: bool = False
+        ) -> Optional[DataLoader]:
         """
         Create a DataLoader for loading data (if applicable).
 
