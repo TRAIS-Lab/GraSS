@@ -124,14 +124,16 @@ class ChunkedMemoryMapHandler:
             shape = tuple(metadata["shape"])
 
             # Open memory map
-            mmap = np.memmap(mmap_path, dtype=np.dtype(storage_dtype), mode="r", shape=shape)
+            mmap = np.memmap(mmap_path, dtype=np.dtype(storage_dtype), mode="r+", shape=shape)
 
-            # Convert to tensor
+            # ✅ Create tensor view WITHOUT copying!
             if storage_dtype == "uint16":
-                # Handle bfloat16
-                tensor = torch.from_numpy(np.array(mmap)).view(torch.bfloat16)
+                # For bfloat16, we need special handling
+                # Create a tensor that shares memory with the mmap
+                tensor = torch.as_tensor(mmap, dtype=torch.int16).view(torch.bfloat16)
             else:
-                tensor = torch.from_numpy(np.array(mmap))
+                # Directly create tensor view of mmap - no copy!
+                tensor = torch.as_tensor(mmap)
 
             yield tensor, metadata
 
@@ -208,12 +210,12 @@ class ChunkedMemoryMapHandler:
         """
         with ChunkedMemoryMapHandler.read_chunk(path, chunk_filename) as (tensor, metadata):
             if batch_range is None:
-                # Return full tensor with mapping
+                # ✅ Return tensor directly - no clone needed for read-only access
                 batch_mapping = {
                     info["batch_idx"]: (info["start_row"], info["end_row"])
                     for info in metadata["batches"]
                 }
-                return tensor.clone(), batch_mapping
+                return tensor, batch_mapping
 
             # Filter batches
             start_batch, end_batch = batch_range
