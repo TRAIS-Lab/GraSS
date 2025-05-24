@@ -217,18 +217,6 @@ class MetadataManager:
             except Exception as e:
                 logger.error(f"Error loading metadata: {e}")
 
-    def get_batch_indices(self) -> List[int]:
-        """Get all batch indices."""
-        with self._metadata_lock:
-            # Include both saved and pending batches
-            all_indices = set(self.batch_info.keys())
-            all_indices.update(self._pending_batches.keys())
-            return sorted(all_indices)
-
-    def force_save(self) -> None:
-        """Force immediate save of all pending data."""
-        self.save_metadata()
-
     def __del__(self):
         """Ensure metadata is saved on destruction."""
         try:
