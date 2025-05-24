@@ -4,9 +4,7 @@ Hook manager for efficient gradient component capture and projection.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, Callable, Any, Optional, Tuple, List
-if TYPE_CHECKING:
-    from typing import Union
+from typing import TYPE_CHECKING, Any, List
 
 import torch
 import torch.nn as nn
@@ -93,7 +91,7 @@ class HookManager:
         self.projected_grads = [None] * len(layer_names)
         self.inputs = [None] * len(layer_names)
         self.pre_activations = [None] * len(layer_names)
-        self.normalized = [None] * len(layer_names)  # For LayerNorm
+        self.normalized = [None] * len(layer_names)
         self.projectors = [None] * len(layer_names)
 
         # Profiling stats

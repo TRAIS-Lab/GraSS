@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, List, Optional, Tuple, Union
+from typing import List, Optional, Tuple
 
 import torch
 from torch.utils.data import DataLoader

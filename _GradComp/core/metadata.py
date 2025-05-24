@@ -37,7 +37,6 @@ class MetadataManager:
 
         if cache_dir:
             os.makedirs(cache_dir, exist_ok=True)
-            # Check for existing metadata
             self._load_metadata_if_exists()
 
         logger.debug(f"Initialized MetadataManager with {len(layer_names)} layers")
@@ -155,7 +154,6 @@ class MetadataManager:
                 'layer_dims': self.layer_dims,  # Save layer dimensions
                 'total_proj_dim': self.total_proj_dim,  # Save total projection dimension
                 'total_samples': current_idx,
-                'version': '2.0',  # Updated version for tensor format
                 'timestamp': time.time()
             }
 
@@ -209,7 +207,6 @@ class MetadataManager:
                 if 'layer_names' in metadata:
                     self.layer_names = metadata['layer_names']
 
-                # Load layer dimensions (new in version 2.0)
                 if 'layer_dims' in metadata:
                     self.layer_dims = metadata['layer_dims']
                     self.total_proj_dim = metadata.get('total_proj_dim')

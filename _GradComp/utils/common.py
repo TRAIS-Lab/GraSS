@@ -21,94 +21,27 @@ def stable_inverse(matrix: torch.Tensor, damping: float = None) -> torch.Tensor:
     Returns:
         Stable inverse of the input matrix with the same dtype as input
     """
-    # Store original dtype for later conversion
     orig_dtype = matrix.dtype
     matrix = matrix.to(dtype=torch.float32)
 
-    # Sometimes the matrix is a single number, so we need to check if it's a scalar
-    if len(matrix.shape) == 0:
-        if matrix == 0:
-            # Return a 2d 0 tensor with same dtype
-            return torch.tensor([[0.0]], device=matrix.device, dtype=orig_dtype)
-        else:
-            if damping is None:
-                result = torch.tensor([[1.0 / (matrix * 1.1)]], device=matrix.device)
-            else:
-                result = torch.tensor([[1.0 / (matrix * (1 + damping))]], device=matrix.device)
-            # Convert result back to original dtype
-            return result.to(dtype=orig_dtype)
+    assert matrix.dim() == 2, "Input must be a 2D matrix"
 
     # Add damping to the diagonal
     if damping is None:
-        damping = 1e-2 * torch.trace(matrix) / matrix.size(0)
+        damping = 1e-5 * torch.trace(matrix) / matrix.size(0)
     else:
         damping = damping * torch.trace(matrix) / matrix.size(0)
 
     damped_matrix = matrix + damping * torch.eye(matrix.size(0), device=matrix.device)
 
     try:
-        # Try Cholesky decomposition first (more stable)
         L = torch.linalg.cholesky(damped_matrix)
         inverse = torch.cholesky_inverse(L)
     except RuntimeError:
         logger.warning(f"Falling back to direct inverse due to Cholesky failure")
-        # Fall back to direct inverse
         inverse = torch.inverse(damped_matrix)
 
-    # Convert result back to the original dtype
     return inverse.to(dtype=orig_dtype)
-
-def find_layers(model, layer_type="Linear", return_type="instance"):
-    """
-    Find layers of specified type in a model.
-
-    Args:
-        model: PyTorch model to search
-        layer_type: Type of layer to find ('Linear', 'LayerNorm', or 'Linear_LayerNorm')
-        return_type: What to return ('instance', 'name', or 'name_instance')
-
-    Returns:
-        List of layers, layer names, or (name, layer) tuples
-    """
-    layers = []
-    return_module_name = not (return_type == "instance")
-
-    if return_module_name:
-        for module_name, module in model.named_modules():
-            if isinstance(module, torch.nn.Linear) or isinstance(module, torch.nn.LayerNorm) or isinstance(module, torch.nn.Embedding):
-                layers.append((module_name, module))
-    else:
-        for module in model.modules():
-            if isinstance(module, torch.nn.Linear) or isinstance(module, torch.nn.LayerNorm) or isinstance(module, torch.nn.Embedding):
-                layers.append(module)
-
-    if return_module_name:
-        if layer_type == "Linear":
-            layers = [(name, layer) for name, layer in layers if isinstance(layer, torch.nn.Linear)]
-        elif layer_type == "Linear_LayerNorm":
-            layers = [(name, layer) for name, layer in layers if isinstance(layer, (torch.nn.Linear, torch.nn.LayerNorm))]
-        elif layer_type == "LayerNorm":
-            layers = [(name, layer) for name, layer in layers if isinstance(layer, torch.nn.LayerNorm)]
-        else:
-            raise ValueError("Invalid setting now. Choose from 'Linear', 'LayerNorm', and 'Linear_LayerNorm'.")
-    else:
-        if layer_type == "Linear":
-            layers = [layer for layer in layers if isinstance(layer, torch.nn.Linear)]
-        elif layer_type == "Linear_LayerNorm":
-            layers = [layer for layer in layers if isinstance(layer, torch.nn.Linear) or isinstance(layer, torch.nn.LayerNorm)]
-        elif layer_type == "LayerNorm":
-            layers = [layer for layer in layers if isinstance(layer, torch.nn.LayerNorm)]
-        else:
-            raise ValueError("Invalid setting now. Choose from 'Linear', 'LayerNorm', and 'Linear_LayerNorm'.")
-
-    if return_type == "instance":
-        return layers
-    elif return_type == "name":
-        return [name for name, layer in layers]
-    elif return_type == "name_instance":
-        return [(name, layer) for name, layer in layers]
-    else:
-        raise ValueError("Invalid return_type. Choose from 'instance', 'name', and 'name_instance'.")
 
 def vectorize(
     g: Dict[str, torch.Tensor],
@@ -203,70 +136,55 @@ def get_parameter_chunk_sizes(
 
     return max_chunk_size, params_per_chunk
 
-def aggregate_influence_scores(results_dir, output_file=None, total_train_samples=None, num_test=None):
+
+def find_layers(model, layer_type="Linear", return_type="instance"):
     """
-    Aggregate partial influence scores saved by the attribute method.
+    Find layers of specified type in a model.
 
     Args:
-        results_dir: Directory containing partial result files
-        output_file: Path to save the aggregated results
-        total_train_samples: Total number of training samples
-        num_test: Number of test samples
+        model: PyTorch model to search
+        layer_type: Type of layer to find ('Linear', 'LayerNorm', or 'Linear_LayerNorm')
+        return_type: What to return ('instance', 'name', or 'name_instance')
 
     Returns:
-        Aggregated influence scores tensor
+        List of layers, layer names, or (name, layer) tuples
     """
-    from tqdm import tqdm
+    layers = []
+    return_module_name = not (return_type == "instance")
 
-    logger.info(f"Aggregating influence scores from {results_dir}...")
+    if return_module_name:
+        for module_name, module in model.named_modules():
+            if isinstance(module, torch.nn.Linear) or isinstance(module, torch.nn.LayerNorm) or isinstance(module, torch.nn.Embedding):
+                layers.append((module_name, module))
+    else:
+        for module in model.modules():
+            if isinstance(module, torch.nn.Linear) or isinstance(module, torch.nn.LayerNorm) or isinstance(module, torch.nn.Embedding):
+                layers.append(module)
 
-    # Find all partial result files
-    result_files = [f for f in os.listdir(results_dir) if f.endswith('.pt')]
-
-    if not result_files:
-        raise ValueError(f"No result files found in {results_dir}")
-
-    # Load the first file to get metadata if not provided
-    first_file = os.path.join(results_dir, result_files[0])
-    first_data = torch.load(first_file)
-
-    if total_train_samples is None or num_test is None:
-        if 'metadata' in first_data:
-            metadata = first_data['metadata']
-            total_train_samples = metadata.get('total_train_samples')
-            num_test = metadata.get('num_test')
-
-        if total_train_samples is None or num_test is None:
-            raise ValueError("Could not determine total_train_samples or num_test. Please provide these values.")
-
-    # Initialize the full results tensor
-    IF_score = torch.zeros(total_train_samples, num_test)
-
-    # Aggregate all partial results
-    for file_name in tqdm(result_files, desc="Aggregating files"):
-        file_path = os.path.join(results_dir, file_name)
-        data = torch.load(file_path)
-
-        if 'metadata' in data and 'scores' in data:
-            scores = data['scores']
-            metadata = data['metadata']
-            min_sample = metadata['min_sample']
-            max_sample = metadata['max_sample']
-
-            # Add this chunk's scores to the full tensor
-            IF_score[min_sample:max_sample, :] += scores
+    if return_module_name:
+        if layer_type == "Linear":
+            layers = [(name, layer) for name, layer in layers if isinstance(layer, torch.nn.Linear)]
+        elif layer_type == "Linear_LayerNorm":
+            layers = [(name, layer) for name, layer in layers if isinstance(layer, (torch.nn.Linear, torch.nn.LayerNorm))]
+        elif layer_type == "LayerNorm":
+            layers = [(name, layer) for name, layer in layers if isinstance(layer, torch.nn.LayerNorm)]
         else:
-            # Fall back to parsing file name for older format
-            parts = file_name.split('_')
-            if len(parts) >= 4:
-                min_sample = int(parts[-2])
-                max_sample = int(parts[-1].split('.')[0])
-                scores = data
-                IF_score[min_sample:max_sample, :] += scores
+            raise ValueError("Invalid setting now. Choose from 'Linear', 'LayerNorm', and 'Linear_LayerNorm'.")
+    else:
+        if layer_type == "Linear":
+            layers = [layer for layer in layers if isinstance(layer, torch.nn.Linear)]
+        elif layer_type == "Linear_LayerNorm":
+            layers = [layer for layer in layers if isinstance(layer, torch.nn.Linear) or isinstance(layer, torch.nn.LayerNorm)]
+        elif layer_type == "LayerNorm":
+            layers = [layer for layer in layers if isinstance(layer, torch.nn.LayerNorm)]
+        else:
+            raise ValueError("Invalid setting now. Choose from 'Linear', 'LayerNorm', and 'Linear_LayerNorm'.")
 
-    # Save aggregated results if output file is specified
-    if output_file is not None:
-        torch.save(IF_score, output_file)
-        logger.info(f"Saved aggregated results to {output_file}")
-
-    return IF_score
+    if return_type == "instance":
+        return layers
+    elif return_type == "name":
+        return [name for name, layer in layers]
+    elif return_type == "name_instance":
+        return [(name, layer) for name, layer in layers]
+    else:
+        raise ValueError("Invalid return_type. Choose from 'instance', 'name', and 'name_instance'.")
