@@ -36,6 +36,14 @@ class ProfilingStats:
     precondition: float = 0.0
     disk_io: float = 0.0
 
+@dataclass
+class ProcessingInfo:
+    """Information about processed data."""
+    num_batches: int
+    total_samples: int
+    batch_range: Tuple[int, int]
+    data_type: str  # "gradients", "preconditioners", "ifvp"
+
 class BaseAttributor(ABC):
     """
     Base class for Influence Function Attributors.
@@ -197,159 +205,44 @@ class BaseAttributor(ABC):
 
         return start_batch, end_batch
 
-    def _compute_gradients_direct(
+    def _compute_gradients_for_batches(
         self,
         dataloader: 'DataLoader',
-        is_test: bool = False,
-        worker: str = "0/1",
+        start_batch: int,
+        end_batch: int,
+        is_test: bool = False
     ) -> Tuple[Optional[torch.Tensor], Dict[int, Tuple[int, int]]]:
         """
-        Compute gradients and return as concatenated tensor directly.
+        Compute gradients for a range of batches using the strategy.
+
         Returns:
-            - Concatenated gradient tensor of shape (total_samples, total_proj_dim)
-            - Mapping from batch_idx to (start_row, end_row) in the tensor
+            - For test data: concatenated gradient tensor and batch mapping
+            - For training data: (None, empty dict) as data is stored in strategy
         """
-        total_batches = len(dataloader)
-        start_batch, end_batch = self._get_worker_batch_range(total_batches, worker)
+        # Create hook manager if needed
+        if self.hook_manager is None:
+            self.hook_manager = HookManager(
+                self.model,
+                self.layer_names,
+                profile=self.profile,
+                device=self.device
+            )
+            if self.sparsifiers:
+                self.hook_manager.set_sparsifiers(self.sparsifiers)
+            if self.projectors:
+                self.hook_manager.set_projectors(self.projectors)
 
-        desc_prefix = "test" if is_test else "training"
-        logger.debug(f"Worker {worker}: Computing gradients for {desc_prefix} data")
-        logger.debug(f"  Batch range: [{start_batch}, {end_batch}) ({end_batch - start_batch} batches)")
-
-        # For test data, accumulate in memory and return tensor
+        # For test data, we accumulate in memory and return
         if is_test:
-            return self._compute_gradients_in_memory(dataloader, start_batch, end_batch)
-
-        # For training data, use disk storage
-        return self._compute_gradients_in_disk(dataloader, start_batch, end_batch)
-
-    def _compute_gradients_in_memory(
-        self,
-        dataloader: 'DataLoader',
-        start_batch: int,
-        end_batch: int
-    ) -> Tuple[torch.Tensor, Dict[int, Tuple[int, int]]]:
-        """Compute test gradients and return as concatenated tensor."""
-        # Create hook manager if needed
-        if self.hook_manager is None:
-            self.hook_manager = HookManager(
-                self.model,
-                self.layer_names,
-                profile=self.profile,
-                device=self.device
-            )
-            if self.sparsifiers:
-                self.hook_manager.set_sparsifiers(self.sparsifiers)
-            if self.projectors:
-                self.hook_manager.set_projectors(self.projectors)
-
-        # First pass: detect dimensions if not known
-        if self.layer_dims is None:
-            logger.debug("Detecting layer dimensions from first batch...")
-            first_batch = next(iter(dataloader))
-
-            self.model.zero_grad()
-            if isinstance(first_batch, dict):
-                inputs = {k: v.to(self.device) for k, v in first_batch.items()}
-                outputs = self.model(**inputs)
-            else:
-                inputs = first_batch[0].to(self.device)
-                outputs = self.model(inputs)
-
-            logp = -outputs.loss
-            loss = logp - torch.log(1 - torch.exp(logp))
-            loss.backward()
-
-            compressed_grads = self.hook_manager.get_compressed_grads()
-            self.layer_dims = []
-            for grad in compressed_grads:
-                if grad is not None and grad.numel() > 0:
-                    self.layer_dims.append(grad.shape[1] if grad.dim() > 1 else grad.numel())
-                else:
-                    self.layer_dims.append(0)
-
-            self.total_proj_dim = sum(self.layer_dims)
-            logger.debug(f"Detected layer dimensions: {len(self.layer_dims)} layers, total={self.total_proj_dim}")
-
-            # Save to metadata manager
-            self.metadata.set_layer_dims(self.layer_dims)
-
-        # Pre-allocate tensor for all test gradients
-        test_samples = sum(1 for _ in itertools.islice(dataloader, start_batch, end_batch))
-        all_gradients = torch.zeros(test_samples * dataloader.batch_size, self.total_proj_dim, dtype=torch.float32)
-
-        batch_mapping = {}
-        current_row = 0
-
-        batches = itertools.islice(dataloader, start_batch, end_batch)
-
-        for batch_idx, batch in enumerate(tqdm(batches, total=end_batch-start_batch, desc="Computing test gradients")):
-            global_batch_idx = start_batch + batch_idx
-
-            self.model.zero_grad()
-
-            # Prepare inputs
-            if isinstance(batch, dict):
-                inputs = {k: v.to(self.device) for k, v in batch.items()}
-                batch_size = next(iter(batch.values())).shape[0]
-            else:
-                inputs = batch[0].to(self.device)
-                batch_size = batch[0].shape[0]
-
-            # Forward and backward
-            outputs = self.model(**inputs) if isinstance(inputs, dict) else self.model(inputs)
-            logp = -outputs.loss
-            loss = logp - torch.log(1 - torch.exp(logp))
-            loss.backward()
-
-            # Get compressed gradients and concatenate
-            with torch.no_grad():
-                compressed_grads = self.hook_manager.get_compressed_grads()
-
-                # Concatenate all layer gradients
-                start_col = 0
-                for layer_idx, (grad, dim) in enumerate(zip(compressed_grads, self.layer_dims)):
-                    end_col = start_col + dim
-                    if grad is not None and grad.numel() > 0:
-                        all_gradients[current_row:current_row + batch_size, start_col:end_col] = grad.cpu()
-                    # else: already zeros from initialization
-                    start_col = end_col
-
-                # Update mapping
-                batch_mapping[global_batch_idx] = (current_row, current_row + batch_size)
-                current_row += batch_size
-
-            torch.cuda.empty_cache()
-
-        # Trim to actual size
-        all_gradients = all_gradients[:current_row]
-
-        return all_gradients, batch_mapping
-
-    def _compute_gradients_in_disk(
-        self,
-        dataloader: 'DataLoader',
-        start_batch: int,
-        end_batch: int
-    ) -> Tuple[None, Dict[int, Tuple[int, int]]]:
-        """Compute training gradients and store directly to disk as tensors."""
-        # Create hook manager if needed
-        if self.hook_manager is None:
-            self.hook_manager = HookManager(
-                self.model,
-                self.layer_names,
-                profile=self.profile,
-                device=self.device
-            )
-            if self.sparsifiers:
-                self.hook_manager.set_sparsifiers(self.sparsifiers)
-            if self.projectors:
-                self.hook_manager.set_projectors(self.projectors)
+            all_gradients = []
+            batch_mapping = {}
+            current_row = 0
 
         batch_sample_counts = []
         batches = itertools.islice(dataloader, start_batch, end_batch)
 
-        for batch_idx, batch in enumerate(tqdm(batches, total=end_batch-start_batch, desc="Computing gradients")):
+        desc = "Computing test gradients" if is_test else "Computing gradients"
+        for batch_idx, batch in enumerate(tqdm(batches, total=end_batch-start_batch, desc=desc)):
             global_batch_idx = start_batch + batch_idx
 
             self.model.zero_grad()
@@ -389,37 +282,57 @@ class BaseAttributor(ABC):
                     # Save to metadata manager
                     self.metadata.set_layer_dims(self.layer_dims)
 
-                    # Pass to disk IO manager
-                    if hasattr(self.strategy, 'disk_io'):
-                        self.strategy.disk_io.layer_dims = self.layer_dims
-                        self.strategy.disk_io.total_proj_dim = self.total_proj_dim
+                    # Pass to strategy if needed
+                    if hasattr(self.strategy, 'layer_dims'):
+                        self.strategy.layer_dims = self.layer_dims
+                        self.strategy.total_proj_dim = self.total_proj_dim
 
-                # Convert to list of tensors (required by store_gradients interface)
-                batch_grads = []
-                for grad in compressed_grads:
-                    if grad is None:
-                        batch_grads.append(torch.tensor([]))
-                    else:
-                        batch_grads.append(grad.detach())
+                # Store gradients using strategy
+                self.strategy.store_gradients(global_batch_idx, compressed_grads, is_test)
 
-                # Store gradients
-                self.strategy.store_gradients(global_batch_idx, batch_grads, is_test=False)
+                # For test data, also accumulate for return
+                if is_test:
+                    # Concatenate gradients for this batch
+                    batch_features = []
+                    for grad, dim in zip(compressed_grads, self.layer_dims):
+                        if grad is not None and grad.numel() > 0:
+                            batch_features.append(grad.cpu())
+                        else:
+                            batch_features.append(torch.zeros(batch_size, dim))
+
+                    batch_tensor = torch.cat(batch_features, dim=1)
+                    all_gradients.append(batch_tensor)
+                    batch_mapping[global_batch_idx] = (current_row, current_row + batch_size)
+                    current_row += batch_size
 
             torch.cuda.empty_cache()
 
-        # Update metadata
-        for i, batch_idx in enumerate(range(start_batch, end_batch)):
-            if i < len(batch_sample_counts):
-                self.metadata.add_batch_info(batch_idx=batch_idx, sample_count=batch_sample_counts[i])
+        # Update metadata for training data
+        if not is_test:
+            for i, batch_idx in enumerate(range(start_batch, end_batch)):
+                if i < len(batch_sample_counts):
+                    self.metadata.add_batch_info(batch_idx=batch_idx, sample_count=batch_sample_counts[i])
 
-        return None, {}
+        # Return appropriate values
+        if is_test:
+            if all_gradients:
+                return torch.cat(all_gradients, dim=0), batch_mapping
+            else:
+                return torch.empty(0, self.total_proj_dim), {}
+        else:
+            return None, {}
 
-    def cache_gradients(self, train_dataloader: 'DataLoader', worker: str = "0/1") -> None:
-        """Cache gradients using pure tensor storage."""
+    def cache_gradients(self, train_dataloader: 'DataLoader', worker: str = "0/1") -> Union[ProcessingInfo, Tuple[ProcessingInfo, ProfilingStats]]:
+        """
+        Cache gradients using the appropriate storage strategy.
+
+        Returns:
+            ProcessingInfo about what was cached, optionally with ProfilingStats
+        """
         total_batches = len(train_dataloader)
         start_batch, end_batch = self._get_worker_batch_range(total_batches, worker)
 
-        # Start batch range processing
+        # Start batch range processing for disk strategy
         if self.offload == "disk" and hasattr(self.strategy, 'start_batch_range_processing'):
             self.strategy.start_batch_range_processing(start_batch, end_batch)
 
@@ -430,8 +343,13 @@ class BaseAttributor(ABC):
         if self.sparsifiers is None and self.projectors is None:
             self._setup_compressors(train_dataloader)
 
-        # Compute and store gradients
-        self._compute_gradients_in_disk(train_dataloader, start_batch, end_batch)
+        # Compute and store gradients using the strategy
+        _, _ = self._compute_gradients_for_batches(
+            train_dataloader,
+            start_batch,
+            end_batch,
+            is_test=False
+        )
 
         # Make sure layer dimensions are saved to metadata
         if self.layer_dims is not None and self.metadata.layer_dims is None:
@@ -439,7 +357,7 @@ class BaseAttributor(ABC):
 
         self.metadata.save_metadata()
 
-        # Finalize batch range processing
+        # Finalize batch range processing for disk strategy
         if self.offload == "disk" and hasattr(self.strategy, 'finish_batch_range_processing'):
             self.strategy.finish_batch_range_processing()
             self.strategy.wait_for_async_operations()
@@ -448,18 +366,31 @@ class BaseAttributor(ABC):
 
         logger.info(f"Worker {worker}: Cached gradients for batches [{start_batch}, {end_batch})")
 
+        # Create processing info
+        processing_info = ProcessingInfo(
+            num_batches=end_batch - start_batch,
+            total_samples=self.metadata.get_total_samples(),
+            batch_range=(start_batch, end_batch),
+            data_type="gradients"
+        )
+
+        if self.profile and self.profiling_stats:
+            return (processing_info, self.profiling_stats)
+        else:
+            return processing_info
+
     @abstractmethod
-    def compute_preconditioners(self, damping: Optional[float] = None) -> List[torch.Tensor]:
-        """Compute preconditioners from gradients."""
+    def compute_preconditioners(self, damping: Optional[float] = None) -> Union[ProcessingInfo, Tuple[ProcessingInfo, ProfilingStats]]:
+        """Compute and store preconditioners from gradients."""
         pass
 
     @abstractmethod
-    def compute_ifvp(self, worker: str = "0/1") -> Dict[int, List[torch.Tensor]]:
+    def compute_ifvp(self, worker: str = "0/1") -> Union[ProcessingInfo, Tuple[ProcessingInfo, ProfilingStats]]:
         """Compute and store IFVP."""
         pass
 
     @abstractmethod
-    def compute_self_influence(self, worker: str = "0/1") -> torch.Tensor:
+    def compute_self_influence(self, worker: str = "0/1") -> Union[torch.Tensor, Tuple[torch.Tensor, ProfilingStats]]:
         """Compute self-influence scores."""
         pass
 

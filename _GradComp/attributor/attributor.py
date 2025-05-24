@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 import torch
 from tqdm import tqdm
 
-from .base import BaseAttributor, ProfilingStats
+from .base import BaseAttributor, ProfilingStats, ProcessingInfo
 from ..utils.common import stable_inverse
 
 import logging
@@ -23,7 +23,7 @@ class IFAttributor(BaseAttributor):
     Influence function calculator with optimized I/O managing.
     """
 
-    def compute_preconditioners(self, damping: Optional[float] = None) -> List[torch.Tensor]:
+    def compute_preconditioners(self, damping: Optional[float] = None) -> Union[ProcessingInfo, Tuple[ProcessingInfo, ProfilingStats]]:
         """Compute preconditioners (inverse Hessian) from gradients using tensor-based processing."""
         logger.info(f"Computing preconditioners with hessian type: {self.hessian}")
 
@@ -51,7 +51,19 @@ class IFAttributor(BaseAttributor):
             logger.info("Hessian type is 'none', skipping preconditioner computation")
             for layer_idx in range(len(self.layer_names)):
                 self.strategy.store_preconditioner(layer_idx, None)
-            return [None] * len(self.layer_names)
+
+            # Create processing info
+            processing_info = ProcessingInfo(
+                num_batches=0,
+                total_samples=0,
+                batch_range=(0, 0),
+                data_type="preconditioners"
+            )
+
+            if self.profile and self.profiling_stats:
+                return (processing_info, self.profiling_stats)
+            else:
+                return processing_info
 
         total_samples = self.metadata.get_total_samples()
         logger.info(f"Computing preconditioners from {total_samples} total samples")
@@ -106,8 +118,7 @@ class IFAttributor(BaseAttributor):
                 gc.collect()
 
         # Compute preconditioners from accumulated Hessians
-        preconditioners = [None] * len(self.layer_names)
-
+        computed_count = 0
         for layer_idx in tqdm(range(len(self.layer_names)), desc="Computing inverses"):
             hessian_accumulator = hessian_accumulators[layer_idx]
             sample_count = sample_counts[layer_idx]
@@ -119,14 +130,13 @@ class IFAttributor(BaseAttributor):
                 # Compute inverse based on Hessian type
                 if self.hessian == "raw":
                     precond = stable_inverse(hessian, damping=damping)
-                    preconditioners[layer_idx] = precond
                     self.strategy.store_preconditioner(layer_idx, precond)
                     del precond
 
                 elif self.hessian in ["kfac", "ekfac"]:
-                    preconditioners[layer_idx] = hessian
                     self.strategy.store_preconditioner(layer_idx, hessian)
 
+                computed_count += 1
                 del hessian_accumulator, hessian
                 torch.cuda.empty_cache()
 
@@ -136,19 +146,25 @@ class IFAttributor(BaseAttributor):
 
         self.strategy.wait_for_async_operations()
 
-        if self.profile and self.profiling_stats:
-            return (preconditioners, self.profiling_stats)
-        else:
-            return preconditioners
+        # Create processing info
+        processing_info = ProcessingInfo(
+            num_batches=computed_count,
+            total_samples=total_samples,
+            batch_range=(0, len(self.layer_names)),
+            data_type="preconditioners"
+        )
 
-    def compute_ifvp(self, worker: str = "0/1") -> Dict[int, List[torch.Tensor]]:
+        if self.profile and self.profiling_stats:
+            return (processing_info, self.profiling_stats)
+        else:
+            return processing_info
+
+    def compute_ifvp(self, worker: str = "0/1") -> Union[ProcessingInfo, Tuple[ProcessingInfo, ProfilingStats]]:
         """
-        Compute inverse-Hessian-vector products (IFVP) using tensor-based processing.
+        Compute inverse-Hessian-vector products (IFVP) and store in strategy.
 
         Returns:
-            Dict mapping batch indices to IFVP tensors. For disk offload mode,
-            the dict values are None to save memory (actual data is stored on disk).
-            For memory/CPU offload modes, the dict contains the actual tensors.
+            ProcessingInfo about what was computed
         """
         logger.info(f"Worker {worker}: Computing IFVP with tensor-based processing")
 
@@ -183,7 +199,7 @@ class IFAttributor(BaseAttributor):
         # Return raw gradients if Hessian type is "none"
         if self.hessian == "none":
             logger.debug("Using raw gradients as IFVP since hessian type is 'none'")
-            return self._copy_gradients_to_ifvp(start_batch, end_batch)
+            return self._copy_gradients_as_ifvp(start_batch, end_batch)
 
         if self.profile and self.profiling_stats:
             torch.cuda.synchronize(self.device)
@@ -198,9 +214,10 @@ class IFAttributor(BaseAttributor):
         valid_preconditioners = sum(1 for p in preconditioners if p is not None)
         logger.debug(f"Loaded {valid_preconditioners} preconditioners out of {len(self.layer_names)} layers")
 
-        # For disk offload, we don't keep tensors in memory
-        # Instead, we just track which batches were processed
-        result_dict = {}
+        # Get batch mapping
+        batch_to_sample_mapping = self.metadata.get_batch_to_sample_mapping()
+        processed_batches = 0
+        processed_samples = 0
 
         # Use tensor-based dataloader
         logger.debug("Processing IFVP using tensor-based dataloader")
@@ -219,13 +236,16 @@ class IFAttributor(BaseAttributor):
 
                 # Process each batch in the chunk
                 for batch_idx, (start_row, end_row) in batch_mapping.items():
+                    if batch_idx not in batch_to_sample_mapping:
+                        continue
+
                     batch_tensor = chunk_tensor[start_row:end_row]
                     batch_ifvp = []
 
                     # Process each layer
                     for layer_idx in range(len(self.layer_names)):
                         if preconditioners[layer_idx] is None:
-                            batch_ifvp.append(torch.tensor([]))
+                            batch_ifvp.append(torch.zeros(batch_tensor.shape[0], self.layer_dims[layer_idx]))
                             continue
 
                         # Extract layer data
@@ -234,7 +254,7 @@ class IFAttributor(BaseAttributor):
                         layer_grad = batch_tensor[:, start_col:end_col]
 
                         if layer_grad.numel() == 0:
-                            batch_ifvp.append(torch.tensor([]))
+                            batch_ifvp.append(torch.zeros(batch_tensor.shape[0], self.layer_dims[layer_idx]))
                             continue
 
                         # Get preconditioner
@@ -243,25 +263,17 @@ class IFAttributor(BaseAttributor):
 
                         # Compute IFVP: H^{-1} @ g
                         ifvp = torch.matmul(device_precond, layer_grad.t()).t()
-                        batch_ifvp.append(self.strategy.move_from_device(ifvp))
+                        batch_ifvp.append(ifvp)
 
                         del layer_grad, ifvp, device_precond
 
-                    # Store IFVP for this batch
+                    # Store IFVP for this batch using strategy
                     self.strategy.store_ifvp(batch_idx, batch_ifvp)
 
-                    # For memory efficiency, especially with disk offload:
-                    # - Don't keep the actual tensors in result_dict
-                    # - Just mark that this batch was processed
-                    if self.offload == "disk":
-                        # For disk offload, don't keep tensors in memory
-                        result_dict[batch_idx] = None
-                        # Explicitly delete to free memory immediately
-                        del batch_ifvp
-                    else:
-                        # For memory/cpu offload, it's already in their cache
-                        # so keeping the reference is ok (they manage their own memory)
-                        result_dict[batch_idx] = batch_ifvp
+                    processed_batches += 1
+                    processed_samples += batch_tensor.shape[0]
+
+                    del batch_ifvp
 
                 del chunk_tensor
                 torch.cuda.empty_cache()
@@ -281,20 +293,29 @@ class IFAttributor(BaseAttributor):
         if self.profile and self.profiling_stats:
             torch.cuda.synchronize(self.device)
             self.profiling_stats.precondition += time.time() - start_time
-            return (result_dict, self.profiling_stats)
-        else:
-            return result_dict
 
-    def _copy_gradients_to_ifvp(self, start_batch: int, end_batch: int) -> Dict[int, List[torch.Tensor]]:
-        """Copy gradients to IFVP storage when hessian type is 'none'."""
+        # Create processing info
+        processing_info = ProcessingInfo(
+            num_batches=processed_batches,
+            total_samples=processed_samples,
+            batch_range=(start_batch, end_batch),
+            data_type="ifvp"
+        )
+
+        if self.profile and self.profiling_stats:
+            return (processing_info, self.profiling_stats)
+        else:
+            return processing_info
+
+    def _copy_gradients_as_ifvp(self, start_batch: int, end_batch: int) -> Union[ProcessingInfo, Tuple[ProcessingInfo, ProfilingStats]]:
+        """Copy gradients as IFVP when hessian type is 'none'."""
         # Ensure layer dimensions are loaded
         if self.layer_dims is None:
             self._sync_layer_dims()
 
-        batch_indices = [idx for idx in self.metadata.batch_info.keys()
-                        if start_batch <= idx < end_batch]
-
-        result_dict = {}
+        batch_to_sample_mapping = self.metadata.get_batch_to_sample_mapping()
+        processed_batches = 0
+        processed_samples = 0
 
         # Process using tensor dataloader
         dataloader = self.strategy.create_gradient_dataloader(
@@ -305,8 +326,11 @@ class IFAttributor(BaseAttributor):
         )
 
         if dataloader:
-            for chunk_tensor, batch_mapping in tqdm(dataloader, desc="Copying gradients to IFVP"):
+            for chunk_tensor, batch_mapping in tqdm(dataloader, desc="Copying gradients as IFVP"):
                 for batch_idx, (start_row, end_row) in batch_mapping.items():
+                    if batch_idx not in batch_to_sample_mapping:
+                        continue
+
                     # Extract batch and split into layers
                     batch_tensor = chunk_tensor[start_row:end_row]
                     gradients = []
@@ -318,23 +342,29 @@ class IFAttributor(BaseAttributor):
 
                     self.strategy.store_ifvp(batch_idx, gradients)
 
-                    # For memory efficiency with disk offload
-                    if self.offload == "disk":
-                        result_dict[batch_idx] = None
-                        # Explicitly free memory
-                        del gradients
-                    else:
-                        result_dict[batch_idx] = gradients
+                    processed_batches += 1
+                    processed_samples += batch_tensor.shape[0]
 
-                # Free chunk memory for disk offload
-                if self.offload == "disk":
-                    del chunk_tensor
-                    torch.cuda.empty_cache()
+                    del gradients
 
-        return result_dict
+                del chunk_tensor
+                torch.cuda.empty_cache()
+
+        # Create processing info
+        processing_info = ProcessingInfo(
+            num_batches=processed_batches,
+            total_samples=processed_samples,
+            batch_range=(start_batch, end_batch),
+            data_type="ifvp"
+        )
+
+        if self.profile and self.profiling_stats:
+            return (processing_info, self.profiling_stats)
+        else:
+            return processing_info
 
     @torch.no_grad()
-    def compute_self_influence(self, worker: str = "0/1") -> torch.Tensor:
+    def compute_self_influence(self, worker: str = "0/1") -> Union[torch.Tensor, Tuple[torch.Tensor, ProfilingStats]]:
         """Compute self-influence scores using tensor-based processing."""
         logger.info(f"Worker {worker}: Computing self-influence scores")
 
@@ -412,7 +442,10 @@ class IFAttributor(BaseAttributor):
                 del grad_tensor, ifvp_tensor
                 torch.cuda.empty_cache()
 
-        return self_influence
+        if self.profile and self.profiling_stats:
+            return (self_influence, self.profiling_stats)
+        else:
+            return self_influence
 
     def attribute(
         self,
@@ -453,10 +486,11 @@ class IFAttributor(BaseAttributor):
 
         # Compute test gradients
         logger.info("Computing test gradients")
-        test_grads_tensor, test_batch_mapping = self._compute_gradients_direct(
+        test_grads_tensor, test_batch_mapping = self._compute_gradients_for_batches(
             test_dataloader,
-            is_test=True,
-            worker="0/1"
+            start_batch=0,
+            end_batch=len(test_dataloader),
+            is_test=True
         )
 
         if test_grads_tensor is None or test_grads_tensor.numel() == 0:

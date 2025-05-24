@@ -109,22 +109,29 @@ class MemoryOffloadStrategy(OffloadStrategy):
         """
         if is_test:
             if batch_idx not in self.cached_test_gradients:
-                return [torch.tensor([], device=self.device) for _ in self.layer_names]
+                if self.layer_dims is None:
+                    return [torch.tensor([], device=self.device) for _ in self.layer_names]
+                else:
+                    return [torch.zeros(0, dim, device=self.device) for dim in self.layer_dims]
             return self._split_tensor(self.cached_test_gradients[batch_idx])
         else:
             if batch_idx not in self.cached_gradients:
-                return [torch.tensor([], device=self.device) for _ in self.layer_names]
+                if self.layer_dims is None:
+                    return [torch.tensor([], device=self.device) for _ in self.layer_names]
+                else:
+                    return [torch.zeros(0, dim, device=self.device) for dim in self.layer_dims]
             return self._split_tensor(self.cached_gradients[batch_idx])
 
-    def store_preconditioner(self, layer_idx: int, preconditioner: torch.Tensor) -> None:
+    def store_preconditioner(self, layer_idx: int, preconditioner: Optional[torch.Tensor]) -> None:
         """
         Store a preconditioner for a layer in memory.
 
         Args:
             layer_idx: Layer index
-            preconditioner: Preconditioner tensor
+            preconditioner: Preconditioner tensor (can be None)
         """
-        self.preconditioners[layer_idx] = preconditioner
+        if layer_idx < len(self.preconditioners):
+            self.preconditioners[layer_idx] = preconditioner
 
     def retrieve_preconditioner(self, layer_idx: int) -> Optional[torch.Tensor]:
         """
@@ -162,7 +169,10 @@ class MemoryOffloadStrategy(OffloadStrategy):
             List of IFVP tensors (one per layer)
         """
         if batch_idx not in self.cached_ifvp:
-            return [torch.tensor([], device=self.device) for _ in self.layer_names]
+            if self.layer_dims is None:
+                return [torch.tensor([], device=self.device) for _ in self.layer_names]
+            else:
+                return [torch.zeros(0, dim, device=self.device) for dim in self.layer_dims]
         return self._split_tensor(self.cached_ifvp[batch_idx])
 
     def create_gradient_dataloader(self, data_type: str, batch_size: int = 1,
@@ -265,6 +275,7 @@ class MemoryOffloadStrategy(OffloadStrategy):
         self.cached_test_gradients = {}
         self.preconditioners = [None] * len(self.layer_names)
         self.cached_ifvp = {}
+        # Don't clear layer_dims as they might be needed later
 
     def wait_for_async_operations(self) -> None:
         """

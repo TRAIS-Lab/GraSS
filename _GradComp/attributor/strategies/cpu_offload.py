@@ -113,20 +113,27 @@ class CPUOffloadStrategy(OffloadStrategy):
         cached_dict = self.cached_test_gradients if is_test else self.cached_gradients
 
         if batch_idx not in cached_dict:
-            return [torch.tensor([], device=self.device) for _ in self.layer_names]
+            if self.layer_dims is None:
+                return [torch.tensor([], device=self.device) for _ in self.layer_names]
+            else:
+                return [torch.zeros(0, dim, device=self.device) for dim in self.layer_dims]
 
         # Split and move to device
         return self._split_tensor(cached_dict[batch_idx], to_device=True)
 
-    def store_preconditioner(self, layer_idx: int, preconditioner: torch.Tensor) -> None:
+    def store_preconditioner(self, layer_idx: int, preconditioner: Optional[torch.Tensor]) -> None:
         """
         Store a preconditioner for a layer on CPU.
 
         Args:
             layer_idx: Layer index
-            preconditioner: Preconditioner tensor
+            preconditioner: Preconditioner tensor (can be None)
         """
-        self.preconditioners[layer_idx] = preconditioner.cpu() if preconditioner.device.type != 'cpu' else preconditioner
+        if layer_idx < len(self.preconditioners):
+            if preconditioner is not None:
+                self.preconditioners[layer_idx] = preconditioner.cpu() if preconditioner.device.type != 'cpu' else preconditioner
+            else:
+                self.preconditioners[layer_idx] = None
 
     def retrieve_preconditioner(self, layer_idx: int) -> Optional[torch.Tensor]:
         """
@@ -165,7 +172,10 @@ class CPUOffloadStrategy(OffloadStrategy):
             List of IFVP tensors (one per layer) on the compute device
         """
         if batch_idx not in self.cached_ifvp:
-            return [torch.tensor([], device=self.device) for _ in self.layer_names]
+            if self.layer_dims is None:
+                return [torch.tensor([], device=self.device) for _ in self.layer_names]
+            else:
+                return [torch.zeros(0, dim, device=self.device) for dim in self.layer_dims]
 
         # Split and move to device
         return self._split_tensor(self.cached_ifvp[batch_idx], to_device=True)
@@ -274,6 +284,7 @@ class CPUOffloadStrategy(OffloadStrategy):
         self.cached_test_gradients = {}
         self.preconditioners = [None] * len(self.layer_names)
         self.cached_ifvp = {}
+        # Don't clear layer_dims as they might be needed later
 
     def wait_for_async_operations(self) -> None:
         """
