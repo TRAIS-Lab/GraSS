@@ -8,7 +8,12 @@ Please follow the installation guide from [dattri](https://github.com/TRAIS-Lab/
 
 ## File Structure
 
-The folders either correspond to *libraries* or *experiments*; specifically, the ones starting with `_` are *libraries* (or baselines) that implement the data attribution algorithms, while others correspond to *experiments*.
+The folders either correspond to *libraries* or *experiments*; specifically, the ones starting with `_` are *libraries* (or baselines) that implement the data attribution algorithms, while others correspond to *experiments*. In particular, there are four libraries:
+
+1. `_GradComp`: The main implementation supports influence function with linear layer's gradient factorized compression. In particular, **FactGraSS** (and **SJLT** in `_GradComp/projection/sjlt`).
+2. `_LoGra`: The [LogIX](https://github.com/logix-project/logix) library with some efficiency fixes.
+3. `_Localizer`: The implementation of **Selective Mask**.
+4. `_dattri`: The [dattri](https://github.com/TRAIS-Lab/dattri) library with **GraSS** implementations (changes are mainly made in `_dattri/func/projection.py`).
 
 ## Quick Start
 
@@ -57,14 +62,14 @@ For GPT2 experiments, since the LDS result and the fine-tuned models are not ava
 	# Loop over the task IDs
 	for SLURM_ARRAY_TASK_ID in {0..49}; do
 		echo "Starting task ID: $SLURM_ARRAY_TASK_ID"
-
+	
 		# Set the output directory and seed based on the current task ID
 		OUTPUT_DIR="./checkpoints/${SLURM_ARRAY_TASK_ID}"
 		SEED=${SLURM_ARRAY_TASK_ID}
-
+	
 		# Create the output directory
 		mkdir -p $OUTPUT_DIR
-
+	
 		# Run the training script
 		python train.py \
 			--dataset_name "wikitext" \
@@ -74,7 +79,7 @@ For GPT2 experiments, since the LDS result and the fine-tuned models are not ava
 			--block_size 512 \
 			--subset_ratio 0.5 \
 			--seed $SEED
-
+	
 		echo "Task ID $SLURM_ARRAY_TASK_ID completed"
 	done
 	```
@@ -130,14 +135,19 @@ For GPT2 experiments, since the LDS result and the fine-tuned models are not ava
 
 ### Llama3-8B+OpenWebText
 
-For billion-scale model, since we do not need to do quantitative experiment, we do not need to fine-tune the model several times. Here, since this is a large scale experiment, we divide the attribution into several phases, specified by `--mode`. In order, the available options are `cache`, `precondition`, `ifvp`, `attribute`. Furthermore, for `cache` and `ifvp`, we provide a further `--worker` argument to parallelize the job by splitting the dataset among several job instances. Here, we provide an example for `cache` and `attribute`:
+For billion-scale model, since we do not need to do quantitative experiment, we do not need to fine-tune the model several times. Here, since this is a large scale experiment, we divide the attribution into several phases, specified by `--mode`. In order, the available options are `cache`, `precondition`, `ifvp`, `attribute`. Furthermore, for `cache` and `ifvp`, we provide a further `--worker` argument to parallelize the job by splitting the dataset among several job instances.
 
-1. `cache`: For cache, we can parallelize via `--worker`. The following script submits 20 jobs to divide the dataset into 20 chunks:
+> We note that the complete order is `cache`→`precondition`→`ifvp`→`attribute`
+
+Here, we provide an example for `cache` and `attribute`:
+
+1. `cache`/`ifvp`: For caching projected gradients and computing iFVP, we can parallelize via `--worker`. The following script submits 20 jobs to divide the dataset into 20 chunks:
+	
 	```bash
 	#SBATCH -a 0-19
-
+	
 	WORKER_ID=$SLURM_ARRAY_TASK_ID
-
+	
 	python attribute.py \
 		--dataset_name "openwebtext" \
 		--trust_remote_code \
@@ -151,12 +161,13 @@ For billion-scale model, since we do not need to do quantitative experiment, we 
 		--layer "Linear" \
 		--sparsification "Random-128*128" \
 		--projection "SJLT-4096" \
-		--mode "cache" \
+		--mode "cache" \ # or ifvp
 		--cache_dir "./cache/" \
 		--worker "$WORKER_ID/20" \
 		--profile
 	```
-2. `attribute`: This does not have the parallelization functionality. Simply removing `--worker` and change `--mode`:
+2. `attribute`/`precondition`: Computing preconditioners and also attributing do  not have the parallelization functionality. Simply removing `--worker` and change `--mode`:
+	
 	```bash
 	python attribute.py \
 		--dataset_name "openwebtext" \
@@ -171,7 +182,7 @@ For billion-scale model, since we do not need to do quantitative experiment, we 
 		--layer "Linear" \
 		--sparsification "Random-128*128" \
 		--projection "SJLT-4096" \
-		--mode "attribute" \
+		--mode "attribute" \ # or precondition
 		--cache_dir "./cache/" \
 		--profile
 	```
