@@ -913,8 +913,8 @@ def main():
     result = {"score": score, "lds": lds_score, "profile": profile, "throughput": throughput_stats, "best_damping": best_damping}
     logger.info(result)
 
-    # if not args.debug: # only save the results when not in debug mode
-        # torch.save(result, result_filename(args))
+    if not args.debug: # only save the results when not in debug mode
+        torch.save(result, result_filename(args))
 
 if __name__ == "__main__":
     main()

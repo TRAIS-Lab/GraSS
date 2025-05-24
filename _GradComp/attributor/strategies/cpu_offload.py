@@ -212,10 +212,9 @@ class CPUOffloadStrategy(OffloadStrategy):
 
         # Create simple dataset
         class CPUTensorDataset(torch.utils.data.Dataset):
-            def __init__(self, cache, batch_indices, device):
+            def __init__(self, cache, batch_indices):
                 self.cache = cache
                 self.batch_indices = batch_indices
-                self.device = device
 
             def __len__(self):
                 return len(self.batch_indices)
@@ -223,13 +222,12 @@ class CPUOffloadStrategy(OffloadStrategy):
             def __getitem__(self, idx):
                 batch_idx = self.batch_indices[idx]
                 cpu_tensor = self.cache[batch_idx]
-                # Move to device when accessed
-                device_tensor = cpu_tensor.to(self.device)
+                # Keep on CPU - DataLoader will handle pinning if requested
                 # Return in same format as disk loader
-                batch_mapping = {batch_idx: (0, device_tensor.shape[0])}
-                return device_tensor, batch_mapping
+                batch_mapping = {batch_idx: (0, cpu_tensor.shape[0])}
+                return cpu_tensor, batch_mapping
 
-        dataset = CPUTensorDataset(cache, batch_indices, self.device)
+        dataset = CPUTensorDataset(cache, batch_indices)
 
         # Custom collate function to combine multiple batches
         def collate_fn(items):
