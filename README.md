@@ -1,4 +1,6 @@
-# GraSS
+# GraSS 🌿
+
+This is the official implementation of [GraSS: Scalable Influence Function with Sparse Gradient Compression]().
 
 ## Setup Guide
 
@@ -10,7 +12,9 @@ The folders either correspond to *libraries* or *experiments*; specifically, the
 
 ## Quick Start
 
-We provide the scripts for the experiments. Note that in the codebase, we call *Selective Mask* as *Localize*, while *Random Mask* as *Random*.
+We provide the scripts for the experiments.
+
+>Note that in the codebase, we call *Selective Mask* as *Localize*, while *Random Mask* as *Random*.
 
 ### MLP+MNIST/ResNet+CIFAR/MusicTransformer+MAESTRO
 
@@ -74,7 +78,7 @@ For GPT2 experiments, since the LDS result and the fine-tuned models are not ava
 		echo "Task ID $SLURM_ARRAY_TASK_ID completed"
 	done
 	```
-2. Obtain LDS:
+2. Obtain groundtruth for computing LDS:
 	```bash
 	python groundtruth.py\
 		--dataset_name "wikitext" \
@@ -84,9 +88,9 @@ For GPT2 experiments, since the LDS result and the fine-tuned models are not ava
 		--block_size 512 \
 		--seed 0
 	```
-3. Selective Mask:
+3. Selective Mask training:
 	```bash
-	for PROJ_DIM in "512" ; do
+	for PROJ_DIM in "32" "64" "128" ; do
 		python localize.py\
 			--dataset_name "wikitext" \
 			--dataset_config_name "wikitext-2-raw-v1" \
@@ -171,3 +175,16 @@ For billion-scale model, since we do not need to do quantitative experiment, we 
 		--cache_dir "./cache/" \
 		--profile
 	```
+
+## Citation
+
+If you find this repository valuable, please give it a star! Got any questions or feedback? Feel free to open an issue. Using this in your work? Please reference us using the provided citation:
+```bibtex
+@misc{hu2025grass,
+  author        = {Hu, Pingbang and Melkonian, Joseph and Tang, Weijing and Zhao, Han and Ma, W. Jiaqi},
+  title         = {GraSS: Scalable Influence Function with Sparse Gradient Compression},
+  archiveprefix = {arXiv},
+  primaryclass  = {cs.LG},
+  year          = {2025}
+}
+```
