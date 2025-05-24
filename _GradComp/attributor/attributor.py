@@ -133,7 +133,7 @@ class IFAttributor(BaseAttributor):
                     del precond
 
                 elif self.hessian in ["kfac", "ekfac"]:
-                    self.strategy.store_preconditioner(layer_idx, hessian)
+                    self.strategy.store_preconditioner(layer_idx, hessian) #TODO: Fix, currently not correct
 
                 computed_count += 1
                 del hessian_accumulator, hessian
@@ -317,7 +317,7 @@ class IFAttributor(BaseAttributor):
         # Process using tensor dataloader
         dataloader = self.strategy.create_gradient_dataloader(
             data_type="gradients",
-            batch_size=4,
+            batch_size=1,
             pin_memory=True,
             batch_range=(start_batch, end_batch)
         )
