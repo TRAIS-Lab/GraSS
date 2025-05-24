@@ -187,7 +187,7 @@ def create_tensor_dataloader(
     return torch.utils.data.DataLoader(
         dataset,
         batch_size=batch_size,
-        num_workers=4,
+        num_workers=8,
         pin_memory=pin_memory,
         shuffle=False,
         collate_fn=tensor_collate_fn,

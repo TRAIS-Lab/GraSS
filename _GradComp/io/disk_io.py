@@ -32,9 +32,15 @@ class ChunkedDiskIOManager:
     Disk I/O manager with pure tensor storage per chunk.
     """
 
-    def __init__(self, cache_dir: str, setting: str, num_threads: int = 16,
-                 hessian: HessianOptions = "raw", chunk_size: int = 32,
-                 max_samples_per_chunk: int = 2048):
+    def __init__(
+            self,
+            cache_dir: str,
+            setting: str,
+            num_threads: int = 32,
+            hessian: HessianOptions = "raw",
+            chunk_size: int = 32,
+            max_samples_per_chunk: int = 2048
+        ):
         self.cache_dir = cache_dir
         self.setting = setting
         self.num_threads = num_threads

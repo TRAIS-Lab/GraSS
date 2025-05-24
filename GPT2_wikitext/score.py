@@ -610,6 +610,7 @@ def main():
     # Dataset
     train_dataset = lm_datasets["train"]
     test_dataset = lm_datasets["validation"]
+    # test_dataset = train_dataset.select(range(1000)) # select 1000 samples for testing #TODO: remove this line, only for debugging
     train_batch_size, test_batch_size = 32, 32
 
     if args.debug: # toy dataset
