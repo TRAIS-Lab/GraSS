@@ -159,12 +159,12 @@ def tensor_collate_fn(batch):
     return combined_tensor, combined_mapping
 
 def create_tensor_dataloader(
-        disk_io,
-        data_type="gradients",
-        batch_size=4,
-        pin_memory=True,
-        batch_range=None,
-    ) -> torch.utils.data.DataLoader:
+    disk_io,
+    data_type="gradients",
+    batch_size=4,
+    pin_memory=True,
+    batch_range=None,
+) -> torch.utils.data.DataLoader:
     """
     Create an optimized DataLoader for tensor-based chunked data.
 

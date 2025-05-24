@@ -20,13 +20,13 @@ class ChunkedMemoryMapHandler:
 
     @staticmethod
     def write_chunk(
-            save_path: str,
-            data_type: str,
-            tensor: torch.Tensor,
-            batch_info: List[Dict[str, Any]],
-            layer_dims: List[int],
-            dtype: str = 'float32'
-        ) -> str:
+        save_path: str,
+        data_type: str,
+        tensor: torch.Tensor,
+        batch_info: List[Dict[str, Any]],
+        layer_dims: List[int],
+        dtype: str = 'float32'
+    ) -> str:
         """
         Write a tensor chunk directly to memory-mapped file.
 

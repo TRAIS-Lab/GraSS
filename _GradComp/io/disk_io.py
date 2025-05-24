@@ -33,14 +33,14 @@ class ChunkedDiskIOManager:
     """
 
     def __init__(
-            self,
-            cache_dir: str,
-            setting: str,
-            num_threads: int = 32,
-            hessian: HessianOptions = "raw",
-            chunk_size: int = 32,
-            max_samples_per_chunk: int = 2048
-        ):
+        self,
+        cache_dir: str,
+        setting: str,
+        num_threads: int = 32,
+        hessian: HessianOptions = "raw",
+        chunk_size: int = 32,
+        max_samples_per_chunk: int = 2048
+    ):
         self.cache_dir = cache_dir
         self.setting = setting
         self.num_threads = num_threads
@@ -391,9 +391,13 @@ class ChunkedDiskIOManager:
 
         return result
 
-    def create_gradient_dataloader(self, data_type: str, batch_size: int = 1,
-                                pin_memory: bool = True, batch_range: Optional[Tuple[int, int]] = None,
-                                is_test: bool = False) -> Optional[torch.utils.data.DataLoader]:
+    def create_gradient_dataloader(
+        self,
+        data_type: str,
+        batch_size: int = 1,
+        pin_memory: bool = True,
+        batch_range: Optional[Tuple[int, int]] = None,
+    ) -> Optional[torch.utils.data.DataLoader]:
         """Create a DataLoader for loading chunked data."""
         try:
             from .prefetch_dataset import create_tensor_dataloader

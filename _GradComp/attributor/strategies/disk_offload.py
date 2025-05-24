@@ -119,7 +119,6 @@ class DiskOffloadStrategy(OffloadStrategy):
             batch_size=batch_size,
             pin_memory=pin_memory,
             batch_range=batch_range,
-            is_test=is_test
         )
 
     def has_preconditioners(self) -> bool:
