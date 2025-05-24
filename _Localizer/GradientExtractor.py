@@ -64,7 +64,7 @@ class GradientExtractor:
         )
 
         # Clear GPU cache after processing training data
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        torch.cuda.empty_cache()
 
         print("Processing test data...")
         test_gradients = self._process_dataloader(
@@ -74,7 +74,7 @@ class GradientExtractor:
         )
 
         # Clear GPU cache after processing
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        torch.cuda.empty_cache()
 
         return train_gradients, test_gradients
 
@@ -181,12 +181,12 @@ class GradientExtractor:
                     if 'labels' in locals(): del labels
 
                 # Clear GPU cache
-                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                torch.cuda.empty_cache()
 
             except Exception as e:
                 print(f"Error processing batch {batch_idx}: {str(e)}")
                 # Clean up on error
-                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                torch.cuda.empty_cache()
                 continue
 
         # Process collected gradients
@@ -221,7 +221,7 @@ class GradientExtractor:
                 gradient_tensor = gradient_tensor * batch_size
 
             # Clear GPU cache
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            torch.cuda.empty_cache()
 
             return {
                 'gradient': gradient_tensor,
@@ -232,7 +232,7 @@ class GradientExtractor:
             print(f"Error during final tensor processing: {str(e)}")
             # Clean up on error
             if 'gradient_tensor' in locals(): del gradient_tensor
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            torch.cuda.empty_cache()
             return None
 
     def get_param_to_indices_map(self):

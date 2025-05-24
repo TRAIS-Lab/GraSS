@@ -7,7 +7,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, Tuple, Literal
 from dataclasses import dataclass
-import gc
 import itertools
 
 if TYPE_CHECKING:
@@ -172,9 +171,8 @@ class BaseAttributor(ABC):
         if self.hook_manager:
             self.hook_manager.remove_hooks()
             self.hook_manager = None
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+
+        torch.cuda.empty_cache()
 
     def _get_worker_batch_range(self, total_batches: int, worker: str) -> Tuple[int, int]:
         """Get chunk-aligned batch range for a worker."""

@@ -79,7 +79,7 @@ class MLPGradientExtractor:
         )
 
         # Clear GPU cache after processing training data
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        torch.cuda.empty_cache()
 
         # Then process test data
         test_components = self._process_dataloader(
@@ -94,7 +94,7 @@ class MLPGradientExtractor:
         hook_manager.remove_hooks()
 
         # Clear GPU cache after processing
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        torch.cuda.empty_cache()
 
         return train_components, test_components
 
@@ -213,12 +213,12 @@ class MLPGradientExtractor:
                     if 'comp_data' in locals(): del comp_data
 
                     # Clear GPU cache
-                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                    torch.cuda.empty_cache()
 
             except Exception as e:
                 print(f"Error processing batch {batch_idx}: {str(e)}")
                 # Clean up on error
-                torch.cuda.empty_cache() if torch.cuda.is_available() else None
+                torch.cuda.empty_cache()
                 continue
 
         # Process collected gradients
@@ -312,7 +312,7 @@ class MLPGradientExtractor:
                             del ones
 
             # Clear GPU cache
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            torch.cuda.empty_cache()
 
             return {
                 'pre_activation': pre_act_tensor,
@@ -325,5 +325,5 @@ class MLPGradientExtractor:
             # Clean up on error
             if 'pre_act_tensor' in locals(): del pre_act_tensor
             if 'input_feat_tensor' in locals(): del input_feat_tensor
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            torch.cuda.empty_cache()
             return None

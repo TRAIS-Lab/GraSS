@@ -139,8 +139,6 @@ class ChunkedMemoryMapHandler:
         finally:
             if mmap is not None:
                 del mmap
-                import gc
-                gc.collect()
 
     @staticmethod
     def read_chunk_metadata(path: str, chunk_filename: str) -> Dict[str, Any]:

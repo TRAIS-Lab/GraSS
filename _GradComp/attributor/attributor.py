@@ -4,7 +4,6 @@ Influence Function Attributor.
 
 from typing import TYPE_CHECKING, Optional, Union, Tuple
 import time
-import gc
 
 if TYPE_CHECKING:
     from torch.utils.data import DataLoader
@@ -115,7 +114,7 @@ class IFAttributor(BaseAttributor):
 
                 del chunk_tensor
                 torch.cuda.empty_cache()
-                gc.collect()
+
 
         # Compute preconditioners from accumulated Hessians
         computed_count = 0
@@ -277,7 +276,6 @@ class IFAttributor(BaseAttributor):
 
                 del chunk_tensor
                 torch.cuda.empty_cache()
-                gc.collect()
 
         # Finalize batch range processing
         if self.offload == "disk" and hasattr(self.strategy, 'finish_batch_range_processing'):
@@ -285,7 +283,6 @@ class IFAttributor(BaseAttributor):
 
         # Clean up
         del preconditioners
-        gc.collect()
         torch.cuda.empty_cache()
 
         self.strategy.wait_for_async_operations()
@@ -509,43 +506,90 @@ class IFAttributor(BaseAttributor):
         # Initialize result
         IF_score = torch.zeros(total_train_samples, test_sample_count, device=self.device)
 
-        # Use tensor-based attribution computation
-        logger.debug("Using tensor-based attribution computation")
+        # Optimized tensor-based attribution computation
+        logger.debug("Using optimized tensor-based attribution computation")
 
         # Create dataloader for IFVP
         train_ifvp_dataloader = self.strategy.create_gradient_dataloader(
             data_type="ifvp",
-            batch_size=4,
+            batch_size=1,
             pin_memory=True
         )
 
-        if train_ifvp_dataloader:
-            test_device = self.strategy.move_to_device(all_test_gradients)
+        if train_ifvp_dataloader and test_sample_count > 0:
+            # Keep test gradients on CPU initially if using disk offload
+            if self.offload == "disk":
+                # For disk offload, process in smaller batches to avoid memory issues
+                # Split test gradients into manageable chunks
+                test_chunk_size = min(100, test_sample_count)  # Process 100 test samples at a time
 
-            for chunk_tensor, batch_mapping in tqdm(train_ifvp_dataloader, desc="Computing attribution"):
-                # Move chunk to device
-                chunk_tensor_device = self.strategy.move_to_device(chunk_tensor)
+                for test_start in range(0, test_sample_count, test_chunk_size):
+                    test_end = min(test_start + test_chunk_size, test_sample_count)
+                    test_chunk = all_test_gradients[test_start:test_end]
 
-                # Compute scores for entire chunk at once
-                chunk_scores = torch.matmul(chunk_tensor_device, test_device.t())
+                    # Move only this chunk to device
+                    test_chunk_device = self.strategy.move_to_device(test_chunk)
 
-                # Map back to train samples
-                for batch_idx, (start_row, end_row) in batch_mapping.items():
-                    if batch_idx not in batch_to_sample_mapping:
-                        continue
+                    # Process all training IFVP against this test chunk
+                    for chunk_tensor, batch_mapping in tqdm(
+                        train_ifvp_dataloader,
+                        desc=f"Computing attribution for test samples {test_start}-{test_end}",
+                        leave=False
+                    ):
+                        # chunk_tensor is already on device via DataLoader
+                        if self.offload != "disk":
+                            # For non-disk strategies, ensure it's on device
+                            chunk_tensor_device = self.strategy.move_to_device(chunk_tensor)
+                        else:
+                            # For disk strategy, it should already be pinned/ready
+                            chunk_tensor_device = chunk_tensor.to(self.device, non_blocking=True)
 
-                    train_start, train_end = batch_to_sample_mapping[batch_idx]
-                    batch_scores = chunk_scores[start_row:end_row]
-                    IF_score[train_start:train_end, :] = batch_scores
+                        # Compute scores for this chunk
+                        chunk_scores = torch.matmul(chunk_tensor_device, test_chunk_device.t())
 
-                del chunk_tensor_device, chunk_scores
-                torch.cuda.empty_cache()
+                        # Map back to train samples
+                        for batch_idx, (start_row, end_row) in batch_mapping.items():
+                            if batch_idx not in batch_to_sample_mapping:
+                                continue
 
-            del test_device
+                            train_start, train_end = batch_to_sample_mapping[batch_idx]
+                            batch_scores = chunk_scores[start_row:end_row]
+                            IF_score[train_start:train_end, test_start:test_end] = batch_scores
 
+                        # Clear intermediate results
+                        del chunk_tensor_device, chunk_scores
+                        if test_start == 0 and test_end == test_chunk_size:
+                            # Only clear cache on first iteration to gauge memory usage
+                            torch.cuda.empty_cache()
+
+                    # Clear test chunk from device
+                    del test_chunk_device, test_chunk
+                    torch.cuda.empty_cache()
+            else:
+                # For CPU/memory offload, can process all at once
+                test_device = self.strategy.move_to_device(all_test_gradients)
+
+                for chunk_tensor, batch_mapping in tqdm(train_ifvp_dataloader, desc="Computing attribution"):
+                    # Move chunk to device
+                    chunk_tensor_device = self.strategy.move_to_device(chunk_tensor)
+
+                    # Compute scores for entire chunk at once
+                    chunk_scores = torch.matmul(chunk_tensor_device, test_device.t())
+
+                    # Map back to train samples
+                    for batch_idx, (start_row, end_row) in batch_mapping.items():
+                        if batch_idx not in batch_to_sample_mapping:
+                            continue
+
+                        train_start, train_end = batch_to_sample_mapping[batch_idx]
+                        batch_scores = chunk_scores[start_row:end_row]
+                        IF_score[train_start:train_end, :] = batch_scores
+
+                    del chunk_tensor_device, chunk_scores
+                    torch.cuda.empty_cache()
+                del test_device
         # Clean up
         del all_test_gradients
-        gc.collect()
         torch.cuda.empty_cache()
 
         logger.info(f"Attribution computation completed. Result shape: {IF_score.shape}")
