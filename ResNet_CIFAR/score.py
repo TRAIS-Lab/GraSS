@@ -155,12 +155,12 @@ def main():
 
     # Create task
     task = AttributionTask(model=model, loss_func=f, checkpoints=model_details["models_half"][:10])
-    if args.proj_method == "Localize":
-        mask_path = f"./Localize/mask_{args.proj_dim}/result.pt"
+    if args.proj_method == "SelectiveMask":
+        mask_path = f"./SelectiveMask/mask_{args.proj_dim}/result.pt"
         result = torch.load(mask_path, weights_only=False)
         active_indices = result['active_indices'].to(args.device)
     elif args.localization > 0:
-        mask_path = f"./Localize/mask_{args.localization}/result.pt"
+        mask_path = f"./SelectiveMask/mask_{args.localization}/result.pt"
         result = torch.load(mask_path, weights_only=False)
         active_indices = result['active_indices'].to(args.device)
     elif args.random > 0:

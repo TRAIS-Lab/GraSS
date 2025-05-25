@@ -211,16 +211,16 @@ def parse_args():
         help="Layer used for attribution.",
     )
     parser.add_argument(
-        "--localize",
+        "--sparsification_dim",
         type=int,
         default=16,
-        help="Number of aimed (factorized) localized parameters.",
+        help="Target number of (factorized) active parameters.",
     )
     parser.add_argument(
         "--epoch",
         type=int,
         default=2000,
-        help="Number of epochs for learning the localized parameters.",
+        help="Number of epochs for training Selective Mask.",
     )
     parser.add_argument(
         "--log_interval",
@@ -229,10 +229,10 @@ def parse_args():
         help="Interval for logging the training process.",
     )
     parser.add_argument(
-        "--loc_n",
+        "--SM_n",
         type=int,
         default=200,
-        help="Number of training samples used for training localized parameters.",
+        help="Number of training samples used for training Selective Mask.",
     )
     parser.add_argument(
         "--learning_rate",
@@ -435,7 +435,6 @@ def main():
             config=config,
             low_cpu_mem_usage=args.low_cpu_mem_usage,
             trust_remote_code=args.trust_remote_code,
-            # torch_dtype=torch.bfloat16, #Add
         )
     else:
         logger.info("Training new model from scratch")
@@ -514,10 +513,10 @@ def main():
         )
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
-    from Llama3_8B_OWT.utils import SubsetSampler
+    from GPT2_wikitext.utils import SubsetSampler, replace_conv1d_modules
     from _GradComp.utils import find_layers
-    from _Localizer.MLPGradientExtractor import MLPGradientExtractor
-    from _Localizer.MLPLocalizer import MLPLocalizer
+    from _SelectiveMask.MLPGradientExtractor import MLPGradientExtractor
+    from _SelectiveMask.MLPSelectiveMask import MLPSelectiveMask
 
     if args.device.startswith("cuda"):
         # Check if GPU is available
@@ -531,11 +530,11 @@ def main():
 
     # Dataset
     whole_train_dataset = lm_datasets["train"]
-    train_batch_size, test_batch_size = 4, 4
+    train_batch_size, test_batch_size = 32, 32
 
     # split the train_dataset into train and test further, with 80% for training and 20% for testing
-    train_dataset = whole_train_dataset.select(range(int(args.loc_n * 0.8)))
-    test_dataset = whole_train_dataset.select(range(int(args.loc_n * 0.8), args.loc_n))
+    train_dataset = whole_train_dataset.select(range(int(args.SM_n * 0.8)))
+    test_dataset = whole_train_dataset.select(range(int(args.SM_n * 0.8), args.SM_n))
 
     train_sampler = SubsetSampler(range(len(train_dataset)))
     train_dataloader = DataLoader(
@@ -544,6 +543,11 @@ def main():
     test_dataloader = DataLoader(
         test_dataset, collate_fn=default_data_collator, batch_size=test_batch_size, shuffle=False
     )
+
+    model_id = 0
+    checkpoint = f"{args.output_dir}/{model_id}"
+    model = AutoModelForCausalLM.from_pretrained(checkpoint)
+    model = replace_conv1d_modules(model)
 
     # Extract the layers we want to analyze
     layers = find_layers(model, args.layer, return_type="name_instance")
@@ -574,7 +578,7 @@ def main():
         return
 
     # Create output directory for saving masks
-    output_dir = f"./Localize/mask_{args.localize}*{args.localize}"
+    output_dir = f"./SelectiveMask/mask_{args.sparsification_dim}*{args.sparsification_dim}"
     os.makedirs(output_dir, exist_ok=True)
 
     # Initialize gradient extractor
@@ -582,7 +586,6 @@ def main():
     extractor = MLPGradientExtractor(
         model=model,
         device=device,
-        cpu_offload=True,
     )
 
     # Process each layer individually to save memory
@@ -612,21 +615,21 @@ def main():
         pre_activation_dim = train_pre_activations.shape[-1]
         input_features_dim = train_input_features.shape[-1]
 
-        logger.info(f"Layer {global_layer_idx + 1} - Pre-activation dimension: {pre_activation_dim}, "
+        logger.info(f"Layer {layer_idx + 1} - Pre-activation dimension: {pre_activation_dim}, "
                    f"Input features dimension: {input_features_dim}")
 
-        logger.info(f"Training the dual component mask optimizer for layer {global_layer_idx + 1}...")
+        logger.info(f"Training the dual component mask optimizer for layer {layer_idx + 1}...")
 
         # Initialize the optimizer for this layer
-        optimizer = MLPLocalizer(
+        optimizer = MLPSelectiveMask(
             pre_activation_dim=pre_activation_dim,
             input_features_dim=input_features_dim,
             lambda_reg=args.regularization,
             lr=args.learning_rate,
-            min_active_pre_activation=args.localize,
-            max_active_pre_activation=args.localize,
-            min_active_input=args.localize,
-            max_active_input=args.localize,
+            min_active_pre_activation=args.sparsification_dim,
+            max_active_pre_activation=args.sparsification_dim,
+            min_active_input=args.sparsification_dim,
+            max_active_input=args.sparsification_dim,
             device=device,
             logger=logger,
         )
@@ -637,8 +640,7 @@ def main():
             train_input_features=train_input_features,
             test_pre_activation=test_pre_activations,
             test_input_features=test_input_features,
-            batch_size=10,
-            accumulation_steps=5,
+            batch_size=100,
             num_epochs=args.epoch,
             log_every=args.log_interval,
             correlation_threshold=args.early_stop,
@@ -648,8 +650,8 @@ def main():
         # Get and save important indices
         important_indices = optimizer.get_important_indices(
             threshold=0.5,
-            min_count_pre=args.localize,
-            min_count_input=args.localize
+            min_count_pre=args.sparsification_dim,
+            min_count_input=args.sparsification_dim
         )
 
         # Calculate effective sparsity
@@ -657,7 +659,7 @@ def main():
         effective_params = len(important_indices['pre_activation']) * len(important_indices['input_features'])
         sparsity = 100 - (effective_params / total_params * 100)
 
-        logger.info(f"Results for Layer {global_layer_idx + 1}:")
+        logger.info(f"Results for Layer {layer_idx + 1}:")
         logger.info(f"Pre-activation mask: {len(important_indices['pre_activation'])}/{pre_activation_dim} "
                   f"parameters ({len(important_indices['pre_activation'])/pre_activation_dim*100:.2f}%)")
         logger.info(f"Input features mask: {len(important_indices['input_features'])}/{input_features_dim} "

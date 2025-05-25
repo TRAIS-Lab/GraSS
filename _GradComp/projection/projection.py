@@ -494,7 +494,7 @@ class CudaProjector(AbstractProjector):
         elif self.method == "Random":
             features = features[:, self.active_indices]
             result = features
-        elif self.method == "Localize":
+        elif self.method == "SelectiveMask":
             features = features[:, self.active_indices]
             result = features
 
@@ -761,7 +761,7 @@ def make_random_projector(
             proj_type = ProjectionType.rademacher
         elif method == "Gaussian":
             proj_type = ProjectionType.normal
-        elif method == "Random" or method == "Localize":
+        elif method == "Random" or method == "SelectiveMask":
             proj_type = ProjectionType.identity
 
         projector = CudaProjector

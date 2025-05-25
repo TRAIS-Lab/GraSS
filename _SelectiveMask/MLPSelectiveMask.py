@@ -6,7 +6,7 @@ from scipy.stats import spearmanr
 import math
 from torch.utils.data import DataLoader, TensorDataset
 
-class MLPLocalizer:
+class MLPSelectiveMask:
     def __init__(
             self,
             pre_activation_dim,

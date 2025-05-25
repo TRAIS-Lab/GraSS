@@ -12,14 +12,14 @@ The folders either correspond to *libraries* or *experiments*; specifically, the
 
 1. `_GradComp`: The main implementation supports influence function with linear layer's gradient factorized compression. In particular, **FactGraSS** (and **SJLT** in `_GradComp/projection/sjlt`).
 2. `_LogIX`: The [LogIX](https://github.com/logix-project/logix) library with some efficiency fixes.
-3. `_Localizer`: The implementation of **Selective Mask**.
+3. `_SelectiveMask`: The implementation of **Selective Mask**.
 4. `_dattri`: The [dattri](https://github.com/TRAIS-Lab/dattri) library with **GraSS** implementations (changes are mainly made in `_dattri/func/projection.py`).
 
 ## Quick Start
 
 We provide the scripts for the experiments.
 
->Note that in the codebase, we call *Selective Mask* as *Localize*, while *Random Mask* as *Random*.
+>Note that in the codebase, we call *Random Mask* as *Random*.
 
 ### MLP+MNIST/ResNet+CIFAR/MusicTransformer+MAESTRO
 
@@ -28,24 +28,24 @@ In these settings, the LDS results and the models are provided by dattri, so we 
 1. Selective Mask:
 	```bash
 	for PROJ_DIM in "2048" "4096" "8192" ; do
-		python localize.py \
-			--device cuda:0 \
-			--localize $PROJ_DIM \
+		python SelectiveMask.py \
+			--device "cuda" \
+			--sparsification_dim $PROJ_DIM \
 			--epoch 5000 \
-			--loc_n 5000 \
+			--SM_n 5000 \
 			--log_interval 500 \
 			--learning_rate 5e-5 \
 			--regularization 1e-6 \
 			--early_stop 0.9 \
-			--output_dir "./Localize"
+			--output_dir "./SelectiveMask"
 	done
 	```
 2. Attribution:
 	```bash
 	for PROJ_DIM in "2048" "4096" "8192" ; do
-		for PROJ_METHOD in "Random" "Localize" "SJLT" "FJLT" "Gaussian"; do
+		for PROJ_METHOD in "Random" "SelectiveMask" "SJLT" "FJLT" "Gaussian"; do
 			python score.py \
-				--device cuda:3 \
+				--device "cuda" \
 				--proj_method $PROJ_METHOD \
 				--proj_dim $PROJ_DIM \
 				--seed 22
@@ -96,7 +96,7 @@ For GPT2 experiments, since the LDS result and the fine-tuned models are not ava
 3. Selective Mask training:
 	```bash
 	for PROJ_DIM in "32" "64" "128" ; do
-		python localize.py\
+		python SelectiveMask.py\
 			--dataset_name "wikitext" \
 			--dataset_config_name "wikitext-2-raw-v1" \
 			--model_name_or_path "openai-community/gpt2" \
@@ -105,13 +105,13 @@ For GPT2 experiments, since the LDS result and the fine-tuned models are not ava
 			--seed 0 \
 			--device "cuda" \
 			--layer "Linear" \
-			--localize $PROJ_DIM \
+			--sparsification_dim $PROJ_DIM \
 			--epoch 500 \
 			--learning_rate 1e-5 \
 			--regularization 5e-5 \
 			--early_stop 0.9 \
 			--log_interval 100 \
-			--loc_n 200
+			--SM_n 200
 	done
 	```
 4. Attribution: The following is an example for FactGraSS. To test other compression method, e.g., LoGra, simply remove `--sparsification Random-128*128` and change `--projection SJLt-4096` to `--projection Gaussian-64*64`.

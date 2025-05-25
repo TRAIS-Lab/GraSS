@@ -521,7 +521,7 @@ class CudaProjector(AbstractProjector):
             features = features[:, self.active_indices]
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
             result = features
-        elif self.method == "Localize":
+        elif self.method == "SelectiveMask":
             features = features[:, self.active_indices]
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
             result = features
@@ -791,7 +791,7 @@ def make_random_projector(
             proj_type = ProjectionType.rademacher
         elif method == "Gaussian":
             proj_type = ProjectionType.normal
-        elif method == "Random" or method == "Localize":
+        elif method == "Random" or method == "SelectiveMask":
             proj_type = ProjectionType.identity
 
         projector = CudaProjector

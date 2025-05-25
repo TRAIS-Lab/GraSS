@@ -121,9 +121,9 @@ def setup_compression_kwargs(args, device):
         }
 
     # Compatibility checking
-    if proj_method == "Localize":
-        assert args.baseline == "GC", "Localize option only works with GC baseline."
-        assert args.layer == "Linear", "Localize option only works with Linear layer."
+    if proj_method == "SelectiveMask":
+        assert args.baseline == "GC", "SelectiveMask option only works with GC baseline."
+        assert args.layer == "Linear", "SelectiveMask option only works with Linear layer."
 
     return sparsifier_kwargs, projector_kwargs
 

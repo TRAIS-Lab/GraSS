@@ -9,15 +9,14 @@ from torch.utils.data import DataLoader
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(parent_dir)
 
-# Import the GradientLocalizer and GradientExtractor
-from _Localizer.Localizer import Localizer
-from _Localizer.GradientExtractor import GradientExtractor
+from _SelectiveMask.SelectiveMask import SelectiveMask
+from _SelectiveMask.GradientExtractor import GradientExtractor
 from _dattri.benchmark.load import load_benchmark
 from _dattri.benchmark.utils import SubsetSampler
 from _dattri.benchmark.models.MusicTransformer.utilities.constants import TOKEN_PAD
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Localize important gradient components for MLP on MNIST")
+    parser = argparse.ArgumentParser(description="Optimize Selective Mask over gradients for MLP on MNIST")
     parser.add_argument(
         "--device",
         type=str,
@@ -25,16 +24,16 @@ def parse_args():
         help="device to be used"
     )
     parser.add_argument(
-        "--localize",
+        "--sparsification_dim",
         type=int,
         default=100,
-        help="Total number of localized parameters across the model."
+        help="Target number of active parameters across the model."
     )
     parser.add_argument(
         "--epoch",
         type=int,
         default=2000,
-        help="Number of epochs for learning the localized parameters."
+        help="Number of epochs for training Selective Mask."
     )
     parser.add_argument(
         "--log_interval",
@@ -43,10 +42,10 @@ def parse_args():
         help="Interval for logging the training process."
     )
     parser.add_argument(
-        "--loc_n",
+        "--SM_n",
         type=int,
         default=200,
-        help="Number of training samples used for training localized parameters."
+        help="Number of training samples used for training Selective Mask."
     )
     parser.add_argument(
         "--learning_rate",
@@ -69,7 +68,7 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="./Localize/",
+        default="./SelectiveMask/",
         help="Directory to save the localization results"
     )
     parser.add_argument(
@@ -103,9 +102,9 @@ def create_dataloaders(model_details, args):
     train_dataset = model_details["train_dataset"]
 
     # Create a smaller subset for localization training
-    train_indices = list(range(args.loc_n))
-    loc_train_sampler = SubsetSampler(train_indices[:int(args.loc_n * 0.8)])
-    loc_test_sampler = SubsetSampler(train_indices[int(args.loc_n * 0.8):args.loc_n])
+    train_indices = list(range(args.SM_n))
+    loc_train_sampler = SubsetSampler(train_indices[:int(args.SM_n * 0.8)])
+    loc_test_sampler = SubsetSampler(train_indices[int(args.SM_n * 0.8):args.SM_n])
 
     # Create dataloaders
     train_dataloader = DataLoader(
@@ -127,7 +126,7 @@ def main():
     logger = setup_logger()
 
     # Create output directory
-    output_dir = f"{args.output_dir}/mask_{args.localize}"
+    output_dir = f"{args.output_dir}/mask_{args.sparsification_dim}"
     os.makedirs(output_dir, exist_ok=True)
 
     # Load MNIST + MLP benchmark
@@ -154,9 +153,9 @@ def main():
     logger.info(f"Model has {total_params} trainable parameters")
 
     # Verify localization target is less than total parameters
-    if args.localize > total_params:
-        logger.warning(f"Localization target ({args.localize}) exceeds total parameters ({total_params}). Setting to {total_params}.")
-        args.localize = total_params
+    if args.sparsification_dim > total_params:
+        logger.warning(f"Localization target ({args.sparsification_dim}) exceeds total parameters ({total_params}). Setting to {total_params}.")
+        args.sparsification_dim = total_params
 
     # Create dataloaders for localization
     train_dataloader, test_dataloader = create_dataloaders(model_details, args)
@@ -219,20 +218,20 @@ def main():
 
     logger.info(f"Extracted gradients - Shape: {train_grad_tensor.shape}, Total parameters: {gradient_dim}")
 
-    # Initialize the gradient localizer for the entire model
+    # Initialize the Selective Mask optimizer for the entire model
     logger.info("Training the gradient mask optimizer...")
-    localizer = Localizer(
+    optimizer = SelectiveMask(
         gradient_dim=gradient_dim,
         lambda_reg=args.regularization,
         lr=args.learning_rate,
-        min_active_gradient=args.localize,
-        max_active_gradient=args.localize,  # Exact target, no flexibility
+        min_active_gradient=args.sparsification_dim,
+        max_active_gradient=args.sparsification_dim,  # Exact target, no flexibility
         device=device,
         logger=logger
     )
 
-    # Train the localizer
-    eval_metrics = localizer.train(
+    # Train the Selective Mask
+    eval_metrics = optimizer.train(
         train_gradients=train_grad_tensor,
         test_gradients=test_grad_tensor,
         batch_size=3000,
@@ -243,9 +242,9 @@ def main():
 
     # Get important indices
     logger.info(f"Retrieving important gradient indices...")
-    important_indices = localizer.get_important_indices(
+    important_indices = optimizer.get_important_indices(
         threshold=0.5,
-        min_count=args.localize
+        min_count=args.sparsification_dim
     )
 
     # Calculate sparsity
@@ -305,7 +304,7 @@ def main():
     logger.info(f"Results saved to {output_file}")
 
     # Clear memory
-    del train_grad_tensor, test_grad_tensor, localizer
+    del train_grad_tensor, test_grad_tensor, optimizer
     del train_gradients, test_gradients
     torch.cuda.empty_cache()
 

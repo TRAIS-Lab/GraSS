@@ -165,12 +165,12 @@ def main():
     print("Test groundtruth values shape:", test_gt[0].shape)
 
     task = AttributionTask(model=model, loss_func=loss_trak, checkpoints=model_details["models_half"][:5])
-    if args.proj_method == "Localize":
-        mask_path = f"./Localize/mask_{args.proj_dim}/result.pt"
+    if args.proj_method == "SelectiveMask":
+        mask_path = f"./SelectiveMask/mask_{args.proj_dim}/result.pt"
         result = torch.load(mask_path, weights_only=False)
         active_indices = result['active_indices'].to(args.device)
     elif args.localization > 0:
-        mask_path = f"./Localize/mask_{args.localization}/result.pt"
+        mask_path = f"./SelectiveMask/mask_{args.localization}/result.pt"
         result = torch.load(mask_path, weights_only=False)
         active_indices = result['active_indices'].to(args.device)
     elif args.random > 0:

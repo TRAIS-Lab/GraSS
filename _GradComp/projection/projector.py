@@ -60,7 +60,7 @@ def setup_model_compressors(
         sparsifier_kwargs: Keyword arguments for sparsifier configuration (optional)
         projector_kwargs: Keyword arguments for projector configuration (optional)
         train_dataloader: DataLoader for training data (used to get input shapes)
-        setting: Setting name for localized projectors/sparsifiers
+        setting: Setting name for projectors/sparsifiers
         device: Device to run the model on
 
     Returns:
@@ -150,8 +150,8 @@ def setup_model_compressors(
                 sparsifier = SparsifierContainer(module_name, idx)
                 base_seed = sparsifier_seed + int(1e4) * module_id
 
-                # Handle special case for localized sparsifiers
-                if sparsifier_kwargs_copy.get("method") == "Localize":
+                # Handle special case for Selective Mask
+                if sparsifier_kwargs_copy.get("method") == "SelectiveMask":
                     active_indices = _get_active_indices(
                         module_name,
                         sparsifier_kwargs_copy.get("proj_dim"),
@@ -217,8 +217,8 @@ def setup_model_compressors(
                         f"Invalid configuration for layer {module_name}: Cannot use component projector with full sparsifier."
                     )
 
-                # Handle special case for localized projectors
-                if projector_kwargs_copy.get("method") == "Localize":
+                # Handle special case for Selective Mask
+                if projector_kwargs_copy.get("method") == "SelectiveMask":
                     active_indices = _get_active_indices(
                         module_name,
                         projector_kwargs_copy.get("proj_dim"),
@@ -298,11 +298,11 @@ def _get_active_indices(
     compressor_type: str
 ) -> Dict[str, Tensor]:
     """
-    Helper function to get active indices for localized compressors
+    Helper function to get active indices for Selective Mask
     """
     active_indices = None
     try:
-        mask_path = f"../{setting}/Localize/mask_{dim}*{dim}/{module_name}.pt"
+        mask_path = f"../{setting}/SelectiveMask/mask_{dim}*{dim}/{module_name}.pt"
         active_indices = torch.load(mask_path, weights_only=False)
         logger.debug(f"Loaded active indices for {module_name} from {mask_path}")
     except FileNotFoundError:

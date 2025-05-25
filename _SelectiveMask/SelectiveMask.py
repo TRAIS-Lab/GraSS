@@ -6,7 +6,7 @@ from scipy.stats import spearmanr
 import math
 from torch.utils.data import DataLoader, TensorDataset
 
-class Localizer:
+class SelectiveMask:
     def __init__(
             self,
             gradient_dim,
