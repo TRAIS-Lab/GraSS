@@ -57,7 +57,7 @@ In these settings, the LDS results and the models are provided by dattri, so we 
 
 For GPT2 experiments, since the LDS result and the fine-tuned models are not available, we need to manually produce them first. Consider running the following scripts:
 
-1. Retrain 50 models:
+1. Fine-tune 50 models:
 	```bash
 	# Loop over the task IDs
 	for SLURM_ARRAY_TASK_ID in {0..49}; do
