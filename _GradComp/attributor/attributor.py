@@ -450,7 +450,9 @@ class IFAttributor(BaseAttributor):
         train_dataloader: Optional['DataLoader'] = None,
         use_cached_ifvp: bool = True
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ProfilingStats]]:
-        """Attribute influence using tensor-based processing for maximum efficiency."""
+        """
+        Attribute influence using efficient single-pass tensor-based processing.
+        """
         logger.info("Computing influence attribution")
 
         # Load batch information if needed
@@ -481,7 +483,7 @@ class IFAttributor(BaseAttributor):
             logger.info("Computing IFVP")
             self.compute_ifvp()
 
-        # Compute test gradients
+        # Compute test gradients once
         logger.info("Computing test gradients")
         test_grads_tensor, test_batch_mapping = self._compute_gradients_for_batches(
             test_dataloader,
@@ -506,91 +508,76 @@ class IFAttributor(BaseAttributor):
         # Initialize result
         IF_score = torch.zeros(total_train_samples, test_sample_count, device=self.device)
 
-        # Optimized tensor-based attribution computation
-        logger.debug("Using optimized tensor-based attribution computation")
+        if test_sample_count == 0:
+            logger.warning("No test samples, returning zero influence scores")
+            if self.profile and self.profiling_stats:
+                return (IF_score, self.profiling_stats)
+            else:
+                return IF_score
 
-        # Create dataloader for IFVP
+        # Start profiling
+        if self.profile and self.profiling_stats:
+            torch.cuda.synchronize(self.device)
+            start_time = time.time()
+
+        # Create dataloader for IFVP with optimal batch size
         train_ifvp_dataloader = self.strategy.create_gradient_dataloader(
             data_type="ifvp",
-            batch_size=1,
+            batch_size=2,
             pin_memory=True
         )
 
-        if train_ifvp_dataloader and test_sample_count > 0:
-            # Keep test gradients on CPU initially if using disk offload
-            if self.offload == "disk":
-                # For disk offload, process in smaller batches to avoid memory issues
-                # Split test gradients into manageable chunks
-                test_chunk_size = min(100, test_sample_count)  # Process 100 test samples at a time
+        if train_ifvp_dataloader:
+            logger.info("Starting efficient double-batched attribution computation")
 
-                for test_start in range(0, test_sample_count, test_chunk_size):
-                    test_end = min(test_start + test_chunk_size, test_sample_count)
-                    test_chunk = all_test_gradients[test_start:test_end]
+            # Configure test batching for memory efficiency
+            test_batch_size = min(32, test_sample_count)  # Process test samples in chunks
+            logger.debug(f"Using test batch size: {test_batch_size}")
 
-                    # Move only this chunk to device
-                    test_chunk_device = self.strategy.move_to_device(test_chunk)
+            # Single pass through training IFVP data with nested test batching
+            for chunk_tensor, batch_mapping in tqdm(train_ifvp_dataloader, desc="Computing attribution"):
+                # Move train chunk to device
+                chunk_tensor_device = self.strategy.move_to_device(chunk_tensor)
 
-                    # Process all training IFVP against this test chunk
-                    for chunk_tensor, batch_mapping in tqdm(
-                        train_ifvp_dataloader,
-                        desc=f"Computing attribution for test samples {test_start}-{test_end}",
-                        leave=False
-                    ):
-                        # chunk_tensor is already on device via DataLoader
-                        if self.offload != "disk":
-                            # For non-disk strategies, ensure it's on device
-                            chunk_tensor_device = self.strategy.move_to_device(chunk_tensor)
-                        else:
-                            # For disk strategy, it should already be pinned/ready
-                            chunk_tensor_device = chunk_tensor.to(self.device, non_blocking=True)
+                # Process test gradients in batches to save memory
+                for test_start in range(0, test_sample_count, test_batch_size):
+                    test_end = min(test_start + test_batch_size, test_sample_count)
+                    test_batch = all_test_gradients[test_start:test_end]
 
-                        # Compute scores for this chunk
-                        chunk_scores = torch.matmul(chunk_tensor_device, test_chunk_device.t())
+                    # Move test batch to device
+                    test_batch_device = self.strategy.move_to_device(test_batch)
 
-                        # Map back to train samples
-                        for batch_idx, (start_row, end_row) in batch_mapping.items():
-                            if batch_idx not in batch_to_sample_mapping:
-                                continue
+                    # Efficient batched matrix multiplication for this (train_chunk, test_batch) pair
+                    # Shape: (chunk_samples, proj_dim) @ (proj_dim, test_batch_samples) -> (chunk_samples, test_batch_samples)
+                    chunk_scores = torch.matmul(chunk_tensor_device, test_batch_device.t())
 
-                            train_start, train_end = batch_to_sample_mapping[batch_idx]
-                            batch_scores = chunk_scores[start_row:end_row]
-                            IF_score[train_start:train_end, test_start:test_end] = batch_scores
-
-                        # Clear intermediate results
-                        del chunk_tensor_device, chunk_scores
-                        if test_start == 0 and test_end == test_chunk_size:
-                            # Only clear cache on first iteration to gauge memory usage
-                            torch.cuda.empty_cache()
-
-                    # Clear test chunk from device
-                    del test_chunk_device, test_chunk
-                    torch.cuda.empty_cache()
-            else:
-                # For CPU/memory offload, can process all at once
-                test_device = self.strategy.move_to_device(all_test_gradients)
-
-                for chunk_tensor, batch_mapping in tqdm(train_ifvp_dataloader, desc="Computing attribution"):
-                    # Move chunk to device
-                    chunk_tensor_device = self.strategy.move_to_device(chunk_tensor)
-
-                    # Compute scores for entire chunk at once
-                    chunk_scores = torch.matmul(chunk_tensor_device, test_device.t())
-
-                    # Map back to train samples
+                    # Map chunk results back to global sample indices
                     for batch_idx, (start_row, end_row) in batch_mapping.items():
                         if batch_idx not in batch_to_sample_mapping:
                             continue
 
                         train_start, train_end = batch_to_sample_mapping[batch_idx]
                         batch_scores = chunk_scores[start_row:end_row]
-                        IF_score[train_start:train_end, :] = batch_scores
+                        IF_score[train_start:train_end, test_start:test_end] = batch_scores.to(IF_score.device)
 
-                    del chunk_tensor_device, chunk_scores
+                    # Clean up test batch from device
+                    del test_batch_device, chunk_scores
                     torch.cuda.empty_cache()
-                del test_device
+
+                # Clean up train chunk from device
+                del chunk_tensor_device
+                torch.cuda.empty_cache()
+
+        else:
+            logger.warning("No IFVP dataloader available, attribution may be incomplete")
+
         # Clean up
         del all_test_gradients
         torch.cuda.empty_cache()
+
+        if self.profile and self.profiling_stats:
+            torch.cuda.synchronize(self.device)
+            self.profiling_stats.precondition += time.time() - start_time
 
         logger.info(f"Attribution computation completed. Result shape: {IF_score.shape}")
 

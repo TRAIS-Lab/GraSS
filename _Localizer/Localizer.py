@@ -17,7 +17,7 @@ class Localizer:
             initial_temperature=1.0,
             min_temperature=0.01,
             temp_decay_rate=0, # 1e-4
-            device='cuda' if torch.cuda.is_available() else 'cpu',
+            device='cpu',
             logger=None
         ):
         """

@@ -49,7 +49,7 @@ def setup_model_compressors(
     projector_kwargs: Optional[Dict[str, Any]] = None,
     train_dataloader: torch.utils.data.DataLoader = None,
     setting: str = None,
-    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device: str = 'cpu'
 ) -> Tuple[List[SparsifierContainer], List[ProjectorContainer]]:
     """
     Sets up sparsifiers and projectors for each layer in the model.

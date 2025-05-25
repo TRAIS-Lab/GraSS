@@ -17,7 +17,7 @@ class MLPLocalizer:
             max_active_pre_activation=None,
             min_active_input=10,
             max_active_input=None,
-            device='cuda' if torch.cuda.is_available() else 'cpu',
+            device='cpu',
             logger=None
         ):
         """

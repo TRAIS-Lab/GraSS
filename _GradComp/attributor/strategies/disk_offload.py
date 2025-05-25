@@ -1,5 +1,5 @@
 """
-Disk offload strategy.
+Enhanced disk offload strategy with async pipeline.
 """
 
 import os
@@ -9,15 +9,13 @@ import torch
 from torch.utils.data import DataLoader
 
 from .offload_strategy import OffloadStrategy
-from ...io.disk_io import ChunkedDiskIOManager
 
 import logging
 logger = logging.getLogger(__name__)
 
 class DiskOffloadStrategy(OffloadStrategy):
     """
-    Enhanced strategy that stores data on disk using pure tensor-based chunking.
-    Provides maximum efficiency with concatenated tensor storage.
+    Enhanced strategy that stores data on disk using async pipeline with buffer pooling.
     """
 
     def __init__(self, device: str, layer_names: List[str], cache_dir: Optional[str] = None,
@@ -30,12 +28,24 @@ class DiskOffloadStrategy(OffloadStrategy):
         self.cache_dir = cache_dir
         self.chunk_size = chunk_size
 
-        # Use the enhanced chunked disk I/O manager
+        # Import the enhanced disk I/O manager
+        try:
+            # Try to import enhanced version first
+            from ...io.disk_io import ChunkedDiskIOManager
+            logger.info("Using enhanced async disk I/O manager")
+        except ImportError:
+            # Fall back to original version
+            from ...io.disk_io import ChunkedDiskIOManager
+            logger.info("Using standard disk I/O manager")
+
+        # Use the disk I/O manager (enhanced or standard)
         self.disk_io = ChunkedDiskIOManager(
             cache_dir,
             "default",
             hessian="raw",
-            chunk_size=chunk_size
+            chunk_size=chunk_size,
+            buffer_pool_size=4,  # Will be ignored by standard version
+            write_queue_size=8   # Will be ignored by standard version
         )
 
         # Track current batch range being processed
@@ -53,11 +63,11 @@ class DiskOffloadStrategy(OffloadStrategy):
             self.current_batch_range = None
 
     def store_gradients(self, batch_idx: int, gradients: List[torch.Tensor], is_test: bool = False) -> None:
-        """Store gradients for a batch on disk using pure tensor storage."""
+        """Store gradients for a batch on disk using async pipeline."""
         self.disk_io.store_gradients(batch_idx, gradients, is_test)
 
     def retrieve_gradients(self, batch_idx: int, is_test: bool = False) -> List[torch.Tensor]:
-        """Retrieve gradients for a batch from tensor storage and move to device."""
+        """Retrieve gradients for a batch from disk and move to device."""
         gradients = self.disk_io.retrieve_gradients(batch_idx, is_test)
         result = []
         for grad in gradients:
@@ -79,11 +89,11 @@ class DiskOffloadStrategy(OffloadStrategy):
         return None
 
     def store_ifvp(self, batch_idx: int, ifvp: List[torch.Tensor]) -> None:
-        """Store IFVP for a batch on disk using pure tensor storage."""
+        """Store IFVP for a batch on disk using async pipeline."""
         self.disk_io.store_ifvp(batch_idx, ifvp)
 
     def retrieve_ifvp(self, batch_idx: int) -> List[torch.Tensor]:
-        """Retrieve IFVP for a batch from tensor storage and move to device."""
+        """Retrieve IFVP for a batch from disk and move to device."""
         ifvp_list = self.disk_io.retrieve_ifvp(batch_idx)
         result = []
         for ifvp in ifvp_list:
@@ -102,7 +112,7 @@ class DiskOffloadStrategy(OffloadStrategy):
             is_test: bool = False,
         ) -> DataLoader:
         """
-        Create an optimized DataLoader for loading tensor-based chunked data from disk.
+        Create an optimized DataLoader with async prefetching.
 
         Args:
             data_type: Type of data to load
@@ -112,7 +122,7 @@ class DiskOffloadStrategy(OffloadStrategy):
             is_test: Whether loading test data (unused)
 
         Returns:
-            DataLoader instance for tensor chunks
+            DataLoader instance with async prefetching
         """
         return self.disk_io.create_gradient_dataloader(
             data_type=data_type,

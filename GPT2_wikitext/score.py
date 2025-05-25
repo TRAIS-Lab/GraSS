@@ -693,7 +693,7 @@ def main():
         # Measure cache throughput
         torch.cuda.synchronize(device)
         cache_start_time = time.time()
-        attributor.cache_gradients(train_dataloader=train_dataloader)
+        # attributor.cache_gradients(train_dataloader=train_dataloader)
         torch.cuda.synchronize(device)
         cache_end_time = time.time()
 

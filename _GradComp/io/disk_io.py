@@ -1,13 +1,15 @@
 """
-Disk I/O manager.
+Enhanced Disk I/O manager with buffer pooling and async pipeline.
 """
 
 import os
 import threading
+import queue
 from typing import List, Dict, Optional, Literal, Any, Tuple
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import time
 
 import torch
 
@@ -26,10 +28,65 @@ class ChunkBuffer:
     batch_indices: List[int]  # Batch indices in this chunk
     batch_info: List[Dict[str, Any]]  # Batch metadata (batch_idx, start_row, end_row)
     current_row: int  # Next row to write to
+    buffer_id: int  # Unique buffer ID for tracking
+
+class BufferPool:
+    """Pool of reusable buffers to avoid allocation overhead."""
+    def __init__(self, pool_size: int, buffer_shape: Tuple[int, int], dtype=torch.float32):
+        self.pool_size = pool_size
+        self.buffer_shape = buffer_shape
+        self.dtype = dtype
+        self.available = queue.Queue(maxsize=pool_size)
+        self.buffer_counter = 0
+        self.total_created = 0
+        self.wait_count = 0
+
+        # Pre-allocate all buffers
+        for _ in range(pool_size):
+            buffer = ChunkBuffer(
+                tensor=torch.zeros(buffer_shape, dtype=dtype, pin_memory=True),
+                batch_indices=[],
+                batch_info=[],
+                current_row=0,
+                buffer_id=self.buffer_counter
+            )
+            self.buffer_counter += 1
+            self.total_created += 1
+            self.available.put(buffer)
+
+        logger.info(f"BufferPool initialized with {pool_size} buffers of shape {buffer_shape}")
+
+    def get_buffer(self, timeout: float = None) -> Optional[ChunkBuffer]:
+        """Get a buffer from the pool."""
+        try:
+            # Log if we have to wait
+            if self.available.empty():
+                self.wait_count += 1
+                if self.wait_count % 10 == 1:  # Log every 10th wait
+                    logger.warning(f"BufferPool: Waiting for buffers (wait count: {self.wait_count})")
+
+            buffer = self.available.get(timeout=timeout)
+            # Reset the buffer
+            buffer.batch_indices.clear()
+            buffer.batch_info.clear()
+            buffer.current_row = 0
+            return buffer
+        except queue.Empty:
+            logger.warning(f"BufferPool: Timeout getting buffer after {timeout}s. "
+                         f"Pool size: {self.pool_size}, total created: {self.total_created}")
+            return None
+
+    def return_buffer(self, buffer: ChunkBuffer):
+        """Return a buffer to the pool."""
+        try:
+            self.available.put_nowait(buffer)
+        except queue.Full:
+            logger.warning(f"Buffer pool full, discarding buffer {buffer.buffer_id}. "
+                         f"This should not happen - possible double return?")
 
 class ChunkedDiskIOManager:
     """
-    Disk I/O manager with pure tensor storage per chunk.
+    Enhanced disk I/O manager with buffer pooling and async pipeline.
     """
 
     def __init__(
@@ -39,7 +96,10 @@ class ChunkedDiskIOManager:
         num_threads: int = 32,
         hessian: HessianOptions = "raw",
         chunk_size: int = 32,
-        max_samples_per_chunk: int = 2048
+        max_samples_per_chunk: int = 2048,
+        buffer_pool_size: int = 8,  # Increased default
+        write_queue_size: int = 16,  # Increased default
+        num_write_workers: int = 2  # Multiple write workers
     ):
         self.cache_dir = cache_dir
         self.setting = setting
@@ -47,6 +107,7 @@ class ChunkedDiskIOManager:
         self.hessian = hessian
         self.chunk_size = chunk_size
         self.max_samples_per_chunk = max_samples_per_chunk
+        self._shutdown = False
 
         # Create cache directory structure
         if cache_dir:
@@ -58,9 +119,39 @@ class ChunkedDiskIOManager:
         self.executor = ThreadPoolExecutor(max_workers=num_threads)
         self.futures = []
 
-        # Direct tensor accumulation buffers
+        # Buffer management
         self._chunk_buffers = {}  # (data_type, chunk_id) -> ChunkBuffer
         self._buffer_locks = defaultdict(threading.Lock)
+
+        # Buffer pools for each data type
+        self._buffer_pools = {}
+        self.buffer_pool_size = buffer_pool_size
+
+        # Write queue for async writes
+        self._write_queue = queue.Queue(maxsize=write_queue_size)
+        self._write_workers = []
+        self._shutdown = False
+
+        # Start multiple write workers
+        for i in range(num_write_workers):
+            worker = threading.Thread(
+                target=self._write_worker,
+                daemon=True,
+                name=f"DiskWriter-{i}"
+            )
+            worker.start()
+            self._write_workers.append(worker)
+
+        logger.info(f"Started {num_write_workers} write workers")
+
+        # Pending writes tracking
+        self._pending_writes = set()  # Track chunk_ids being written
+        self._pending_writes_lock = threading.Lock()
+
+        # Read cache for recently accessed chunks
+        self._read_cache = {}  # (data_type, chunk_id) -> (tensor, metadata, last_access_time)
+        self._read_cache_lock = threading.Lock()
+        self._max_read_cache_size = 4
 
         # Track dimensions and batch range
         self.layer_dims = None
@@ -70,7 +161,7 @@ class ChunkedDiskIOManager:
         # Try to load layer dimensions from existing data
         self._load_layer_dims_from_metadata()
 
-        logger.debug(f"Initialized ChunkedDiskIOManager with chunk_size={chunk_size}")
+        logger.debug(f"Initialized Enhanced ChunkedDiskIOManager with chunk_size={chunk_size}, buffer_pool_size={buffer_pool_size}")
 
     def get_chunk_id(self, batch_idx: int) -> int:
         """Get chunk ID for a batch index."""
@@ -108,6 +199,24 @@ class ChunkedDiskIOManager:
                 "ensure existing gradient/IFVP chunks are present in the cache directory."
             )
 
+    def _get_or_create_buffer_pool(self, data_type: str) -> BufferPool:
+        """Get or create a buffer pool for a data type."""
+        if data_type not in self._buffer_pools:
+            if self.total_proj_dim is None:
+                self._ensure_layer_dims()
+
+            # Use larger pool size to avoid exhaustion
+            pool_size = max(8, self.buffer_pool_size)  # At least 8 buffers
+
+            self._buffer_pools[data_type] = BufferPool(
+                pool_size=pool_size,
+                buffer_shape=(self.max_samples_per_chunk, self.total_proj_dim),
+                dtype=torch.float32
+            )
+            logger.info(f"Created buffer pool for {data_type} with {pool_size} buffers")
+
+        return self._buffer_pools[data_type]
+
     def start_batch_range(self, start_batch: int, end_batch: int):
         """Start processing a batch range."""
         if start_batch % self.chunk_size != 0:
@@ -116,27 +225,64 @@ class ChunkedDiskIOManager:
         self.current_batch_range = (start_batch, end_batch)
         logger.info(f"Starting batch range [{start_batch}, {end_batch})")
 
-    def _initialize_chunk_buffer(self, data_type: str, chunk_id: int) -> ChunkBuffer:
-        """Initialize a pre-allocated buffer for a chunk."""
-        self._ensure_layer_dims()
+    def _write_worker(self):
+        """Background worker thread for writing chunks to disk."""
+        while not self._shutdown:
+            try:
+                # Get write task from queue
+                write_task = self._write_queue.get(timeout=1.0)
+                if write_task is None:  # Shutdown signal
+                    break
 
-        # Pre-allocate tensor for the chunk
-        buffer_tensor = torch.zeros(
-            self.max_samples_per_chunk,
-            self.total_proj_dim,
-            dtype=torch.float32,
-            pin_memory=True  # Pin memory for faster GPU transfers
-        )
+                data_type, chunk_id, tensor, batch_info, buffer = write_task
 
-        return ChunkBuffer(
-            tensor=buffer_tensor,
-            batch_indices=[],
-            batch_info=[],
-            current_row=0
-        )
+                # Perform the write
+                try:
+                    self._write_chunk_tensor_sync(data_type, chunk_id, tensor, batch_info)
+
+                    # Remove from pending writes
+                    with self._pending_writes_lock:
+                        self._pending_writes.discard((data_type, chunk_id))
+
+                finally:
+                    # Return buffer to pool if provided (for backward compatibility)
+                    if buffer is not None:
+                        pool = self._get_or_create_buffer_pool(data_type)
+                        pool.return_buffer(buffer)
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Write worker error: {e}")
+                import traceback
+                traceback.print_exc()
+
+    def _write_chunk_tensor_sync(self, data_type: str, chunk_id: int, tensor: torch.Tensor,
+                                 batch_info: List[Dict[str, Any]]):
+        """Synchronously write a chunk tensor to disk."""
+        try:
+            subdir = 'grad' if data_type == 'gradients' else data_type
+            chunk_dir = os.path.join(self.cache_dir, subdir)
+
+            # Write using memory map handler with async flush
+            ChunkedMemoryMapHandler.write_chunk(
+                chunk_dir,
+                data_type,
+                tensor,
+                batch_info,
+                self.layer_dims,
+                dtype='float32',
+                flush_mode='async'  # Use async mode to avoid blocking
+            )
+
+            logger.debug(f"Wrote {data_type} chunk {chunk_id}: shape={tensor.shape}")
+
+        except Exception as e:
+            logger.error(f"Error writing {data_type} chunk {chunk_id}: {e}")
+            raise
 
     def store_gradients(self, batch_idx: int, gradients: List[torch.Tensor], is_test: bool = False) -> None:
-        """Store gradients directly in tensor format."""
+        """Store gradients directly in tensor format with async write."""
         if is_test:
             return  # Skip test gradients for now
 
@@ -148,11 +294,22 @@ class ChunkedDiskIOManager:
 
         chunk_id = self.get_chunk_id(batch_idx)
         buffer_key = ('gradients', chunk_id)
+        pool = self._get_or_create_buffer_pool('gradients')
 
         with self._buffer_locks[buffer_key]:
             # Get or create buffer
             if buffer_key not in self._chunk_buffers:
-                self._chunk_buffers[buffer_key] = self._initialize_chunk_buffer('gradients', chunk_id)
+                buffer = pool.get_buffer(timeout=5.0)
+                if buffer is None:
+                    logger.warning("Failed to get buffer from pool, creating new one")
+                    buffer = ChunkBuffer(
+                        tensor=torch.zeros(self.max_samples_per_chunk, self.total_proj_dim, dtype=torch.float32),
+                        batch_indices=[],
+                        batch_info=[],
+                        current_row=0,
+                        buffer_id=-1
+                    )
+                self._chunk_buffers[buffer_key] = buffer
 
             buffer = self._chunk_buffers[buffer_key]
 
@@ -179,11 +336,13 @@ class ChunkedDiskIOManager:
             if end_row > self.max_samples_per_chunk:
                 logger.warning(f"Chunk buffer overflow. Consider increasing max_samples_per_chunk")
                 # Force flush and start new buffer
-                self._flush_chunk_buffer(buffer_key)
+                self._async_flush_chunk_buffer(buffer_key)
 
-                # Recreate buffer and retry
-                self._chunk_buffers[buffer_key] = self._initialize_chunk_buffer('gradients', chunk_id)
-                buffer = self._chunk_buffers[buffer_key]
+                # Get new buffer and retry
+                buffer = pool.get_buffer(timeout=5.0)
+                if buffer is None:
+                    raise RuntimeError("Failed to get new buffer after overflow")
+                self._chunk_buffers[buffer_key] = buffer
                 start_row = 0
                 end_row = batch_size
 
@@ -199,19 +358,59 @@ class ChunkedDiskIOManager:
 
             # Check if chunk is complete
             if self._is_chunk_complete('gradients', chunk_id):
-                self._flush_chunk_buffer(buffer_key)
+                self._async_flush_chunk_buffer(buffer_key)
+
+    def _async_flush_chunk_buffer(self, buffer_key: Tuple[str, int]):
+        """Asynchronously write chunk buffer to disk without blocking."""
+        if buffer_key not in self._chunk_buffers:
+            return
+
+        buffer = self._chunk_buffers.pop(buffer_key)
+        data_type, chunk_id = buffer_key
+
+        # Clone the filled portion to a new tensor so we can return the buffer immediately
+        filled_tensor = buffer.tensor[:buffer.current_row].clone().contiguous()
+        batch_info_copy = buffer.batch_info.copy()
+
+        # Return buffer to pool immediately after cloning
+        pool = self._get_or_create_buffer_pool(data_type)
+        pool.return_buffer(buffer)
+
+        # Mark as pending write
+        with self._pending_writes_lock:
+            self._pending_writes.add((data_type, chunk_id))
+
+        # Submit to write queue without the buffer (since we already returned it)
+        write_task = (data_type, chunk_id, filled_tensor, batch_info_copy, None)
+
+        try:
+            self._write_queue.put_nowait(write_task)
+        except queue.Full:
+            logger.warning(f"Write queue full, blocking on write for chunk {chunk_id}")
+            self._write_queue.put(write_task)  # Block if queue is full
 
     def store_ifvp(self, batch_idx: int, ifvp: List[torch.Tensor]) -> None:
-        """Store IFVP directly in tensor format."""
+        """Store IFVP directly in tensor format with async write."""
         self._ensure_layer_dims()
 
         chunk_id = self.get_chunk_id(batch_idx)
         buffer_key = ('ifvp', chunk_id)
+        pool = self._get_or_create_buffer_pool('ifvp')
 
         with self._buffer_locks[buffer_key]:
             # Get or create buffer
             if buffer_key not in self._chunk_buffers:
-                self._chunk_buffers[buffer_key] = self._initialize_chunk_buffer('ifvp', chunk_id)
+                buffer = pool.get_buffer(timeout=5.0)
+                if buffer is None:
+                    logger.warning("Failed to get buffer from pool, creating new one")
+                    buffer = ChunkBuffer(
+                        tensor=torch.zeros(self.max_samples_per_chunk, self.total_proj_dim, dtype=torch.float32),
+                        batch_indices=[],
+                        batch_info=[],
+                        current_row=0,
+                        buffer_id=-1
+                    )
+                self._chunk_buffers[buffer_key] = buffer
 
             buffer = self._chunk_buffers[buffer_key]
 
@@ -235,9 +434,11 @@ class ChunkedDiskIOManager:
             end_row = start_row + batch_size
 
             if end_row > self.max_samples_per_chunk:
-                self._flush_chunk_buffer(buffer_key)
-                self._chunk_buffers[buffer_key] = self._initialize_chunk_buffer('ifvp', chunk_id)
-                buffer = self._chunk_buffers[buffer_key]
+                self._async_flush_chunk_buffer(buffer_key)
+                buffer = pool.get_buffer(timeout=5.0)
+                if buffer is None:
+                    raise RuntimeError("Failed to get new buffer after overflow")
+                self._chunk_buffers[buffer_key] = buffer
                 start_row = 0
                 end_row = batch_size
 
@@ -251,7 +452,7 @@ class ChunkedDiskIOManager:
             buffer.current_row = end_row
 
             if self._is_chunk_complete('ifvp', chunk_id):
-                self._flush_chunk_buffer(buffer_key)
+                self._async_flush_chunk_buffer(buffer_key)
 
     def _is_chunk_complete(self, data_type: str, chunk_id: int) -> bool:
         """Check if all batches in a chunk have been stored."""
@@ -280,52 +481,8 @@ class ChunkedDiskIOManager:
 
         return expected_batches.issubset(stored_batches)
 
-    def _flush_chunk_buffer(self, buffer_key: Tuple[str, int]):
-        """Write chunk buffer to disk and clear it."""
-        if buffer_key not in self._chunk_buffers:
-            return
-
-        buffer = self._chunk_buffers.pop(buffer_key)
-        data_type, chunk_id = buffer_key
-
-        # Only write the filled portion
-        filled_tensor = buffer.tensor[:buffer.current_row]
-
-        # Submit async write
-        future = self.executor.submit(
-            self._write_chunk_tensor,
-            data_type,
-            chunk_id,
-            filled_tensor,
-            buffer.batch_info
-        )
-        self.futures.append(future)
-
-    def _write_chunk_tensor(self, data_type: str, chunk_id: int, tensor: torch.Tensor,
-                           batch_info: List[Dict[str, Any]]):
-        """Write a chunk tensor to disk."""
-        try:
-            subdir = 'grad' if data_type == 'gradients' else data_type
-            chunk_dir = os.path.join(self.cache_dir, subdir)
-
-            # Write using memory map handler
-            ChunkedMemoryMapHandler.write_chunk(
-                chunk_dir,
-                data_type,
-                tensor,
-                batch_info,
-                self.layer_dims,
-                dtype='float32'
-            )
-
-            logger.debug(f"Wrote {data_type} chunk {chunk_id}: shape={tensor.shape}")
-
-        except Exception as e:
-            logger.error(f"Error writing {data_type} chunk {chunk_id}: {e}")
-            raise
-
     def finalize_batch_range(self):
-        """Flush any remaining buffers."""
+        """Flush any remaining buffers and wait for writes."""
         if self.current_batch_range is None:
             return
 
@@ -333,26 +490,26 @@ class ChunkedDiskIOManager:
         remaining_buffers = list(self._chunk_buffers.keys())
         for buffer_key in remaining_buffers:
             with self._buffer_locks[buffer_key]:
-                self._flush_chunk_buffer(buffer_key)
+                self._async_flush_chunk_buffer(buffer_key)
+
+        # Wait for all pending writes
+        while True:
+            with self._pending_writes_lock:
+                if len(self._pending_writes) == 0:
+                    break
+            time.sleep(0.1)
 
         self.current_batch_range = None
 
-    def retrieve_gradients(self, batch_idx: int, is_test: bool = False) -> List[torch.Tensor]:
-        """Retrieve gradients for a batch and split into layers."""
-        return self._retrieve_batch_data('gradients', batch_idx)
-
-    def retrieve_ifvp(self, batch_idx: int) -> List[torch.Tensor]:
-        """Retrieve IFVP for a batch and split into layers."""
-        return self._retrieve_batch_data('ifvp', batch_idx)
-
-    def _retrieve_batch_data(self, data_type: str, batch_idx: int) -> List[torch.Tensor]:
-        """Retrieve data for a specific batch from tensor storage."""
+    def _retrieve_batch_data_with_cache(self, data_type: str, batch_idx: int) -> List[torch.Tensor]:
+        """Retrieve data with read caching."""
         self._ensure_layer_dims()
 
         # Check if in current buffer
         chunk_id = self.get_chunk_id(batch_idx)
         buffer_key = (data_type, chunk_id)
 
+        # Check active buffer first
         with self._buffer_locks[buffer_key]:
             if buffer_key in self._chunk_buffers:
                 buffer = self._chunk_buffers[buffer_key]
@@ -364,6 +521,23 @@ class ChunkedDiskIOManager:
                         batch_tensor = buffer.tensor[start_row:end_row]
                         return self._split_tensor_to_layers(batch_tensor)
 
+        # Check read cache
+        cache_key = (data_type, chunk_id)
+        current_time = time.time()
+
+        with self._read_cache_lock:
+            if cache_key in self._read_cache:
+                tensor, metadata, _ = self._read_cache[cache_key]
+                self._read_cache[cache_key] = (tensor, metadata, current_time)  # Update access time
+
+                # Find batch in cached chunk
+                for info in metadata["batches"]:
+                    if info["batch_idx"] == batch_idx:
+                        start_row = info["start_row"]
+                        end_row = info["end_row"]
+                        batch_tensor = tensor[start_row:end_row]
+                        return self._split_tensor_to_layers(batch_tensor)
+
         # Load from disk
         subdir = self._get_chunk_subdir(data_type)
         chunk_path = os.path.join(self.cache_dir, subdir)
@@ -371,14 +545,47 @@ class ChunkedDiskIOManager:
         chunk_files = ChunkedMemoryMapHandler.find_chunk_files(chunk_path, data_type)
 
         for chunk_filename in chunk_files:
-            batch_slice = ChunkedMemoryMapHandler.load_batch_slice(
-                chunk_path, chunk_filename, batch_idx
-            )
-            if batch_slice is not None:
-                return self._split_tensor_to_layers(batch_slice)
+            metadata = ChunkedMemoryMapHandler.read_chunk_metadata(chunk_path, chunk_filename)
+
+            # Check if batch is in this chunk
+            batch_found = False
+            for info in metadata["batches"]:
+                if info["batch_idx"] == batch_idx:
+                    batch_found = True
+                    break
+
+            if batch_found:
+                # Load entire chunk and cache it
+                tensor, metadata = ChunkedMemoryMapHandler.load_chunk_tensor(chunk_path, chunk_filename)
+
+                # Update read cache
+                with self._read_cache_lock:
+                    self._read_cache[cache_key] = (tensor, metadata, current_time)
+
+                    # Evict oldest entries if cache is full
+                    if len(self._read_cache) > self._max_read_cache_size:
+                        oldest_key = min(self._read_cache.keys(),
+                                       key=lambda k: self._read_cache[k][2])
+                        del self._read_cache[oldest_key]
+
+                # Find and return batch data
+                for info in metadata["batches"]:
+                    if info["batch_idx"] == batch_idx:
+                        start_row = info["start_row"]
+                        end_row = info["end_row"]
+                        batch_tensor = tensor[start_row:end_row]
+                        return self._split_tensor_to_layers(batch_tensor)
 
         # Return empty tensors
         return [torch.tensor([]) for _ in range(len(self.layer_dims))]
+
+    def retrieve_gradients(self, batch_idx: int, is_test: bool = False) -> List[torch.Tensor]:
+        """Retrieve gradients for a batch and split into layers."""
+        return self._retrieve_batch_data_with_cache('gradients', batch_idx)
+
+    def retrieve_ifvp(self, batch_idx: int) -> List[torch.Tensor]:
+        """Retrieve IFVP for a batch and split into layers."""
+        return self._retrieve_batch_data_with_cache('ifvp', batch_idx)
 
     def _split_tensor_to_layers(self, tensor: torch.Tensor) -> List[torch.Tensor]:
         """Split concatenated tensor back into per-layer tensors."""
@@ -398,19 +605,16 @@ class ChunkedDiskIOManager:
         pin_memory: bool = True,
         batch_range: Optional[Tuple[int, int]] = None,
     ) -> Optional[torch.utils.data.DataLoader]:
-        """Create a DataLoader for loading chunked data."""
-        try:
-            from .prefetch_dataset import create_tensor_dataloader
-            return create_tensor_dataloader(
-                disk_io=self,
-                data_type=data_type,
-                batch_size=batch_size,
-                pin_memory=pin_memory,
-                batch_range=batch_range
-            )
-        except ImportError:
-            logger.error("Failed to import dataset modules")
-            return None
+        """Create a DataLoader for loading chunked data with prefetching."""
+        from .prefetch_dataset import create_tensor_dataloader
+        return create_tensor_dataloader(
+            disk_io=self,
+            data_type=data_type,
+            batch_size=batch_size,
+            pin_memory=pin_memory,
+            batch_range=batch_range,
+            prefetch_factor=4  # Prefetch 2 chunks ahead
+        )
 
     def store_preconditioner(self, layer_idx: int, preconditioner: Optional[torch.Tensor]) -> None:
         """Store a preconditioner for a layer."""
@@ -429,7 +633,7 @@ class ChunkedDiskIOManager:
         """Retrieve a preconditioner for a layer."""
         file_path = os.path.join(self.cache_dir, 'precond', f'layer_{layer_idx}.pt')
         if os.path.exists(file_path):
-            return torch.load(file_path)
+            return torch.load(file_path, weights_only=True)
         return None
 
     def _get_chunk_subdir(self, data_type: str) -> str:
@@ -438,6 +642,21 @@ class ChunkedDiskIOManager:
 
     def wait_for_async_operations(self):
         """Wait for all async operations to complete."""
+        if self._shutdown:
+            return  # Skip if we're shutting down
+
+        # Wait for write queue to empty
+        while not self._write_queue.empty():
+            time.sleep(0.1)
+
+        # Wait for pending writes
+        while True:
+            with self._pending_writes_lock:
+                if len(self._pending_writes) == 0:
+                    break
+            time.sleep(0.1)
+
+        # Wait for other futures
         for future in self.futures:
             try:
                 future.result()
@@ -461,12 +680,32 @@ class ChunkedDiskIOManager:
 
     def __del__(self):
         """Cleanup on destruction."""
+        self._shutdown = True
+
+        if hasattr(self, '_write_queue'):
+            # Signal all write workers to stop
+            for _ in self._write_workers:
+                try:
+                    self._write_queue.put(None)
+                except:
+                    pass
+
+        if hasattr(self, '_write_workers'):
+            # Wait for all workers to finish
+            for worker in self._write_workers:
+                worker.join(timeout=2.0)
+
         if hasattr(self, 'executor'):
             # Flush remaining buffers
             try:
                 remaining = list(self._chunk_buffers.keys())
                 for buffer_key in remaining:
-                    self._flush_chunk_buffer(buffer_key)
+                    # Use synchronous flush for cleanup
+                    if buffer_key in self._chunk_buffers:
+                        buffer = self._chunk_buffers.pop(buffer_key)
+                        data_type, chunk_id = buffer_key
+                        filled_tensor = buffer.tensor[:buffer.current_row].clone()
+                        self._write_chunk_tensor_sync(data_type, chunk_id, filled_tensor, buffer.batch_info)
             except Exception as e:
                 logger.error(f"Error during cleanup: {e}")
 
