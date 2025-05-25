@@ -514,7 +514,7 @@ def main():
 
     # >>>>>>>>>>>>>>>>>>>>> Customized Code begins here >>>>>>>>>>>>>>>>>>>>>
     from GPT2_wikitext.utils import SubsetSampler, replace_conv1d_modules
-    from _GradComp.utils import find_layers
+    from _GradComp.utils.common import find_layers
     from _SelectiveMask.MLPGradientExtractor import MLPGradientExtractor
     from _SelectiveMask.MLPSelectiveMask import MLPSelectiveMask
 
