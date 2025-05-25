@@ -229,7 +229,7 @@ def parse_args():
         help="Interval for logging the training process.",
     )
     parser.add_argument(
-        "--SM_n",
+        "--n",
         type=int,
         default=200,
         help="Number of training samples used for training Selective Mask.",
@@ -533,8 +533,8 @@ def main():
     train_batch_size, test_batch_size = 32, 32
 
     # split the train_dataset into train and test further, with 80% for training and 20% for testing
-    train_dataset = whole_train_dataset.select(range(int(args.SM_n * 0.8)))
-    test_dataset = whole_train_dataset.select(range(int(args.SM_n * 0.8), args.SM_n))
+    train_dataset = whole_train_dataset.select(range(int(args.n * 0.8)))
+    test_dataset = whole_train_dataset.select(range(int(args.n * 0.8), args.n))
 
     train_sampler = SubsetSampler(range(len(train_dataset)))
     train_dataloader = DataLoader(

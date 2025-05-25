@@ -41,7 +41,7 @@ def parse_args():
         help="Interval for logging the training process."
     )
     parser.add_argument(
-        "--SM_n",
+        "--n",
         type=int,
         default=200,
         help="Number of training samples used for training Selective Mask."
@@ -101,9 +101,9 @@ def create_dataloaders(model_details, args):
     train_dataset = model_details["train_dataset"]
 
     # Create a smaller subset for localization training
-    train_indices = list(range(args.SM_n))
-    loc_train_sampler = SubsetSampler(train_indices[:int(args.SM_n * 0.8)])
-    loc_test_sampler = SubsetSampler(train_indices[int(args.SM_n * 0.8):args.SM_n])
+    train_indices = list(range(args.n))
+    loc_train_sampler = SubsetSampler(train_indices[:int(args.n * 0.8)])
+    loc_test_sampler = SubsetSampler(train_indices[int(args.n * 0.8):args.n])
 
     # Create dataloaders
     train_dataloader = DataLoader(

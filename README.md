@@ -32,7 +32,7 @@ In these settings, the LDS results and the models are provided by dattri, so we 
 			--device "cuda" \
 			--sparsification_dim $PROJ_DIM \
 			--epoch 5000 \
-			--SM_n 5000 \
+			--n 5000 \
 			--log_interval 500 \
 			--learning_rate 5e-5 \
 			--regularization 1e-6 \
@@ -111,7 +111,7 @@ For GPT2 experiments, since the LDS result and the fine-tuned models are not ava
 			--regularization 5e-5 \
 			--early_stop 0.9 \
 			--log_interval 100 \
-			--SM_n 200
+			--n 200
 	done
 	```
 4. Attribution: The following is an example for FactGraSS. To test other compression method, e.g., LoGra, simply remove `--sparsification Random-128*128` and change `--projection SJLt-4096` to `--projection Gaussian-64*64`.
