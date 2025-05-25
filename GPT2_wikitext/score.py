@@ -610,7 +610,6 @@ def main():
     # Dataset
     train_dataset = lm_datasets["train"]
     test_dataset = lm_datasets["validation"]
-    # test_dataset = train_dataset.select(range(1000)) # select 1000 samples for testing #TODO: remove this line, only for debugging
     train_batch_size, test_batch_size = 32, 32
 
     if args.debug: # toy dataset
@@ -663,7 +662,6 @@ def main():
     if args.baseline == "GC":
         check_min_version("4.46.0")
         from _GradComp.utils.common import find_layers
-        # from _GradComp.influence_function import IFAttributor
         from _GradComp.attributor.attributor import IFAttributor
 
         # get which Hessian to use
@@ -736,49 +734,6 @@ def main():
         # Compute preconditioners for best damping value
         attributor.compute_preconditioners(damping=best_damping)
         attributor.compute_ifvp()
-
-        # Measure attribute throughput
-        torch.cuda.synchronize(device)
-        attribute_start_time = time.time()
-        if args.profile:
-            score, profile = attributor.attribute(test_dataloader=test_dataloader)
-        else:
-            score = attributor.attribute(test_dataloader=test_dataloader)
-        torch.cuda.synchronize(device)
-        attribute_end_time = time.time()
-
-    elif args.baseline == "LoGra":
-        check_min_version("4.46.0")
-        from _LoGra.influence_function import IFAttributor
-
-        # get which Hessian to use
-        tda, hessian = args.tda.split("-")
-        hessian = hessian.lower()
-        assert tda == "IF", "LoGra only supports Influence Function now."
-        assert args.layer == "Linear", "LoGra only supports Linear setting now."
-        assert args.projection is not None, "LoGra requires projection method."
-
-        model_id = 0
-        checkpoint = f"{args.output_dir}/{model_id}"
-        model = AutoModelForCausalLM.from_pretrained(checkpoint)
-        model = replace_conv1d_modules(model)
-
-        attributor = IFAttributor(
-            model=model,
-            layer_type=args.layer, #TODO: fix to match
-            hessian=hessian,
-            profile=args.profile,
-            device=device,
-            cpu_offload=True,
-            projector_kwargs=projector_kwargs,
-        )
-
-        # Measure cache throughput
-        torch.cuda.synchronize(device)
-        cache_start_time = time.time()
-        attributor.cache(train_dataloader=train_dataloader)
-        torch.cuda.synchronize(device)
-        cache_end_time = time.time()
 
         # Measure attribute throughput
         torch.cuda.synchronize(device)
@@ -883,6 +838,49 @@ def main():
         attribute_end_time = time.time()
 
         score = result["influence"].T
+
+    elif args.baseline == "LoGra":
+        check_min_version("4.46.0")
+        from _GradComp.archive._LoGra.influence_function import IFAttributor
+
+        # get which Hessian to use
+        tda, hessian = args.tda.split("-")
+        hessian = hessian.lower()
+        assert tda == "IF", "LoGra only supports Influence Function now."
+        assert args.layer == "Linear", "LoGra only supports Linear setting now."
+        assert args.projection is not None, "LoGra requires projection method."
+
+        model_id = 0
+        checkpoint = f"{args.output_dir}/{model_id}"
+        model = AutoModelForCausalLM.from_pretrained(checkpoint)
+        model = replace_conv1d_modules(model)
+
+        attributor = IFAttributor(
+            model=model,
+            layer_type=args.layer, #TODO: fix to match
+            hessian=hessian,
+            profile=args.profile,
+            device=device,
+            cpu_offload=True,
+            projector_kwargs=projector_kwargs,
+        )
+
+        # Measure cache throughput
+        torch.cuda.synchronize(device)
+        cache_start_time = time.time()
+        attributor.cache(train_dataloader=train_dataloader)
+        torch.cuda.synchronize(device)
+        cache_end_time = time.time()
+
+        # Measure attribute throughput
+        torch.cuda.synchronize(device)
+        attribute_start_time = time.time()
+        if args.profile:
+            score, profile = attributor.attribute(test_dataloader=test_dataloader)
+        else:
+            score = attributor.attribute(test_dataloader=test_dataloader)
+        torch.cuda.synchronize(device)
+        attribute_end_time = time.time()
 
     else:
         raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'LoGra'.")
