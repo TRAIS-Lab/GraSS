@@ -202,6 +202,37 @@ class BaseAttributor(ABC):
 
         return start_batch, end_batch
 
+    def _create_worker_dataloader(self, dataloader: 'DataLoader', start_batch: int, end_batch: int) -> 'DataLoader':
+        """Create an efficient subset dataloader for this worker's batch range."""
+        from torch.utils.data import Subset
+
+        dataset = dataloader.dataset
+        batch_size = dataloader.batch_size
+
+        # Calculate sample indices for this batch range
+        start_idx = start_batch * batch_size
+        end_idx = min(end_batch * batch_size, len(dataset))
+
+        # Create subset indices - this is just a list of integers!
+        indices = list(range(start_idx, end_idx))
+        subset = Subset(dataset, indices)
+
+        # Create new DataLoader with same settings but using the subset
+        subset_loader = type(dataloader)(
+            subset,
+            batch_size=batch_size,
+            shuffle=False,  # Important: don't shuffle for worker consistency
+            num_workers=0,  # Avoid nested multiprocessing
+            collate_fn=dataloader.collate_fn,
+            pin_memory=dataloader.pin_memory,
+            drop_last=dataloader.drop_last,
+            timeout=dataloader.timeout,
+            worker_init_fn=dataloader.worker_init_fn,
+            # Copy other relevant attributes as needed
+        )
+
+        return subset_loader
+
     def _compute_gradients_for_batches(
         self,
         dataloader: 'DataLoader',
@@ -210,12 +241,11 @@ class BaseAttributor(ABC):
         is_test: bool = False
     ) -> Tuple[Optional[torch.Tensor], Dict[int, Tuple[int, int]]]:
         """
-        Compute gradients for a range of batches using the strategy.
-
-        Returns:
-            - For test data: concatenated gradient tensor and batch mapping
-            - For training data: (None, empty dict) as data is stored in strategy
+        Compute gradients using efficient subset approach - NO MORE SLOW ISLICE!
         """
+        # Create efficient subset dataloader for this worker
+        worker_dataloader = self._create_worker_dataloader(dataloader, start_batch, end_batch)
+
         # Create hook manager if needed
         if self.hook_manager is None:
             self.hook_manager = HookManager(
@@ -236,10 +266,11 @@ class BaseAttributor(ABC):
             current_row = 0
 
         batch_sample_counts = []
-        batches = itertools.islice(dataloader, start_batch, end_batch)
 
+        # NOW THIS IS FAST! No skipping through thousands of batches
         desc = "Computing test gradients" if is_test else "Computing gradients"
-        for batch_idx, batch in enumerate(tqdm(batches, total=end_batch-start_batch, desc=desc)):
+        for batch_idx, batch in enumerate(tqdm(worker_dataloader, desc=desc)):
+            # Calculate the global batch index
             global_batch_idx = start_batch + batch_idx
 
             self.model.zero_grad()
@@ -324,6 +355,129 @@ class BaseAttributor(ABC):
                 return torch.empty(0, self.total_proj_dim), {}
         else:
             return None, {}
+
+    # def _compute_gradients_for_batches(
+    #     self,
+    #     dataloader: 'DataLoader',
+    #     start_batch: int,
+    #     end_batch: int,
+    #     is_test: bool = False
+    # ) -> Tuple[Optional[torch.Tensor], Dict[int, Tuple[int, int]]]:
+    #     """
+    #     Compute gradients for a range of batches using the strategy.
+
+    #     Returns:
+    #         - For test data: concatenated gradient tensor and batch mapping
+    #         - For training data: (None, empty dict) as data is stored in strategy
+    #     """
+    #     # Create hook manager if needed
+    #     if self.hook_manager is None:
+    #         self.hook_manager = HookManager(
+    #             self.model,
+    #             self.layer_names,
+    #             profile=self.profile,
+    #             device=self.device
+    #         )
+    #         if self.sparsifiers:
+    #             self.hook_manager.set_sparsifiers(self.sparsifiers)
+    #         if self.projectors:
+    #             self.hook_manager.set_projectors(self.projectors)
+
+    #     # For test data, we accumulate in memory and return
+    #     if is_test:
+    #         all_gradients = []
+    #         batch_mapping = {}
+    #         current_row = 0
+
+    #     batch_sample_counts = []
+    #     batches = itertools.islice(dataloader, start_batch, end_batch)
+
+    #     desc = "Computing test gradients" if is_test else "Computing gradients"
+    #     for batch_idx, batch in enumerate(tqdm(batches, total=end_batch-start_batch, desc=desc)):
+    #         global_batch_idx = start_batch + batch_idx
+
+    #         self.model.zero_grad()
+
+    #         # Prepare inputs
+    #         if isinstance(batch, dict):
+    #             inputs = {k: v.to(self.device) for k, v in batch.items()}
+    #             batch_size = next(iter(batch.values())).shape[0]
+    #         else:
+    #             inputs = batch[0].to(self.device)
+    #             batch_size = batch[0].shape[0]
+
+    #         batch_sample_counts.append(batch_size)
+
+    #         # Forward and backward
+    #         outputs = self.model(**inputs) if isinstance(inputs, dict) else self.model(inputs)
+    #         logp = -outputs.loss
+    #         loss = logp - torch.log(1 - torch.exp(logp))
+    #         loss.backward()
+
+    #         # Get compressed gradients
+    #         with torch.no_grad():
+    #             compressed_grads = self.hook_manager.get_compressed_grads()
+
+    #             # Detect layer dimensions on first batch
+    #             if self.layer_dims is None:
+    #                 self.layer_dims = []
+    #                 for grad in compressed_grads:
+    #                     if grad is not None and grad.numel() > 0:
+    #                         self.layer_dims.append(grad.shape[1] if grad.dim() > 1 else grad.numel())
+    #                     else:
+    #                         self.layer_dims.append(0)
+
+    #                 self.total_proj_dim = sum(self.layer_dims)
+    #                 logger.info(f"Detected layer dimensions: {len(self.layer_dims)} layers, total dimension={self.total_proj_dim}")
+
+    #                 # Save to metadata manager
+    #                 self.metadata.set_layer_dims(self.layer_dims)
+
+    #                 # Pass to strategy if needed
+    #                 if hasattr(self.strategy, 'layer_dims'):
+    #                     self.strategy.layer_dims = self.layer_dims
+    #                     self.strategy.total_proj_dim = self.total_proj_dim
+
+    #             # Store gradients using strategy
+    #             self.strategy.store_gradients(global_batch_idx, compressed_grads, is_test)
+
+    #             # For test data, also accumulate for return
+    #             if is_test:
+    #                 # Concatenate gradients for this batch
+    #                 batch_features = []
+    #                 for grad, dim in zip(compressed_grads, self.layer_dims):
+    #                     if grad is not None and grad.numel() > 0:
+    #                         batch_features.append(grad.cpu())
+    #                     else:
+    #                         batch_features.append(torch.zeros(batch_size, dim))
+
+    #                 batch_tensor = torch.cat(batch_features, dim=1)
+    #                 all_gradients.append(batch_tensor)
+    #                 batch_mapping[global_batch_idx] = (current_row, current_row + batch_size)
+    #                 current_row += batch_size
+
+    #         torch.cuda.empty_cache()
+
+    #     # Update metadata for training data
+    #     if not is_test:
+    #         for i, batch_idx in enumerate(range(start_batch, end_batch)):
+    #             if i < len(batch_sample_counts):
+    #                 self.metadata.add_batch_info(batch_idx=batch_idx, sample_count=batch_sample_counts[i])
+
+    #     # Record compression time from hook manager
+    #     if self.profile and self.profiling_stats and self.hook_manager:
+    #         compression_time = self.hook_manager.get_compression_time()
+    #         self.profiling_stats.compression += compression_time
+    #         logger.debug(f"Compression time for batch range [{start_batch}, {end_batch}): {compression_time:.3f}s")
+
+    #     # Return appropriate values
+    #     if is_test:
+    #         if all_gradients:
+    #             return torch.cat(all_gradients, dim=0), batch_mapping
+    #         else:
+    #             return torch.empty(0, self.total_proj_dim), {}
+    #     else:
+    #         return None, {}
 
     def cache_gradients(self, train_dataloader: 'DataLoader', worker: str = "0/1") -> Union[ProcessingInfo, Tuple[ProcessingInfo, ProfilingStats]]:
         """

@@ -88,7 +88,7 @@ class HookManager:
 
         self.forward_hooks = [None] * len(layer_names)
         self.backward_hooks = [None] * len(layer_names)
-        self.projected_grads = [None] * len(layer_names)
+        self.compressed_grads = [None] * len(layer_names)
         self.inputs = [None] * len(layer_names)
         self.pre_activations = [None] * len(layer_names)
         self.normalized = [None] * len(layer_names)
@@ -145,7 +145,7 @@ class HookManager:
         Returns:
             List of projected gradient tensors, ordered by layer_names
         """
-        return self.projected_grads
+        return self.compressed_grads
 
     def get_compression_time(self) -> float:
         """
@@ -221,7 +221,7 @@ class HookManager:
 
             if grad is not None:
                 # Store the projected gradient
-                self.projected_grads[idx] = grad.detach()
+                self.compressed_grads[idx] = grad.detach()
 
     def _linear_grad(
         self,

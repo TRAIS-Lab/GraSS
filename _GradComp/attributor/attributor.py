@@ -223,7 +223,7 @@ class IFAttributor(BaseAttributor):
 
         dataloader = self.strategy.create_gradient_dataloader(
             data_type="gradients",
-            batch_size=4,  # Process 4 chunks at a time
+            batch_size=4,
             pin_memory=True,
             batch_range=(start_batch, end_batch)
         )
