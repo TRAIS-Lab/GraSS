@@ -538,7 +538,7 @@ class IFAttributor(BaseAttributor):
             # Single pass through training IFVP data with nested test batching
             for chunk_tensor, batch_mapping in tqdm(train_ifvp_dataloader, desc="Computing attribution"):
                 # Move train chunk to device
-                chunk_tensor_device = self.strategy.move_to_device(chunk_tensor)
+                chunk_tensor_device = self.strategy.move_to_device(chunk_tensor).to(dtype=test_batch.dtype)
 
                 # Process test gradients in batches to save memory
                 for test_start in range(0, test_sample_count, test_batch_size):

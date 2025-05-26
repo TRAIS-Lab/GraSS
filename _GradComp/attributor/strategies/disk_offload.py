@@ -9,6 +9,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from .offload_strategy import OffloadStrategy
+from ...io.disk_io import ChunkedDiskIOManager
 
 import logging
 logger = logging.getLogger(__name__)
@@ -18,8 +19,13 @@ class DiskOffloadStrategy(OffloadStrategy):
     Enhanced strategy that stores data on disk using async pipeline with buffer pooling.
     """
 
-    def __init__(self, device: str, layer_names: List[str], cache_dir: Optional[str] = None,
-                 chunk_size: int = 32):
+    def __init__(
+        self,
+        device: str,
+        layer_names: List[str],
+        cache_dir: Optional[str] = None,
+        chunk_size: int = 32
+    ):
         if cache_dir is None:
             raise ValueError("Cache directory must be provided for disk offload")
 
@@ -28,24 +34,13 @@ class DiskOffloadStrategy(OffloadStrategy):
         self.cache_dir = cache_dir
         self.chunk_size = chunk_size
 
-        # Import the enhanced disk I/O manager
-        try:
-            # Try to import enhanced version first
-            from ...io.disk_io import ChunkedDiskIOManager
-            logger.info("Using enhanced async disk I/O manager")
-        except ImportError:
-            # Fall back to original version
-            from ...io.disk_io import ChunkedDiskIOManager
-            logger.info("Using standard disk I/O manager")
-
-        # Use the disk I/O manager (enhanced or standard)
         self.disk_io = ChunkedDiskIOManager(
             cache_dir,
             "default",
             hessian="raw",
             chunk_size=chunk_size,
-            buffer_pool_size=4,  # Will be ignored by standard version
-            write_queue_size=8   # Will be ignored by standard version
+            buffer_pool_size=4,
+            write_queue_size=8
         )
 
         # Track current batch range being processed

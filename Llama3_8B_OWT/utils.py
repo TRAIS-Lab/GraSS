@@ -353,6 +353,6 @@ def result_filename(args):
     else:
         projection_name = "NA"
 
-    file_name = f"./results/{args.baseline}/{args.tda}/{args.layer}/{sparsification_name}->{projection_name}_{args.mode}_{args.worker}.pt"
+    file_name = f"./results/{args.baseline}/{args.tda}/{args.layer}/{sparsification_name}->{projection_name}_{args.mode}.pt"
 
     return file_name
