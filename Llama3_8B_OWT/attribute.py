@@ -64,7 +64,6 @@ from transformers import (
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
-
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 # check_min_version("4.46.0")
 
@@ -701,6 +700,7 @@ def main():
                 batch_size=test_batch_size,
                 shuffle=False
             )
+
             result = attributor.attribute(test_dataloader=test_dataloader)
 
             if args.profile:
