@@ -7,7 +7,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, Tuple, Literal
 from dataclasses import dataclass
-import itertools
 
 if TYPE_CHECKING:
     from torch.utils.data import DataLoader
@@ -233,7 +232,7 @@ class BaseAttributor(ABC):
 
         return subset_loader
 
-    def _compute_gradients_for_batches(
+    def _compute_gradients(
         self,
         dataloader: 'DataLoader',
         start_batch: int,
@@ -378,7 +377,7 @@ class BaseAttributor(ABC):
             self._setup_compressors(train_dataloader)
 
         # Compute and store gradients using the strategy
-        _, _ = self._compute_gradients_for_batches(
+        _, _ = self._compute_gradients(
             train_dataloader,
             start_batch,
             end_batch,
@@ -424,7 +423,7 @@ class BaseAttributor(ABC):
         pass
 
     @abstractmethod
-    def compute_self_influence(self, worker: str = "0/1") -> Union[torch.Tensor, Tuple[torch.Tensor, ProfilingStats]]:
+    def compute_self_attribution(self, worker: str = "0/1") -> Union[torch.Tensor, Tuple[torch.Tensor, ProfilingStats]]:
         """Compute self-influence scores."""
         pass
 

@@ -364,7 +364,7 @@ class IFAttributor(BaseAttributor):
             return processing_info
 
     @torch.no_grad()
-    def compute_self_influence(self, worker: str = "0/1") -> Union[torch.Tensor, Tuple[torch.Tensor, ProfilingStats]]:
+    def compute_self_attribution(self, worker: str = "0/1") -> Union[torch.Tensor, Tuple[torch.Tensor, ProfilingStats]]:
         """Compute self-influence scores using tensor-based processing."""
         logger.info(f"Worker {worker}: Computing self-influence scores")
 
@@ -488,7 +488,7 @@ class IFAttributor(BaseAttributor):
 
         # Compute test gradients once
         logger.info("Computing test gradients")
-        test_grads_tensor, test_batch_mapping = self._compute_gradients_for_batches(
+        test_grads_tensor, test_batch_mapping = self._compute_gradients(
             test_dataloader,
             start_batch=0,
             end_batch=len(test_dataloader),

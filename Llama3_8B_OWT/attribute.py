@@ -691,7 +691,7 @@ def main():
                 profile = result[1]
 
         elif args.mode == "self_influence":
-            score = attributor.compute_self_influence()
+            score = attributor.compute_self_attribution()
 
         elif args.mode == "attribute":
             prompt_dataset = FilePromptDataset("./prompts/", tokenizer, block_size)
