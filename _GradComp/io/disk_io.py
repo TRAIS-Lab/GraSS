@@ -386,7 +386,7 @@ class ChunkedDiskIOManager:
         try:
             self._write_queue.put_nowait(write_task)
         except queue.Full:
-            logger.warning(f"Write queue full, blocking on write for chunk {chunk_id}")
+            logger.debug(f"Write queue full, blocking on write for chunk {chunk_id}")
             self._write_queue.put(write_task)  # Block if queue is full
 
     def store_ifvp(self, batch_idx: int, ifvp: List[torch.Tensor]) -> None:
