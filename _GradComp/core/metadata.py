@@ -1,5 +1,5 @@
 """
-Enhanced metadata management with worker coordination support.
+Metadata management with worker coordination support.
 """
 
 import os
@@ -23,7 +23,7 @@ class DatasetInfo:
 
 class MetadataManager:
     """
-    Enhanced metadata manager with worker coordination support.
+    Metadata manager with worker coordination support.
     Supports pre-computing full dataset info and coordinated partial updates.
     """
 
@@ -47,7 +47,7 @@ class MetadataManager:
             os.makedirs(cache_dir, exist_ok=True)
             self._load_metadata_if_exists()
 
-        logger.debug(f"Initialized EnhancedMetadataManager with {len(layer_names)} layers")
+        logger.debug(f"Initialized MetadataManager with {len(layer_names)} layers")
 
     def initialize_full_dataset(self, train_dataloader) -> None:
         """
@@ -134,8 +134,7 @@ class MetadataManager:
                     'batch_size': self.dataset_info.batch_size,
                     'batch_to_sample_mapping': {str(k): v for k, v in self.dataset_info.batch_to_sample_mapping.items()}
                 },
-                'timestamp': time.time(),
-                'metadata_version': '2.0'  # Version to distinguish from old format
+                'timestamp': time.time()
             }
 
             # Atomic write with file locking
@@ -221,51 +220,17 @@ class MetadataManager:
                 self._save_full_dataset_metadata()
 
     def save_metadata(self) -> None:
-        """
-        Save metadata - now only updates worker-specific info if full dataset exists.
-        """
+        """Save metadata - updates the full dataset metadata."""
         if not self.cache_dir:
             return
 
         if self.dataset_info is not None:
-            # We have full dataset info, just update it
+            # We have full dataset info, update it
             self._save_full_dataset_metadata()
         else:
-            # Fallback to old behavior for backward compatibility
-            self._save_legacy_metadata()
-
-    def _save_legacy_metadata(self) -> None:
-        """Legacy metadata saving for backward compatibility."""
-        metadata_path = self._get_metadata_path()
-        temp_path = metadata_path + ".tmp"
-
-        try:
-            with self._metadata_lock:
-                self._flush_pending_batches()
-
-            metadata = {
-                'batch_info': {str(k): v for k, v in self.batch_info.items()},
-                'layer_names': self.layer_names,
-                'layer_dims': self.layer_dims,
-                'total_proj_dim': self.total_proj_dim,
-                'total_samples': self.total_samples,
-                'timestamp': time.time(),
-                'metadata_version': '1.0'
-            }
-
-            with open(temp_path, 'w') as f:
-                json.dump(metadata, f, separators=(',', ':'))
-
-            os.replace(temp_path, metadata_path)
-            logger.debug(f"Saved legacy metadata for {len(self.batch_info)} batches")
-
-        except Exception as e:
-            logger.error(f"Error saving legacy metadata: {e}")
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except:
-                    pass
+            # No dataset info means incomplete initialization
+            logger.warning("Attempting to save metadata without dataset info. Call initialize_dataset_metadata first.")
+            raise ValueError("Cannot save metadata without proper dataset initialization")
 
     def _flush_pending_batches(self) -> None:
         """Flush pending batches to the main batch_info dict."""
@@ -288,63 +253,40 @@ class MetadataManager:
                 with open(metadata_path, 'r') as f:
                     metadata = json.load(f)
 
-                # Handle both new and legacy formats
-                version = metadata.get('metadata_version', '1.0')
+                # Load batch info
+                self.batch_info = {
+                    int(batch_idx): info for batch_idx, info in metadata['batch_info'].items()
+                }
 
-                if version == '2.0' and 'dataset_info' in metadata:
-                    # New format with full dataset info
-                    self._load_v2_metadata(metadata)
+                self.total_samples = metadata.get('total_samples', 0)
+
+                # Load layer information
+                if 'layer_names' in metadata:
+                    self.layer_names = metadata['layer_names']
+                if 'layer_dims' in metadata:
+                    self.layer_dims = metadata['layer_dims']
+                    self.total_proj_dim = metadata.get('total_proj_dim')
+
+                # Load full dataset info
+                if 'dataset_info' in metadata:
+                    dataset_info_dict = metadata['dataset_info']
+                    self.dataset_info = DatasetInfo(
+                        total_batches=dataset_info_dict['total_batches'],
+                        total_samples=dataset_info_dict['total_samples'],
+                        batch_size=dataset_info_dict['batch_size'],
+                        batch_to_sample_mapping={
+                            int(k): v for k, v in dataset_info_dict['batch_to_sample_mapping'].items()
+                        }
+                    )
+                    logger.debug("Loaded full dataset information from metadata")
                 else:
-                    # Legacy format
-                    self._load_legacy_metadata(metadata)
+                    logger.warning("Metadata file exists but lacks dataset_info. Please reinitialize with initialize_dataset_metadata().")
 
-                logger.info(f"Loaded metadata (version {version}) for {len(self.batch_info)} batches")
+                logger.info(f"Loaded metadata for {len(self.batch_info)} batches")
 
             except Exception as e:
                 logger.error(f"Error loading metadata: {e}")
-
-    def _load_v2_metadata(self, metadata: dict) -> None:
-        """Load version 2.0 metadata with full dataset info."""
-        # Load batch info
-        self.batch_info = {
-            int(batch_idx): info for batch_idx, info in metadata['batch_info'].items()
-        }
-
-        self.total_samples = metadata.get('total_samples', 0)
-
-        # Load layer information
-        if 'layer_names' in metadata:
-            self.layer_names = metadata['layer_names']
-        if 'layer_dims' in metadata:
-            self.layer_dims = metadata['layer_dims']
-            self.total_proj_dim = metadata.get('total_proj_dim')
-
-        # Load full dataset info
-        dataset_info_dict = metadata['dataset_info']
-        self.dataset_info = DatasetInfo(
-            total_batches=dataset_info_dict['total_batches'],
-            total_samples=dataset_info_dict['total_samples'],
-            batch_size=dataset_info_dict['batch_size'],
-            batch_to_sample_mapping={
-                int(k): v for k, v in dataset_info_dict['batch_to_sample_mapping'].items()
-            }
-        )
-
-        logger.debug("Loaded full dataset information from metadata")
-
-    def _load_legacy_metadata(self, metadata: dict) -> None:
-        """Load legacy metadata format."""
-        self.batch_info = {
-            int(batch_idx): info for batch_idx, info in metadata['batch_info'].items()
-        }
-
-        self.total_samples = metadata.get('total_samples', 0)
-
-        if 'layer_names' in metadata:
-            self.layer_names = metadata['layer_names']
-        if 'layer_dims' in metadata:
-            self.layer_dims = metadata['layer_dims']
-            self.total_proj_dim = metadata.get('total_proj_dim')
+                logger.warning("Consider deleting corrupted metadata file and reinitializing")
 
     def __del__(self):
         """Ensure metadata is saved on destruction."""

@@ -97,9 +97,9 @@ class ChunkedDiskIOManager:
         hessian: HessianOptions = "raw",
         chunk_size: int = 32,
         max_samples_per_chunk: int = 2048,
-        buffer_pool_size: int = 8,  # Increased default
-        write_queue_size: int = 16,  # Increased default
-        num_write_workers: int = 2  # Multiple write workers
+        buffer_pool_size: int = 8,
+        write_queue_size: int = 32,
+        num_write_workers: int = 4
     ):
         self.cache_dir = cache_dir
         self.setting = setting

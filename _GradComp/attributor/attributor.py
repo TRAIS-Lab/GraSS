@@ -228,7 +228,7 @@ class IFAttributor(BaseAttributor):
 
         dataloader = self.strategy.create_gradient_dataloader(
             data_type="gradients",
-            batch_size=4,
+            batch_size=8,
             pin_memory=True,
             batch_range=(start_batch, end_batch)
         )
