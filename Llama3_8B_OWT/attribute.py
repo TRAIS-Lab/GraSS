@@ -65,6 +65,40 @@ from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
 
+# Keep a max of 100,000 alloc/free events in the recorded history
+# leading up to the snapshot.
+MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT: int = 100000
+def start_record_memory_history() -> None:
+   if not torch.cuda.is_available():
+       logger.info("CUDA unavailable. Not recording memory history")
+       return
+
+   logger.info("Starting snapshot record_memory_history")
+   torch.cuda.memory._record_memory_history(
+       max_entries=MAX_NUM_OF_MEM_EVENTS_PER_SNAPSHOT
+   )
+
+def stop_record_memory_history() -> None:
+   if not torch.cuda.is_available():
+       logger.info("CUDA unavailable. Not recording memory history")
+       return
+
+   logger.info("Stopping snapshot record_memory_history")
+   torch.cuda.memory._record_memory_history(enabled=None)
+
+def export_memory_snapshot() -> None:
+   if not torch.cuda.is_available():
+       logger.info("CUDA unavailable. Not exporting memory snapshot")
+       return
+   file_prefix = f"memory_snapshot_{time.strftime('%Y%m%d_%H%M%S')}"
+
+   try:
+       logger.info(f"Saving snapshot to local file: {file_prefix}.pickle")
+       torch.cuda.memory._dump_snapshot(f"{file_prefix}.pickle")
+   except Exception as e:
+       logger.error(f"Failed to capture memory snapshot {e}")
+       return
+
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 # check_min_version("4.46.0")
 
@@ -701,7 +735,16 @@ def main():
                 batch_size=test_batch_size,
                 shuffle=False
             )
+            # Start recording memory snapshot history
+            start_record_memory_history()
             result = attributor.attribute(test_dataloader=test_dataloader)
+
+            # Create the memory snapshot file
+            export_memory_snapshot()
+
+            # Stop recording memory snapshot history
+            stop_record_memory_history()
+            exit()
 
             if args.profile:
                 score, profile = result

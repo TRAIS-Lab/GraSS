@@ -15,7 +15,7 @@ if TYPE_CHECKING:
 import torch
 from tqdm import tqdm
 
-from .strategies import create_offload_strategy, OffloadOptions
+from ..offload import create_offload_manager, OffloadOptions
 from ..core.hook import HookManager
 from ..core.metadata import MetadataManager
 from ..projection.projector import setup_model_compressors
@@ -80,7 +80,7 @@ class BaseAttributor(ABC):
         self.chunk_size = chunk_size
 
         # Create appropriate offload strategy
-        self.strategy = create_offload_strategy(
+        self.offload_manager = create_offload_manager(
             offload_type=offload,
             device=device,
             layer_names=self.layer_names,
@@ -111,9 +111,9 @@ class BaseAttributor(ABC):
             logger.debug(f"Loaded layer dimensions from metadata")
 
             # Sync to disk IO if using disk offload
-            if self.offload == "disk" and hasattr(self.strategy, 'disk_io'):
-                self.strategy.disk_io.layer_dims = self.layer_dims
-                self.strategy.disk_io.total_proj_dim = self.total_proj_dim
+            if self.offload == "disk" and hasattr(self.offload_manager, 'disk_io'):
+                self.offload_manager.disk_io.layer_dims = self.layer_dims
+                self.offload_manager.disk_io.total_proj_dim = self.total_proj_dim
 
         logger.info(f"Initialized {self.__class__.__name__}:")
         logger.info(f"  Layers: {len(self.layer_names)}, Device: {device}, Offload: {offload}")
@@ -131,11 +131,11 @@ class BaseAttributor(ABC):
                 logger.debug(f"Loaded layer dimensions from metadata")
 
             # Try from disk IO if using disk offload
-            elif self.offload == "disk" and hasattr(self.strategy, 'disk_io'):
-                self.strategy.disk_io._load_layer_dims_from_metadata()
-                if self.strategy.disk_io.layer_dims is not None:
-                    self.layer_dims = self.strategy.disk_io.layer_dims
-                    self.total_proj_dim = self.strategy.disk_io.total_proj_dim
+            elif self.offload == "disk" and hasattr(self.offload_manager, 'disk_io'):
+                self.offload_manager.disk_io._load_layer_dims_from_metadata()
+                if self.offload_manager.disk_io.layer_dims is not None:
+                    self.layer_dims = self.offload_manager.disk_io.layer_dims
+                    self.total_proj_dim = self.offload_manager.disk_io.total_proj_dim
                     # Also update metadata
                     self.metadata.set_layer_dims(self.layer_dims)
                     logger.debug(f"Loaded layer dimensions from disk IO")
@@ -143,9 +143,9 @@ class BaseAttributor(ABC):
         # Sync to all components
         if self.layer_dims is not None:
             # Update disk IO if needed
-            if self.offload == "disk" and hasattr(self.strategy, 'disk_io'):
-                self.strategy.disk_io.layer_dims = self.layer_dims
-                self.strategy.disk_io.total_proj_dim = self.total_proj_dim
+            if self.offload == "disk" and hasattr(self.offload_manager, 'disk_io'):
+                self.offload_manager.disk_io.layer_dims = self.layer_dims
+                self.offload_manager.disk_io.total_proj_dim = self.total_proj_dim
 
             # Update metadata if needed
             if self.metadata.layer_dims is None:
@@ -252,12 +252,12 @@ class BaseAttributor(ABC):
                     self.metadata.set_layer_dims(self.layer_dims)
 
                     # Pass to strategy if needed
-                    if hasattr(self.strategy, 'layer_dims'):
-                        self.strategy.layer_dims = self.layer_dims
-                        self.strategy.total_proj_dim = self.total_proj_dim
+                    if hasattr(self.offload_manager, 'layer_dims'):
+                        self.offload_manager.layer_dims = self.layer_dims
+                        self.offload_manager.total_proj_dim = self.total_proj_dim
 
                 # Store gradients using strategy
-                self.strategy.store_gradients(global_batch_idx, compressed_grads, is_test)
+                self.offload_manager.store_gradients(global_batch_idx, compressed_grads, is_test)
 
                 # For test data, also accumulate for return
                 if is_test:
@@ -318,8 +318,8 @@ class BaseAttributor(ABC):
         start_batch, end_batch = get_worker_batch_range(total_batches, self.chunk_size, worker)
 
         # Start batch range processing for disk strategy
-        if self.offload == "disk" and hasattr(self.strategy, 'start_batch_range_processing'):
-            self.strategy.start_batch_range_processing(start_batch, end_batch)
+        if self.offload == "disk" and hasattr(self.offload_manager, 'start_batch_range_processing'):
+            self.offload_manager.start_batch_range_processing(start_batch, end_batch)
 
         logger.info(f"Worker {worker}: Caching gradients with offload strategy: {self.offload}")
 
@@ -346,9 +346,9 @@ class BaseAttributor(ABC):
             logger.info("Master worker saved complete metadata")
 
         # Finalize batch range processing for disk strategy
-        if self.offload == "disk" and hasattr(self.strategy, 'finish_batch_range_processing'):
-            self.strategy.finish_batch_range_processing()
-            self.strategy.wait_for_async_operations()
+        if self.offload == "disk" and hasattr(self.offload_manager, 'finish_batch_range_processing'):
+            self.offload_manager.finish_batch_range_processing()
+            self.offload_manager.wait_for_async_operations()
 
         self._cleanup_hooks()
 

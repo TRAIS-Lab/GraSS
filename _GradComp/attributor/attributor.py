@@ -51,7 +51,7 @@ class IFAttributor(BaseAttributor):
         if self.hessian == "none":
             logger.info("Hessian type is 'none', skipping preconditioner computation")
             for layer_idx in range(len(self.layer_names)):
-                self.strategy.store_preconditioner(layer_idx, None)
+                self.offload_manager.store_preconditioner(layer_idx, None)
 
             # Create processing info
             processing_info = ProcessingInfo(
@@ -90,7 +90,7 @@ class IFAttributor(BaseAttributor):
         # Use tensor-based dataloader for efficient processing
         logger.debug("Using tensor-based dataloader for preconditioner computation")
 
-        dataloader = self.strategy.create_gradient_dataloader(
+        dataloader = self.offload_manager.create_gradient_dataloader(
             data_type="gradients",
             batch_size=4,
             pin_memory=True
@@ -98,7 +98,7 @@ class IFAttributor(BaseAttributor):
 
         for chunk_tensor, batch_mapping in tqdm(dataloader, desc="Computing preconditioners from chunks"):
             # Move chunk to device
-            chunk_tensor = self.strategy.move_to_device(chunk_tensor)
+            chunk_tensor = self.offload_manager.move_to_device(chunk_tensor)
 
             # Process each layer
             for layer_idx in range(len(self.layer_names)):
@@ -134,11 +134,11 @@ class IFAttributor(BaseAttributor):
                 # Compute inverse based on Hessian type
                 if self.hessian == "raw":
                     precond = stable_inverse(hessian, damping=damping)
-                    self.strategy.store_preconditioner(layer_idx, precond)
+                    self.offload_manager.store_preconditioner(layer_idx, precond)
                     # del precond
 
                 elif self.hessian in ["kfac", "ekfac"]:
-                    self.strategy.store_preconditioner(layer_idx, hessian) #TODO: Fix, currently not correct
+                    self.offload_manager.store_preconditioner(layer_idx, hessian) #TODO: Fix, currently not correct
 
                 computed_count += 1
                 # del hessian_accumulator, hessian
@@ -148,7 +148,7 @@ class IFAttributor(BaseAttributor):
             torch.cuda.synchronize(self.device)
             self.profiling_stats.precondition += time.time() - start_time
 
-        self.strategy.wait_for_async_operations()
+        self.offload_manager.wait_for_async_operations()
 
         # Create processing info
         processing_info = ProcessingInfo(
@@ -192,8 +192,8 @@ class IFAttributor(BaseAttributor):
         start_batch, end_batch = get_worker_batch_range(total_batches, self.chunk_size, worker)
 
         # Start batch range processing
-        if self.offload == "disk" and hasattr(self.strategy, 'start_batch_range_processing'):
-            self.strategy.start_batch_range_processing(start_batch, end_batch)
+        if self.offload == "disk" and hasattr(self.offload_manager, 'start_batch_range_processing'):
+            self.offload_manager.start_batch_range_processing(start_batch, end_batch)
 
         logger.info(f"Processing batch range: [{start_batch}, {end_batch}) out of {total_batches} total batches")
 
@@ -209,7 +209,7 @@ class IFAttributor(BaseAttributor):
         # Load all preconditioners once
         preconditioners = []
         for layer_idx in range(len(self.layer_names)):
-            precond = self.strategy.retrieve_preconditioner(layer_idx)
+            precond = self.offload_manager.retrieve_preconditioner(layer_idx)
             preconditioners.append(precond)
 
         valid_preconditioners = sum(1 for p in preconditioners if p is not None)
@@ -223,7 +223,7 @@ class IFAttributor(BaseAttributor):
         # Use tensor-based dataloader
         logger.debug("Processing IFVP using tensor-based dataloader")
 
-        dataloader = self.strategy.create_gradient_dataloader(
+        dataloader = self.offload_manager.create_gradient_dataloader(
             data_type="gradients",
             batch_size=4,
             pin_memory=True,
@@ -232,7 +232,7 @@ class IFAttributor(BaseAttributor):
 
         for chunk_tensor, batch_mapping in tqdm(dataloader, desc="Computing IFVP from chunks"):
             # Move chunk to device
-            chunk_tensor = self.strategy.move_to_device(chunk_tensor)
+            chunk_tensor = self.offload_manager.move_to_device(chunk_tensor)
 
             # Process each batch in the chunk
             for batch_idx, (start_row, end_row) in batch_mapping.items():
@@ -259,7 +259,7 @@ class IFAttributor(BaseAttributor):
                         continue
 
                     # Get preconditioner
-                    device_precond = self.strategy.move_to_device(preconditioners[layer_idx])
+                    device_precond = self.offload_manager.move_to_device(preconditioners[layer_idx])
                     device_precond = device_precond.to(dtype=layer_grad.dtype)
 
                     # Compute IFVP: H^{-1} @ g
@@ -269,7 +269,7 @@ class IFAttributor(BaseAttributor):
                     # del layer_grad, ifvp, device_precond
 
                 # Store IFVP for this batch using strategy
-                self.strategy.store_ifvp(batch_idx, batch_ifvp)
+                self.offload_manager.store_ifvp(batch_idx, batch_ifvp)
 
                 processed_batches += 1
                 processed_samples += batch_tensor.shape[0]
@@ -280,14 +280,14 @@ class IFAttributor(BaseAttributor):
             torch.cuda.empty_cache()
 
         # Finalize batch range processing
-        if self.offload == "disk" and hasattr(self.strategy, 'finish_batch_range_processing'):
-            self.strategy.finish_batch_range_processing()
+        if self.offload == "disk" and hasattr(self.offload_manager, 'finish_batch_range_processing'):
+            self.offload_manager.finish_batch_range_processing()
 
         # Clean up
         # del preconditioners
         torch.cuda.empty_cache()
 
-        self.strategy.wait_for_async_operations()
+        self.offload_manager.wait_for_async_operations()
 
         if self.profile and self.profiling_stats:
             torch.cuda.synchronize(self.device)
@@ -317,7 +317,7 @@ class IFAttributor(BaseAttributor):
         processed_samples = 0
 
         # Process using tensor dataloader
-        dataloader = self.strategy.create_gradient_dataloader(
+        dataloader = self.offload_manager.create_gradient_dataloader(
             data_type="gradients",
             batch_size=1,
             pin_memory=True,
@@ -338,7 +338,7 @@ class IFAttributor(BaseAttributor):
                     end_col = start_col + self.layer_dims[layer_idx]
                     gradients.append(batch_tensor[:, start_col:end_col].contiguous())
 
-                self.strategy.store_ifvp(batch_idx, gradients)
+                self.offload_manager.store_ifvp(batch_idx, gradients)
 
                 processed_batches += 1
                 processed_samples += batch_tensor.shape[0]
@@ -380,7 +380,7 @@ class IFAttributor(BaseAttributor):
             raise ValueError("Layer dimensions not found. Ensure gradients have been computed and stored.")
 
         # Make sure IFVP is computed
-        if not self.strategy.has_ifvp():
+        if not self.offload_manager.has_ifvp():
             logger.info("IFVP not found, computing it now...")
             self.compute_ifvp(worker=worker)
 
@@ -394,14 +394,14 @@ class IFAttributor(BaseAttributor):
         start_batch, end_batch = get_worker_batch_range(total_batches, self.chunk_size, worker)
 
         # Use tensor dataloaders for both gradients and IFVP
-        grad_dataloader = self.strategy.create_gradient_dataloader(
+        grad_dataloader = self.offload_manager.create_gradient_dataloader(
             data_type="gradients",
             batch_size=4,
             pin_memory=True,
             batch_range=(start_batch, end_batch)
         )
 
-        ifvp_dataloader = self.strategy.create_gradient_dataloader(
+        ifvp_dataloader = self.offload_manager.create_gradient_dataloader(
             data_type="ifvp",
             batch_size=4,
             pin_memory=True,
@@ -416,8 +416,8 @@ class IFAttributor(BaseAttributor):
                 total=len(grad_dataloader)
             ):
                 # Move to device
-                grad_tensor = self.strategy.move_to_device(grad_tensor)
-                ifvp_tensor = self.strategy.move_to_device(ifvp_tensor)
+                grad_tensor = self.offload_manager.move_to_device(grad_tensor)
+                ifvp_tensor = self.offload_manager.move_to_device(ifvp_tensor)
 
                 # Process each batch
                 for batch_idx in grad_mapping:
@@ -478,7 +478,7 @@ class IFAttributor(BaseAttributor):
             self._setup_compressors(test_dataloader)
 
         # Get or compute IFVP
-        if use_cached_ifvp and self.strategy.has_ifvp():
+        if use_cached_ifvp and self.offload_manager.has_ifvp():
             logger.info("Using cached IFVP")
         else:
             logger.info("Computing IFVP")
@@ -522,7 +522,7 @@ class IFAttributor(BaseAttributor):
             start_time = time.time()
 
         # Create dataloader for IFVP with optimal batch size
-        train_ifvp_dataloader = self.strategy.create_gradient_dataloader(
+        train_ifvp_dataloader = self.offload_manager.create_gradient_dataloader(
             data_type="ifvp",
             batch_size=2,
             pin_memory=True
@@ -537,7 +537,7 @@ class IFAttributor(BaseAttributor):
         # Single pass through training IFVP data with nested test batching
         for chunk_tensor, batch_mapping in tqdm(train_ifvp_dataloader, desc="Computing attribution"):
             # Move train chunk to device
-            chunk_tensor_device = self.strategy.move_to_device(chunk_tensor).to(dtype=all_test_gradients.dtype)
+            chunk_tensor_device = self.offload_manager.move_to_device(chunk_tensor).to(dtype=all_test_gradients.dtype)
 
             # Process test gradients in batches to save memory
             for test_start in range(0, test_sample_count, test_batch_size):
@@ -545,7 +545,7 @@ class IFAttributor(BaseAttributor):
                 test_batch = all_test_gradients[test_start:test_end]
 
                 # Move test batch to device
-                test_batch_device = self.strategy.move_to_device(test_batch)
+                test_batch_device = self.offload_manager.move_to_device(test_batch)
 
                 # Efficient batched matrix multiplication for this (train_chunk, test_batch) pair
                 # Shape: (chunk_samples, proj_dim) @ (proj_dim, test_batch_samples) -> (chunk_samples, test_batch_samples)

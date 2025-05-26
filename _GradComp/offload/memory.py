@@ -7,12 +7,12 @@ from typing import List, Optional, Tuple
 import torch
 from torch.utils.data import DataLoader
 
-from .offload_strategy import OffloadStrategy
+from .offload import Offload
 
 import logging
 logger = logging.getLogger(__name__)
 
-class MemoryOffloadStrategy(OffloadStrategy):
+class MemoryOffloadManager(Offload):
     """
     Strategy that keeps all data in memory on the specified device.
     """
