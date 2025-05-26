@@ -675,6 +675,8 @@ def main():
         start_time = time.time()
 
         if args.mode == "cache":
+            attributor.initialize_dataset_metadata(train_dataloader)
+            exit()
             result = attributor.cache_gradients(
                     train_dataloader,
                     worker=args.worker,
