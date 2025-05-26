@@ -5,9 +5,6 @@ GradComp - Gradient Component-Based Influence Attribution
 import logging
 import sys
 
-# Import key components for convenience
-from .io import ChunkedDiskIOManager, ChunkedMemoryMapHandler, create_tensor_dataloader
-
 def setup_logger(name=__name__, level=logging.INFO, log_file=None):
     """Configure and return a logger with the specified settings."""
     logger = logging.getLogger(name)
@@ -38,9 +35,6 @@ logger.propagate = False
 __version__ = '0.1.0'
 
 __all__ = [
-    'ChunkedDiskIOManager',
-    'ChunkedMemoryMapHandler',
-    'create_tensor_dataloader',
     'setup_logger',
     'logger'
 ]

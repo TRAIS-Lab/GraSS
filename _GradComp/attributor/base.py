@@ -1,5 +1,5 @@
 """
-Base Attributor with proper worker coordination for metadata.
+Base Attributor.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from .strategies import create_offload_strategy, OffloadOptions
 from ..core.hook import HookManager
 from ..core.metadata import MetadataManager
 from ..projection.projector import setup_model_compressors
+from ..utils.worker import get_worker_batch_range, create_worker_dataloader
 
 import logging
 logger = logging.getLogger(__name__)
@@ -43,7 +44,7 @@ class ProcessingInfo:
 
 class BaseAttributor(ABC):
     """
-    Base class for Influence Function Attributors with proper worker coordination.
+    Base class for Influence Function Attributors.
     """
 
     def __init__(
@@ -117,413 +118,7 @@ class BaseAttributor(ABC):
         logger.info(f"Initialized {self.__class__.__name__}:")
         logger.info(f"  Layers: {len(self.layer_names)}, Device: {device}, Offload: {offload}")
         if self.layer_dims:
-            logger.info(f"  Dimensions: {len(self.layer_dims)} layers, total={self.total_proj_dim}")
-
-    def cache_gradients(self, train_dataloader: 'DataLoader', worker: str = "0/1") -> Union[ProcessingInfo, Tuple[ProcessingInfo, ProfilingStats]]:
-        """
-        Cache gradients using the appropriate storage strategy with automatic metadata initialization.
-
-        Args:
-            train_dataloader: Training data loader
-            worker: Worker specification in format "worker_id/total_workers"
-
-        Returns:
-            ProcessingInfo about what was cached, optionally with ProfilingStats
-        """
-        # Parse worker information
-        try:
-            worker_id, total_workers = map(int, worker.split('/'))
-        except ValueError:
-            raise ValueError(f"Invalid worker specification '{worker}'. Use format 'worker_id/total_workers'")
-
-        # Automatically initialize dataset metadata if needed (thread-safe)
-        logger.info(f"Worker {worker}: Initializing dataset metadata if needed...")
-        self.metadata.initialize_full_dataset(train_dataloader)
-
-        # Verify dataset consistency
-        expected_batches = len(train_dataloader)
-        if self.metadata.get_total_batches() != expected_batches:
-            logger.warning(f"Batch count mismatch. Expected: {expected_batches}, "
-                         f"Metadata: {self.metadata.get_total_batches()}")
-
-        # Calculate worker batch range
-        total_batches = self.metadata.get_total_batches()
-        start_batch, end_batch = self._get_worker_batch_range(total_batches, worker)
-
-        # Start batch range processing for disk strategy
-        if self.offload == "disk" and hasattr(self.strategy, 'start_batch_range_processing'):
-            self.strategy.start_batch_range_processing(start_batch, end_batch)
-
-        logger.info(f"Worker {worker}: Caching gradients for batches [{start_batch}, {end_batch}) "
-                   f"with offload strategy: {self.offload}")
-
-        self.full_train_dataloader = train_dataloader
-
-        if self.sparsifiers is None and self.projectors is None:
-            self._setup_compressors(train_dataloader)
-
-        # Compute and store gradients using the strategy
-        _, _ = self._compute_gradients(
-            train_dataloader,
-            start_batch,
-            end_batch,
-            is_test=False,
-            worker_id=f"{worker_id}"
-        )
-
-        # Ensure layer dimensions are saved to metadata
-        if self.layer_dims is not None and self.metadata.layer_dims is None:
-            self.metadata.set_layer_dims(self.layer_dims)
-
-        # Save metadata (now properly coordinated)
-        self.metadata.save_metadata()
-
-        # Finalize batch range processing for disk strategy
-        if self.offload == "disk" and hasattr(self.strategy, 'finish_batch_range_processing'):
-            self.strategy.finish_batch_range_processing()
-            self.strategy.wait_for_async_operations()
-
-        self._cleanup_hooks()
-
-        logger.info(f"Worker {worker}: Completed caching gradients for batches [{start_batch}, {end_batch})")
-
-        # Create processing info
-        processing_info = ProcessingInfo(
-            num_batches=end_batch - start_batch,
-            total_samples=self.metadata.get_total_samples(),  # This is the FULL dataset size
-            batch_range=(start_batch, end_batch),
-            data_type="gradients"
-        )
-
-        if self.profile and self.profiling_stats:
-            return (processing_info, self.profiling_stats)
-        else:
-            return processing_info
-
-    def compute_ifvp(self, worker: str = "0/1") -> Union[ProcessingInfo, Tuple[ProcessingInfo, ProfilingStats]]:
-        """
-        Compute inverse-Hessian-vector products (IFVP) with proper metadata handling.
-        Works correctly regardless of the number of workers used in cache_gradients.
-        """
-        logger.info(f"Worker {worker}: Computing IFVP with tensor-based processing")
-
-        # Verify batch information exists and is complete
-        if not self.metadata.batch_info:
-            raise ValueError("No batch information found. Run cache_gradients first to initialize dataset metadata.")
-
-        if self.metadata.dataset_info is None:
-            raise ValueError("Incomplete dataset metadata. Run cache_gradients first to initialize dataset metadata.")
-
-        # Synchronize layer dimensions
-        self._sync_layer_dims()
-
-        if self.layer_dims is None:
-            raise ValueError("Layer dimensions not found. Ensure gradients have been computed and stored.")
-
-        # Calculate batch range based on FULL dataset
-        total_batches = self.metadata.get_total_batches()
-        start_batch, end_batch = self._get_worker_batch_range(total_batches, worker)
-
-        # Start batch range processing for disk strategy
-        if self.offload == "disk" and hasattr(self.strategy, 'start_batch_range_processing'):
-            self.strategy.start_batch_range_processing(start_batch, end_batch)
-
-        logger.info(f"Processing batch range: [{start_batch}, {end_batch}) out of {total_batches} total batches")
-
-        # Return raw gradients if Hessian type is "none"
-        if self.hessian == "none":
-            logger.debug("Using raw gradients as IFVP since hessian type is 'none'")
-            return self._copy_gradients_as_ifvp(start_batch, end_batch)
-
-        if self.profile and self.profiling_stats:
-            torch.cuda.synchronize(self.device)
-            start_time = time.time()
-
-        # Load all preconditioners once
-        preconditioners = []
-        for layer_idx in range(len(self.layer_names)):
-            precond = self.strategy.retrieve_preconditioner(layer_idx)
-            preconditioners.append(precond)
-
-        valid_preconditioners = sum(1 for p in preconditioners if p is not None)
-        logger.debug(f"Loaded {valid_preconditioners} preconditioners out of {len(self.layer_names)} layers")
-
-        # Get batch mapping from the COMPLETE metadata
-        batch_to_sample_mapping = self.metadata.get_batch_to_sample_mapping()
-        processed_batches = 0
-        processed_samples = 0
-
-        # Use tensor-based dataloader
-        logger.debug("Processing IFVP using tensor-based dataloader")
-
-        dataloader = self.strategy.create_gradient_dataloader(
-            data_type="gradients",
-            batch_size=4,
-            pin_memory=True,
-            batch_range=(start_batch, end_batch)
-        )
-
-        if dataloader is None:
-            logger.error("Failed to create gradient dataloader")
-            raise RuntimeError("Cannot create dataloader for IFVP computation")
-
-        for chunk_tensor, batch_mapping in tqdm(dataloader, desc="Computing IFVP from chunks"):
-            # Move chunk to device
-            chunk_tensor = self.strategy.move_to_device(chunk_tensor)
-
-            # Process each batch in the chunk
-            for batch_idx, (start_row, end_row) in batch_mapping.items():
-                if batch_idx not in batch_to_sample_mapping:
-                    logger.debug(f"Skipping batch {batch_idx} - not in sample mapping")
-                    continue
-
-                batch_tensor = chunk_tensor[start_row:end_row]
-                batch_ifvp = []
-
-                # Process each layer
-                for layer_idx in range(len(self.layer_names)):
-                    if preconditioners[layer_idx] is None:
-                        batch_ifvp.append(torch.zeros(batch_tensor.shape[0], self.layer_dims[layer_idx]))
-                        continue
-
-                    # Extract layer data
-                    start_col = sum(self.layer_dims[:layer_idx])
-                    end_col = start_col + self.layer_dims[layer_idx]
-                    layer_grad = batch_tensor[:, start_col:end_col]
-
-                    if layer_grad.numel() == 0:
-                        batch_ifvp.append(torch.zeros(batch_tensor.shape[0], self.layer_dims[layer_idx]))
-                        continue
-
-                    # Get preconditioner
-                    device_precond = self.strategy.move_to_device(preconditioners[layer_idx])
-                    device_precond = device_precond.to(dtype=layer_grad.dtype)
-
-                    # Compute IFVP: H^{-1} @ g
-                    ifvp = torch.matmul(device_precond, layer_grad.t()).t()
-                    batch_ifvp.append(ifvp)
-
-                    del layer_grad, ifvp, device_precond
-
-                # Store IFVP for this batch using strategy
-                self.strategy.store_ifvp(batch_idx, batch_ifvp)
-
-                processed_batches += 1
-                processed_samples += batch_tensor.shape[0]
-
-                del batch_ifvp
-
-            del chunk_tensor
-            torch.cuda.empty_cache()
-
-        # Finalize batch range processing
-        if self.offload == "disk" and hasattr(self.strategy, 'finish_batch_range_processing'):
-            self.strategy.finish_batch_range_processing()
-
-        # Clean up
-        del preconditioners
-        torch.cuda.empty_cache()
-
-        self.strategy.wait_for_async_operations()
-
-        if self.profile and self.profiling_stats:
-            torch.cuda.synchronize(self.device)
-            self.profiling_stats.precondition += time.time() - start_time
-
-        # Create processing info
-        processing_info = ProcessingInfo(
-            num_batches=processed_batches,
-            total_samples=processed_samples,
-            batch_range=(start_batch, end_batch),
-            data_type="ifvp"
-        )
-
-        if self.profile and self.profiling_stats:
-            return (processing_info, self.profiling_stats)
-        else:
-            return processing_info
-
-    def _compute_gradients(
-        self,
-        dataloader: 'DataLoader',
-        start_batch: int,
-        end_batch: int,
-        is_test: bool = False,
-        worker_id: str = "0"
-    ) -> Tuple[Optional[torch.Tensor], Dict[int, Tuple[int, int]]]:
-        """
-        Compute gradients using efficient subset approach with proper metadata updates.
-        """
-        # Create efficient subset dataloader for this worker
-        worker_dataloader = self._create_worker_dataloader(dataloader, start_batch, end_batch)
-
-        # Create hook manager if needed
-        if self.hook_manager is None:
-            self.hook_manager = HookManager(
-                self.model,
-                self.layer_names,
-                profile=self.profile,
-                device=self.device
-            )
-            if self.sparsifiers:
-                self.hook_manager.set_sparsifiers(self.sparsifiers)
-            if self.projectors:
-                self.hook_manager.set_projectors(self.projectors)
-
-        # For test data, accumulate in memory and return
-        if is_test:
-            all_gradients = []
-            batch_mapping = {}
-            current_row = 0
-
-        batch_sample_counts = []
-
-        # Process batches
-        desc = "Computing test gradients" if is_test else f"Computing gradients (Worker {worker_id})"
-        for batch_idx, batch in enumerate(tqdm(worker_dataloader, desc=desc)):
-            # Calculate the global batch index
-            global_batch_idx = start_batch + batch_idx
-
-            self.model.zero_grad()
-
-            # Prepare inputs
-            if isinstance(batch, dict):
-                inputs = {k: v.to(self.device) for k, v in batch.items()}
-                batch_size = next(iter(batch.values())).shape[0]
-            else:
-                inputs = batch[0].to(self.device)
-                batch_size = batch[0].shape[0]
-
-            batch_sample_counts.append(batch_size)
-
-            # Forward and backward
-            outputs = self.model(**inputs) if isinstance(inputs, dict) else self.model(inputs)
-            logp = -outputs.loss
-            loss = logp - torch.log(1 - torch.exp(logp))
-            loss.backward()
-
-            # Get compressed gradients
-            with torch.no_grad():
-                compressed_grads = self.hook_manager.get_compressed_grads()
-
-                # Detect layer dimensions on first batch
-                if self.layer_dims is None:
-                    self.layer_dims = []
-                    for grad in compressed_grads:
-                        if grad is not None and grad.numel() > 0:
-                            self.layer_dims.append(grad.shape[1] if grad.dim() > 1 else grad.numel())
-                        else:
-                            self.layer_dims.append(0)
-
-                    self.total_proj_dim = sum(self.layer_dims)
-                    logger.info(f"Worker {worker_id}: Detected layer dimensions: {len(self.layer_dims)} layers, total dimension={self.total_proj_dim}")
-
-                    # Save to metadata manager
-                    self.metadata.set_layer_dims(self.layer_dims)
-
-                    # Pass to strategy if needed
-                    if hasattr(self.strategy, 'layer_dims'):
-                        self.strategy.layer_dims = self.layer_dims
-                        self.strategy.total_proj_dim = self.total_proj_dim
-
-                # Store gradients using strategy
-                self.strategy.store_gradients(global_batch_idx, compressed_grads, is_test)
-
-                # For test data, also accumulate for return
-                if is_test:
-                    batch_features = []
-                    for grad, dim in zip(compressed_grads, self.layer_dims):
-                        if grad is not None and grad.numel() > 0:
-                            batch_features.append(grad.cpu())
-                        else:
-                            batch_features.append(torch.zeros(batch_size, dim))
-
-                    batch_tensor = torch.cat(batch_features, dim=1)
-                    all_gradients.append(batch_tensor)
-                    batch_mapping[global_batch_idx] = (current_row, current_row + batch_size)
-                    current_row += batch_size
-
-            torch.cuda.empty_cache()
-
-        # Update metadata for training data using the worker-aware method
-        if not is_test:
-            for i, batch_idx in enumerate(range(start_batch, end_batch)):
-                if i < len(batch_sample_counts):
-                    self.metadata.update_worker_batch_info(batch_idx, batch_sample_counts[i], worker_id)
-
-        # Record compression time from hook manager
-        if self.profile and self.profiling_stats and self.hook_manager:
-            compression_time = self.hook_manager.get_compression_time()
-            self.profiling_stats.compression += compression_time
-            logger.debug(f"Worker {worker_id}: Compression time for batch range [{start_batch}, {end_batch}): {compression_time:.3f}s")
-
-        # Return appropriate values
-        if is_test:
-            if all_gradients:
-                return torch.cat(all_gradients, dim=0), batch_mapping
-            else:
-                return torch.empty(0, self.total_proj_dim), {}
-        else:
-            return None, {}
-
-    def _copy_gradients_as_ifvp(self, start_batch: int, end_batch: int) -> Union[ProcessingInfo, Tuple[ProcessingInfo, ProfilingStats]]:
-        """Copy gradients as IFVP when hessian type is 'none'."""
-        # Ensure layer dimensions are loaded
-        if self.layer_dims is None:
-            self._sync_layer_dims()
-
-        batch_to_sample_mapping = self.metadata.get_batch_to_sample_mapping()
-        processed_batches = 0
-        processed_samples = 0
-
-        # Process using tensor dataloader
-        dataloader = self.strategy.create_gradient_dataloader(
-            data_type="gradients",
-            batch_size=1,
-            pin_memory=True,
-            batch_range=(start_batch, end_batch)
-        )
-
-        if dataloader is None:
-            logger.error("Failed to create gradient dataloader for copying gradients as IFVP")
-            raise RuntimeError("Cannot create dataloader")
-
-        for chunk_tensor, batch_mapping in tqdm(dataloader, desc="Copying gradients as IFVP"):
-            for batch_idx, (start_row, end_row) in batch_mapping.items():
-                if batch_idx not in batch_to_sample_mapping:
-                    continue
-
-                # Extract batch and split into layers
-                batch_tensor = chunk_tensor[start_row:end_row]
-                gradients = []
-
-                for layer_idx in range(len(self.layer_names)):
-                    start_col = sum(self.layer_dims[:layer_idx])
-                    end_col = start_col + self.layer_dims[layer_idx]
-                    gradients.append(batch_tensor[:, start_col:end_col].contiguous())
-
-                self.strategy.store_ifvp(batch_idx, gradients)
-
-                processed_batches += 1
-                processed_samples += batch_tensor.shape[0]
-
-                del gradients
-
-            del chunk_tensor
-            torch.cuda.empty_cache()
-
-        # Create processing info
-        processing_info = ProcessingInfo(
-            num_batches=processed_batches,
-            total_samples=processed_samples,
-            batch_range=(start_batch, end_batch),
-            data_type="ifvp"
-        )
-
-        if self.profile and self.profiling_stats:
-            return (processing_info, self.profiling_stats)
-        else:
-            return processing_info
+            logger.info(f"  Dimensions: {len(self.layer_dims)} layers × {self.layer_dims[0] if self.layer_dims else 0} dim = {self.total_proj_dim} total")
 
     def _sync_layer_dims(self):
         """Synchronize layer dimensions between components."""
@@ -579,68 +174,197 @@ class BaseAttributor(ABC):
 
         torch.cuda.empty_cache()
 
-    def _get_worker_batch_range(self, total_batches: int, worker: str) -> Tuple[int, int]:
-        """Get chunk-aligned batch range for a worker."""
-        try:
-            worker_id, total_workers = map(int, worker.split('/'))
+    def _compute_gradients(
+        self,
+        dataloader: 'DataLoader',
+        start_batch: int,
+        end_batch: int,
+        is_test: bool = False
+    ) -> Tuple[Optional[torch.Tensor], Dict[int, Tuple[int, int]]]:
+        """
+        Compute gradients using efficient subset approach - NO MORE SLOW ISLICE!
+        """
+        # Create efficient subset dataloader for this worker
+        worker_dataloader = create_worker_dataloader(dataloader, start_batch, end_batch)
 
-            if worker_id < 0 or total_workers <= 0 or worker_id >= total_workers:
-                raise ValueError("Invalid worker specification")
+        # Create hook manager if needed
+        if self.hook_manager is None:
+            self.hook_manager = HookManager(
+                self.model,
+                self.layer_names,
+                profile=self.profile,
+                device=self.device
+            )
+            if self.sparsifiers:
+                self.hook_manager.set_sparsifiers(self.sparsifiers)
+            if self.projectors:
+                self.hook_manager.set_projectors(self.projectors)
 
-        except ValueError as e:
-            raise ValueError(f"Invalid worker specification '{worker}': {e}")
+        # For test data, we accumulate in memory and return
+        if is_test:
+            all_gradients = []
+            batch_mapping = {}
+            current_row = 0
 
-        # Calculate total chunks
-        total_chunks = (total_batches + self.chunk_size - 1) // self.chunk_size
+        batch_sample_counts = []
 
-        # Distribute chunks among workers
-        chunks_per_worker = total_chunks // total_workers
-        remaining_chunks = total_chunks % total_workers
+        # NOW THIS IS FAST! No skipping through thousands of batches
+        desc = "Computing test gradients" if is_test else "Computing gradients"
+        for batch_idx, batch in enumerate(tqdm(worker_dataloader, desc=desc)):
+            # Calculate the global batch index
+            global_batch_idx = start_batch + batch_idx
 
-        # Calculate chunk range for this worker
-        start_chunk = worker_id * chunks_per_worker + min(worker_id, remaining_chunks)
-        end_chunk = start_chunk + chunks_per_worker + (1 if worker_id < remaining_chunks else 0)
+            self.model.zero_grad()
 
-        # Convert to batch range
-        start_batch = start_chunk * self.chunk_size
-        end_batch = min(end_chunk * self.chunk_size, total_batches)
+            # Prepare inputs
+            if isinstance(batch, dict):
+                inputs = {k: v.to(self.device) for k, v in batch.items()}
+                batch_size = next(iter(batch.values())).shape[0]
+            else:
+                inputs = batch[0].to(self.device)
+                batch_size = batch[0].shape[0]
 
-        return start_batch, end_batch
+            batch_sample_counts.append(batch_size)
 
-    def _create_worker_dataloader(self, dataloader: 'DataLoader', start_batch: int, end_batch: int) -> 'DataLoader':
-        """Create an efficient subset dataloader for this worker's batch range."""
-        from torch.utils.data import Subset
+            # Forward and backward
+            outputs = self.model(**inputs) if isinstance(inputs, dict) else self.model(inputs)
+            logp = -outputs.loss
+            loss = logp - torch.log(1 - torch.exp(logp))
+            loss.backward()
 
-        dataset = dataloader.dataset
-        batch_size = dataloader.batch_size
+            # Get compressed gradients
+            with torch.no_grad():
+                compressed_grads = self.hook_manager.get_compressed_grads()
 
-        # Calculate sample indices for this batch range
-        start_idx = start_batch * batch_size
-        end_idx = min(end_batch * batch_size, len(dataset))
+                # Detect layer dimensions on first batch
+                if self.layer_dims is None:
+                    self.layer_dims = []
+                    for grad in compressed_grads:
+                        if grad is not None and grad.numel() > 0:
+                            self.layer_dims.append(grad.shape[1] if grad.dim() > 1 else grad.numel())
+                        else:
+                            self.layer_dims.append(0)
 
-        # Create subset indices
-        indices = list(range(start_idx, end_idx))
-        subset = Subset(dataset, indices)
+                    self.total_proj_dim = sum(self.layer_dims)
+                    logger.info(f"Detected layer dimensions: {len(self.layer_dims)} layers, total dimension={self.total_proj_dim}")
 
-        # Create new DataLoader with same settings but using the subset
-        subset_loader = type(dataloader)(
-            subset,
-            batch_size=batch_size,
-            shuffle=False,  # Important: don't shuffle for worker consistency
-            num_workers=0,  # Avoid nested multiprocessing
-            collate_fn=dataloader.collate_fn,
-            pin_memory=dataloader.pin_memory,
-            drop_last=dataloader.drop_last,
-            timeout=dataloader.timeout,
-            worker_init_fn=dataloader.worker_init_fn,
+                    # Save to metadata manager
+                    self.metadata.set_layer_dims(self.layer_dims)
+
+                    # Pass to strategy if needed
+                    if hasattr(self.strategy, 'layer_dims'):
+                        self.strategy.layer_dims = self.layer_dims
+                        self.strategy.total_proj_dim = self.total_proj_dim
+
+                # Store gradients using strategy
+                self.strategy.store_gradients(global_batch_idx, compressed_grads, is_test)
+
+                # For test data, also accumulate for return
+                if is_test:
+                    # Concatenate gradients for this batch
+                    batch_features = []
+                    for grad, dim in zip(compressed_grads, self.layer_dims):
+                        if grad is not None and grad.numel() > 0:
+                            batch_features.append(grad.cpu())
+                        else:
+                            batch_features.append(torch.zeros(batch_size, dim))
+
+                    batch_tensor = torch.cat(batch_features, dim=1)
+                    all_gradients.append(batch_tensor)
+                    batch_mapping[global_batch_idx] = (current_row, current_row + batch_size)
+                    current_row += batch_size
+
+            torch.cuda.empty_cache()
+
+        # Update metadata for training data
+        if not is_test:
+            for i, batch_idx in enumerate(range(start_batch, end_batch)):
+                if i < len(batch_sample_counts):
+                    self.metadata.add_batch_info(batch_idx=batch_idx, sample_count=batch_sample_counts[i])
+
+        # Record compression time from hook manager
+        if self.profile and self.profiling_stats and self.hook_manager:
+            compression_time = self.hook_manager.get_compression_time()
+            self.profiling_stats.compression += compression_time
+            logger.debug(f"Compression time for batch range [{start_batch}, {end_batch}): {compression_time:.3f}s")
+
+        # Return appropriate values
+        if is_test:
+            if all_gradients:
+                return torch.cat(all_gradients, dim=0), batch_mapping
+            else:
+                return torch.empty(0, self.total_proj_dim), {}
+        else:
+            return None, {}
+
+    def cache_gradients(self, train_dataloader: 'DataLoader', worker: str = "0/1") -> Union[ProcessingInfo, Tuple[ProcessingInfo, ProfilingStats]]:
+        """
+        Cache gradients using the appropriate storage strategy.
+
+        Returns:
+            ProcessingInfo about what was cached, optionally with ProfilingStats
+        """
+        # Initialize complete dataset structure (safe to call multiple times)
+        self.metadata.initialize_dataset_structure(train_dataloader)
+
+        total_batches = len(train_dataloader)
+        start_batch, end_batch = get_worker_batch_range(total_batches, self.chunk_size, worker)
+
+        # Start batch range processing for disk strategy
+        if self.offload == "disk" and hasattr(self.strategy, 'start_batch_range_processing'):
+            self.strategy.start_batch_range_processing(start_batch, end_batch)
+
+        logger.info(f"Worker {worker}: Caching gradients with offload strategy: {self.offload}")
+
+        self.full_train_dataloader = train_dataloader
+
+        if self.sparsifiers is None and self.projectors is None:
+            self._setup_compressors(train_dataloader)
+
+        # Compute and store gradients using the strategy
+        _, _ = self._compute_gradients(
+            train_dataloader,
+            start_batch,
+            end_batch,
+            is_test=False
         )
 
-        return subset_loader
+        # Make sure layer dimensions are saved to metadata
+        if self.layer_dims is not None and self.metadata.layer_dims is None:
+            self.metadata.set_layer_dims(self.layer_dims)
 
-    # Abstract methods that subclasses must implement
+        self.metadata.save_metadata()
+
+        # Finalize batch range processing for disk strategy
+        if self.offload == "disk" and hasattr(self.strategy, 'finish_batch_range_processing'):
+            self.strategy.finish_batch_range_processing()
+            self.strategy.wait_for_async_operations()
+
+        self._cleanup_hooks()
+
+        logger.info(f"Worker {worker}: Cached gradients for batches [{start_batch}, {end_batch})")
+
+        # Create processing info
+        processing_info = ProcessingInfo(
+            num_batches=end_batch - start_batch,
+            total_samples=self.metadata.get_total_samples(),
+            batch_range=(start_batch, end_batch),
+            data_type="gradients"
+        )
+
+        if self.profile and self.profiling_stats:
+            return (processing_info, self.profiling_stats)
+        else:
+            return processing_info
+
     @abstractmethod
     def compute_preconditioners(self, damping: Optional[float] = None) -> Union[ProcessingInfo, Tuple[ProcessingInfo, ProfilingStats]]:
         """Compute and store preconditioners from gradients."""
+        pass
+
+    @abstractmethod
+    def compute_ifvp(self, worker: str = "0/1") -> Union[ProcessingInfo, Tuple[ProcessingInfo, ProfilingStats]]:
+        """Compute and store IFVP."""
         pass
 
     @abstractmethod

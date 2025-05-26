@@ -707,7 +707,6 @@ def main():
             attributor.cache_gradients(train_dataloader=train_dataloader, worker=f"{i}/3")
             torch.cuda.synchronize(device)
             cache_end_time = time.time()
-            exit()
 
         # Grid search over damping values
         logger.info("Starting grid search for damping values...")
