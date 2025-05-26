@@ -1,5 +1,5 @@
 """
-Enhanced Base Attributor with proper worker coordination for metadata.
+Base Attributor with proper worker coordination for metadata.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 from .strategies import create_offload_strategy, OffloadOptions
 from ..core.hook import HookManager
-from ..core.metadata import MetadataManager
+from ..core.metadata import MetadataManager  # Use standard version
 from ..projection.projector import setup_model_compressors
 
 import logging
@@ -43,7 +43,7 @@ class ProcessingInfo:
 
 class BaseAttributor(ABC):
     """
-    Enhanced base class for Influence Function Attributors with proper worker coordination.
+    Base class for Influence Function Attributors with proper worker coordination.
     """
 
     def __init__(
@@ -87,7 +87,7 @@ class BaseAttributor(ABC):
             chunk_size=chunk_size
         )
 
-        # Initialize ENHANCED metadata manager
+        # Initialize metadata manager
         self.metadata = MetadataManager(cache_dir or ".", self.layer_names)
 
         self.full_train_dataloader: Optional['DataLoader'] = None
@@ -146,10 +146,11 @@ class BaseAttributor(ABC):
         except ValueError:
             raise ValueError(f"Invalid worker specification '{worker}'. Use format 'worker_id/total_workers'")
 
-        # Initialize dataset metadata if not already done (for backward compatibility)
+        # Initialize dataset metadata if not already done
         if self.metadata.dataset_info is None:
-            logger.warning("Dataset metadata not initialized. Initializing now...")
-            self.initialize_dataset_metadata(train_dataloader)
+            logger.error("Dataset metadata not initialized. You must call initialize_dataset_metadata() first.")
+            raise ValueError("Dataset metadata must be initialized before parallel processing. "
+                           "Call initialize_dataset_metadata(train_dataloader) once before launching workers.")
 
         # Verify we're working with the same dataset
         expected_batches = len(train_dataloader)
@@ -348,11 +349,11 @@ class BaseAttributor(ABC):
             self.metadata._load_metadata_if_exists()
 
         if not self.metadata.batch_info:
-            raise ValueError("No batch information found. Call cache_gradients or initialize_dataset_metadata first.")
+            raise ValueError("No batch information found. Call initialize_dataset_metadata first.")
 
         # Verify we have complete dataset info
         if self.metadata.dataset_info is None:
-            logger.warning("No complete dataset info found. This may cause issues with partial metadata.")
+            raise ValueError("Incomplete dataset metadata. Call initialize_dataset_metadata first.")
 
         # Synchronize layer dimensions
         self._sync_layer_dims()
