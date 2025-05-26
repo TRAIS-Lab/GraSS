@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from .base import BaseAttributor, ProfilingStats, ProcessingInfo
 from ..utils.common import stable_inverse
+from ..utils.worker import get_worker_batch_range
 
 import logging
 logger = logging.getLogger(__name__)
@@ -186,9 +187,9 @@ class IFAttributor(BaseAttributor):
         if self.layer_dims is None:
             raise ValueError("Layer dimensions not found. Ensure gradients have been computed and stored.")
 
-        # Calculate batch range based on COMPLETE dataset, not just processed batches
-        total_batches = self.metadata.get_total_batches()  # This now returns the full dataset size
-        start_batch, end_batch = self._get_worker_batch_range(total_batches, worker)
+        # Calculate batch range - now uses complete metadata from master worker
+        total_batches = self.metadata.get_total_batches()
+        start_batch, end_batch = get_worker_batch_range(total_batches, self.chunk_size, worker)
 
         # Start batch range processing
         if self.offload == "disk" and hasattr(self.strategy, 'start_batch_range_processing'):
@@ -214,7 +215,7 @@ class IFAttributor(BaseAttributor):
         valid_preconditioners = sum(1 for p in preconditioners if p is not None)
         logger.debug(f"Loaded {valid_preconditioners} preconditioners out of {len(self.layer_names)} layers")
 
-        # Get batch mapping - this now includes ALL batches, not just processed ones
+        # Get batch mapping - this now includes ALL batches from complete metadata
         batch_to_sample_mapping = self.metadata.get_batch_to_sample_mapping()
         processed_batches = 0
         processed_samples = 0
@@ -390,7 +391,7 @@ class IFAttributor(BaseAttributor):
 
         # Get worker batch range
         total_batches = len(self.full_train_dataloader)
-        start_batch, end_batch = self._get_worker_batch_range(total_batches, worker)
+        start_batch, end_batch = get_worker_batch_range(total_batches, self.chunk_size, worker)
 
         # Use tensor dataloaders for both gradients and IFVP
         grad_dataloader = self.strategy.create_gradient_dataloader(

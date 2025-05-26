@@ -1,5 +1,6 @@
 """
-Metadata management with atomic merging for parallel workers.
+Simple metadata management with master worker approach.
+Just restore the original metadata.py with one small addition.
 """
 
 import os
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class MetadataManager:
     """
-    Manager for batch metadata with atomic merging support for parallel workers.
+    Manager for batch metadata with master worker coordination.
     """
 
     def __init__(self, cache_dir: str, layer_names: List[str]):
@@ -35,39 +36,51 @@ class MetadataManager:
         self._last_save_time = 0
         self._save_interval = 5.0  # Save every 5 seconds max
 
-        # Pre-computed dataset information (for full dataset structure)
-        self._dataset_total_batches = None
-        self._dataset_batch_size = None
-
         if cache_dir:
             os.makedirs(cache_dir, exist_ok=True)
             self._load_metadata_if_exists()
 
         logger.debug(f"Initialized MetadataManager with {len(layer_names)} layers")
 
-    def initialize_dataset_structure(self, train_dataloader) -> None:
+    def initialize_complete_dataset(self, train_dataloader, is_master_worker: bool = False) -> None:
         """
-        Initialize the complete dataset structure from dataloader.
-        This is called once to set up the full batch structure.
+        Initialize complete dataset metadata. Only master worker (worker 0) does this.
 
         Args:
             train_dataloader: The training dataloader
+            is_master_worker: True if this is worker 0, False otherwise
         """
-        if self._dataset_total_batches is not None:
-            return  # Already initialized
+        if not is_master_worker:
+            # Non-master workers just load existing metadata
+            self._load_metadata_if_exists()
+            if not self.batch_info:
+                logger.info("Non-master worker waiting for master to initialize metadata...")
+                # Wait for master worker to create metadata
+                for _ in range(30):  # Wait up to 30 seconds
+                    time.sleep(1)
+                    self._load_metadata_if_exists()
+                    if self.batch_info:
+                        logger.info("Metadata initialized by master worker")
+                        break
+                else:
+                    raise RuntimeError("Master worker failed to initialize metadata within 30 seconds")
+            return
+
+        # Only master worker (worker 0) initializes the complete dataset
+        logger.info("Master worker initializing complete dataset metadata...")
 
         total_batches = len(train_dataloader)
         batch_size = train_dataloader.batch_size
 
-        logger.info(f"Initializing dataset structure: {total_batches} batches, batch_size={batch_size}")
+        # Check if already initialized
+        if len(self.batch_info) == total_batches:
+            logger.info("Dataset metadata already complete, skipping initialization")
+            return
 
-        # Pre-compute the complete batch structure
+        # Compute complete batch structure
         if hasattr(train_dataloader.dataset, '__len__'):
             dataset_size = len(train_dataloader.dataset)
-
-            # Initialize complete batch info structure
             current_sample_idx = 0
-            complete_batch_info = {}
 
             for batch_idx in range(total_batches):
                 start_idx = batch_idx * batch_size
@@ -77,68 +90,53 @@ class MetadataManager:
                 else:
                     actual_batch_size = min(batch_size, dataset_size - start_idx)
 
-                complete_batch_info[batch_idx] = {
+                self.batch_info[batch_idx] = {
                     "sample_count": actual_batch_size,
-                    "start_idx": current_sample_idx,
-                    "processed": False  # Track which batches have been processed
+                    "start_idx": current_sample_idx
                 }
                 current_sample_idx += actual_batch_size
         else:
             # Fallback: assume uniform batch sizes
             logger.warning("Dataset doesn't support __len__, using uniform batch size assumption")
-            complete_batch_info = {}
+            current_sample_idx = 0
             for batch_idx in range(total_batches):
-                complete_batch_info[batch_idx] = {
+                self.batch_info[batch_idx] = {
                     "sample_count": batch_size,
-                    "start_idx": batch_idx * batch_size,
-                    "processed": False
+                    "start_idx": current_sample_idx
                 }
-            current_sample_idx = total_batches * batch_size
+                current_sample_idx += batch_size
 
-        # Store the complete structure
-        with self._metadata_lock:
-            self.batch_info = complete_batch_info
-            self.total_samples = current_sample_idx
-            self._dataset_total_batches = total_batches
-            self._dataset_batch_size = batch_size
+        self.total_samples = current_sample_idx
 
-        logger.info(f"Initialized complete dataset structure: {total_batches} batches, {current_sample_idx} total samples")
+        # Save the complete metadata immediately
+        self.save_metadata()
+
+        logger.info(f"Master worker initialized complete dataset: {total_batches} batches, {current_sample_idx} samples")
 
     def add_batch_info(self, batch_idx: int, sample_count: int) -> None:
         """
-        Mark a batch as processed and validate sample count.
+        Add information about a batch with optimized batching.
+        For non-master workers, this just validates but doesn't save metadata.
 
         Args:
             batch_idx: Index of the batch
-            sample_count: Number of samples in the batch (for validation)
+            sample_count: Number of samples in the batch
         """
         with self._metadata_lock:
             if batch_idx in self.batch_info:
-                # Validate sample count matches pre-computed structure
+                # Validate sample count matches expected
                 expected_count = self.batch_info[batch_idx]["sample_count"]
                 if sample_count != expected_count:
                     logger.warning(f"Batch {batch_idx} sample count mismatch. "
                                  f"Expected: {expected_count}, Got: {sample_count}")
-
-                # Mark as processed
-                self.batch_info[batch_idx]["processed"] = True
-                self.batch_info[batch_idx]["processed_time"] = time.time()
-
-                # Add to pending updates for periodic save
-                self._pending_batches[batch_idx] = self.batch_info[batch_idx].copy()
-
-                # Check if we should save (time-based or buffer size-based)
-                current_time = time.time()
-                should_save = (
-                    len(self._pending_batches) >= 50 or  # Buffer size threshold
-                    (current_time - self._last_save_time) >= self._save_interval  # Time threshold
-                )
-
-                if should_save:
-                    self._flush_pending_batches()
             else:
-                logger.error(f"Attempting to update unknown batch {batch_idx}. "
-                           f"Dataset structure may not be initialized.")
+                # This shouldn't happen if master worker initialized properly
+                logger.warning(f"Batch {batch_idx} not found in pre-initialized metadata")
+                self._pending_batches[batch_idx] = {
+                    "sample_count": sample_count,
+                    "start_idx": self.total_samples
+                }
+                self.total_samples += sample_count
 
     def set_layer_dims(self, layer_dims: List[int]) -> None:
         """
@@ -157,89 +155,109 @@ class MetadataManager:
         if not self._pending_batches:
             return
 
-        # Merge pending batches (they should already be in batch_info)
+        # Merge pending batches
+        self.batch_info.update(self._pending_batches)
         self._pending_batches.clear()
         self._last_save_time = time.time()
 
     def get_total_samples(self) -> int:
-        """Get the total number of samples across all batches."""
+        """
+        Get the total number of samples across all batches.
+
+        Returns:
+            Total number of samples
+        """
         return self.total_samples
 
     def get_batch_to_sample_mapping(self) -> Dict[int, Tuple[int, int]]:
-        """Get mapping from batch indices to sample index ranges."""
+        """
+        Get mapping from batch indices to sample index ranges.
+
+        Returns:
+            Dictionary mapping batch indices to (start_idx, end_idx) tuples
+        """
+        # Ensure pending batches are flushed
         with self._metadata_lock:
-            return {
-                batch_idx: (info["start_idx"], info["start_idx"] + info["sample_count"])
-                for batch_idx, info in self.batch_info.items()
-            }
+            self._flush_pending_batches()
+
+        return {
+            batch_idx: (info["start_idx"], info["start_idx"] + info["sample_count"])
+            for batch_idx, info in self.batch_info.items()
+        }
 
     def get_total_batches(self) -> int:
-        """Get total number of batches in the dataset."""
-        return len(self.batch_info)
+        """
+        Get total number of batches in the dataset.
+
+        Returns:
+            Total number of batches
+        """
+        if not self.batch_info:
+            return 0
+
+        # Calculate total batches from batch indices (same as original logic)
+        batch_indices = sorted(self.batch_info.keys())
+        if not batch_indices:
+            return 0
+
+        max_batch_idx = max(batch_indices)
+        return max_batch_idx + 1
 
     def save_metadata(self) -> None:
         """
-        Save metadata with atomic merging to handle concurrent workers.
+        Save metadata to disk.
         """
         if not self.cache_dir:
             return
 
+        with self._metadata_lock:
+            # Flush any pending batches first
+            self._flush_pending_batches()
+
         metadata_path = self._get_metadata_path()
-        temp_path = metadata_path + f".tmp.{os.getpid()}.{int(time.time() * 1000000)}"
+        temp_path = metadata_path + ".tmp"
 
         try:
-            with self._metadata_lock:
-                # Flush any pending batch updates first
-                self._flush_pending_batches()
+            # Recompute start indices to ensure consistency
+            sorted_batches = sorted(self.batch_info.keys())
+            current_idx = 0
+            batch_info_corrected = {}
 
-                # Load existing metadata and merge (atomic read-modify-write)
-                existing_metadata = self._load_existing_metadata_safe()
-
-                # Merge batch info: keep the complete structure, update processed status
-                merged_batch_info = existing_metadata.get('batch_info', {})
-
-                # Update with our current batch info
-                for batch_idx, info in self.batch_info.items():
-                    batch_key = str(batch_idx)
-                    if batch_key in merged_batch_info:
-                        # Preserve existing structure, update processing status
-                        merged_batch_info[batch_key].update({
-                            "processed": info.get("processed", False),
-                            "processed_time": info.get("processed_time", time.time())
-                        })
-                    else:
-                        # Add new batch info
-                        merged_batch_info[batch_key] = {
-                            "sample_count": info["sample_count"],
-                            "start_idx": info["start_idx"],
-                            "processed": info.get("processed", False),
-                            "processed_time": info.get("processed_time", time.time())
-                        }
-
-                # Create complete metadata structure
-                metadata = {
-                    'batch_info': merged_batch_info,
-                    'layer_names': self.layer_names,
-                    'layer_dims': self.layer_dims,
-                    'total_proj_dim': self.total_proj_dim,
-                    'total_samples': self.total_samples,
-                    'dataset_total_batches': self._dataset_total_batches,
-                    'dataset_batch_size': self._dataset_batch_size,
-                    'timestamp': time.time(),
-                    'pid': os.getpid()  # Track which process saved this
+            for batch_idx in sorted_batches:
+                sample_count = self.batch_info[batch_idx]["sample_count"]
+                batch_info_corrected[batch_idx] = {
+                    "start_idx": current_idx,
+                    "sample_count": sample_count
                 }
+                current_idx += sample_count
 
-                # Write to temporary file (atomic operation)
-                with open(temp_path, 'w') as f:
-                    json.dump(metadata, f, separators=(',', ':'))
-                    f.flush()
-                    os.fsync(f.fileno())  # Force write to disk
+            # Prepare serializable format (convert int keys to strings for JSON)
+            serializable_info = {
+                str(idx): info for idx, info in batch_info_corrected.items()
+            }
 
-                # Atomic rename (this is atomic on most filesystems)
-                os.replace(temp_path, metadata_path)
+            metadata = {
+                'batch_info': serializable_info,
+                'layer_names': self.layer_names,
+                'layer_dims': self.layer_dims,
+                'total_proj_dim': self.total_proj_dim,
+                'total_samples': current_idx,
+                'timestamp': time.time()
+            }
 
-                logger.debug(f"Saved metadata for {len(merged_batch_info)} batches "
-                           f"(PID: {os.getpid()})")
+            # Write to temporary file first (atomic operation)
+            with open(temp_path, 'w') as f:
+                json.dump(metadata, f, separators=(',', ':'))  # Compact format
+
+            # Atomic rename
+            os.replace(temp_path, metadata_path)
+
+            # Update our internal state to match what we saved
+            with self._metadata_lock:
+                self.batch_info = batch_info_corrected
+                self.total_samples = current_idx
+
+            logger.debug(f"Saved metadata for {len(self.batch_info)} batches")
 
         except Exception as e:
             logger.error(f"Error saving metadata: {e}")
@@ -249,28 +267,6 @@ class MetadataManager:
                     os.remove(temp_path)
                 except:
                     pass
-            raise
-
-    def _load_existing_metadata_safe(self) -> Dict:
-        """Safely load existing metadata with retry logic."""
-        metadata_path = self._get_metadata_path()
-
-        for attempt in range(3):  # Retry up to 3 times
-            try:
-                if os.path.exists(metadata_path):
-                    with open(metadata_path, 'r') as f:
-                        return json.load(f)
-                else:
-                    return {}
-            except (json.JSONDecodeError, IOError) as e:
-                if attempt < 2:  # Not the last attempt
-                    logger.warning(f"Failed to load metadata (attempt {attempt + 1}): {e}. Retrying...")
-                    time.sleep(0.1 * (attempt + 1))  # Exponential backoff
-                else:
-                    logger.error(f"Failed to load metadata after 3 attempts: {e}")
-                    return {}
-
-        return {}
 
     def _get_metadata_path(self) -> str:
         """Get the path to the metadata file."""
@@ -278,41 +274,36 @@ class MetadataManager:
 
     def _load_metadata_if_exists(self) -> None:
         """Load metadata from disk if it exists."""
-        existing_metadata = self._load_existing_metadata_safe()
+        metadata_path = self._get_metadata_path()
+        if os.path.exists(metadata_path):
+            try:
+                with open(metadata_path, 'r') as f:
+                    metadata = json.load(f)
 
-        if not existing_metadata:
-            return
-
-        try:
-            # Convert string keys back to integers for batch info
-            if 'batch_info' in existing_metadata:
+                # Convert string keys back to integers for batch info
                 self.batch_info = {
                     int(batch_idx): {
                         "sample_count": info["sample_count"],
-                        "start_idx": info["start_idx"],
-                        "processed": info.get("processed", False),
-                        "processed_time": info.get("processed_time", time.time())
+                        "start_idx": info["start_idx"]
                     }
-                    for batch_idx, info in existing_metadata['batch_info'].items()
+                    for batch_idx, info in metadata['batch_info'].items()
                 }
 
-            self.total_samples = existing_metadata.get('total_samples', 0)
-            self._dataset_total_batches = existing_metadata.get('dataset_total_batches')
-            self._dataset_batch_size = existing_metadata.get('dataset_batch_size')
+                self.total_samples = metadata.get('total_samples', 0)
 
-            # Load layer information
-            if 'layer_names' in existing_metadata:
-                self.layer_names = existing_metadata['layer_names']
+                # Load layer information
+                if 'layer_names' in metadata:
+                    self.layer_names = metadata['layer_names']
 
-            if 'layer_dims' in existing_metadata:
-                self.layer_dims = existing_metadata['layer_dims']
-                self.total_proj_dim = existing_metadata.get('total_proj_dim')
-                logger.debug(f"Loaded layer dimensions from metadata")
+                if 'layer_dims' in metadata:
+                    self.layer_dims = metadata['layer_dims']
+                    self.total_proj_dim = metadata.get('total_proj_dim')
+                    logger.debug(f"Loaded layer dimensions from metadata")
 
-            logger.info(f"Loaded metadata for {len(self.batch_info)} batches")
+                logger.info(f"Loaded metadata for {len(self.batch_info)} batches")
 
-        except Exception as e:
-            logger.error(f"Error loading metadata: {e}")
+            except Exception as e:
+                logger.error(f"Error loading metadata: {e}")
 
     def __del__(self):
         """Ensure metadata is saved on destruction."""

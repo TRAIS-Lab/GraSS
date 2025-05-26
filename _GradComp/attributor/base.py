@@ -304,8 +304,15 @@ class BaseAttributor(ABC):
         Returns:
             ProcessingInfo about what was cached, optionally with ProfilingStats
         """
-        # Initialize complete dataset structure (safe to call multiple times)
-        self.metadata.initialize_dataset_structure(train_dataloader)
+        # Parse worker information
+        try:
+            worker_id, total_workers = map(int, worker.split('/'))
+        except ValueError:
+            raise ValueError(f"Invalid worker specification '{worker}'. Use format 'worker_id/total_workers'")
+
+        # Only worker 0 initializes the complete dataset metadata
+        is_master_worker = (worker_id == 0)
+        self.metadata.initialize_complete_dataset(train_dataloader, is_master_worker)
 
         total_batches = len(train_dataloader)
         start_batch, end_batch = get_worker_batch_range(total_batches, self.chunk_size, worker)
@@ -329,11 +336,14 @@ class BaseAttributor(ABC):
             is_test=False
         )
 
-        # Make sure layer dimensions are saved to metadata
+        # Make sure layer dimensions are saved to metadata (only master worker saves)
         if self.layer_dims is not None and self.metadata.layer_dims is None:
             self.metadata.set_layer_dims(self.layer_dims)
 
-        self.metadata.save_metadata()
+        # Only master worker saves metadata
+        if is_master_worker:
+            self.metadata.save_metadata()
+            logger.info("Master worker saved complete metadata")
 
         # Finalize batch range processing for disk strategy
         if self.offload == "disk" and hasattr(self.strategy, 'finish_batch_range_processing'):
