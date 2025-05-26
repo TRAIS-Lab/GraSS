@@ -6,7 +6,7 @@ import os
 import queue
 import threading
 import time
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any
 
 import torch
 import torch.utils.data

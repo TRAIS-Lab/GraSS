@@ -4,7 +4,7 @@ from typing import List, Optional, Tuple
 import torch
 from torch.utils.data import DataLoader
 
-class OffloadStrategy(ABC):
+class Offload(ABC):
     """
     Abstract base class defining the interface for offload strategies.
     Each strategy handles a specific method of data storage and retrieval.

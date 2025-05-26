@@ -702,7 +702,6 @@ def main():
             )
 
             result = attributor.attribute(test_dataloader=test_dataloader)
-
             if args.profile:
                 score, profile = result
             else:

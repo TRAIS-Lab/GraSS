@@ -8,13 +8,13 @@ from typing import List, Optional, Tuple
 import torch
 from torch.utils.data import DataLoader
 
-from .offload_strategy import OffloadStrategy
-from ...io.disk_io import ChunkedDiskIOManager
+from .offload import Offload
+from .disk_io.manager import ChunkedDiskIOManager
 
 import logging
 logger = logging.getLogger(__name__)
 
-class DiskOffloadStrategy(OffloadStrategy):
+class DiskOffloadManager(Offload):
     """
     Enhanced strategy that stores data on disk using async pipeline with buffer pooling.
     """
