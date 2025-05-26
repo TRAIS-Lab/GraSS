@@ -115,10 +115,10 @@ class IFAttributor(BaseAttributor):
                 # In-placej accumulation - much more memory efficient!
                 hessian_accumulators[layer_idx].addmm_(layer_data.t(), layer_data)
 
-                del layer_data
+                # del layer_data
                 torch.cuda.empty_cache()
 
-            del chunk_tensor
+            # del chunk_tensor
             torch.cuda.empty_cache()
 
         # Compute preconditioners from accumulated Hessians
@@ -135,13 +135,13 @@ class IFAttributor(BaseAttributor):
                 if self.hessian == "raw":
                     precond = stable_inverse(hessian, damping=damping)
                     self.strategy.store_preconditioner(layer_idx, precond)
-                    del precond
+                    # del precond
 
                 elif self.hessian in ["kfac", "ekfac"]:
                     self.strategy.store_preconditioner(layer_idx, hessian) #TODO: Fix, currently not correct
 
                 computed_count += 1
-                del hessian_accumulator, hessian
+                # del hessian_accumulator, hessian
                 torch.cuda.empty_cache()
 
         if self.profile and self.profiling_stats:
@@ -266,7 +266,7 @@ class IFAttributor(BaseAttributor):
                     ifvp = torch.matmul(device_precond, layer_grad.t()).t()
                     batch_ifvp.append(ifvp)
 
-                    del layer_grad, ifvp, device_precond
+                    # del layer_grad, ifvp, device_precond
 
                 # Store IFVP for this batch using strategy
                 self.strategy.store_ifvp(batch_idx, batch_ifvp)
@@ -274,9 +274,9 @@ class IFAttributor(BaseAttributor):
                 processed_batches += 1
                 processed_samples += batch_tensor.shape[0]
 
-                del batch_ifvp
+                # del batch_ifvp
 
-            del chunk_tensor
+            # del chunk_tensor
             torch.cuda.empty_cache()
 
         # Finalize batch range processing
@@ -284,7 +284,7 @@ class IFAttributor(BaseAttributor):
             self.strategy.finish_batch_range_processing()
 
         # Clean up
-        del preconditioners
+        # del preconditioners
         torch.cuda.empty_cache()
 
         self.strategy.wait_for_async_operations()
@@ -343,9 +343,9 @@ class IFAttributor(BaseAttributor):
                 processed_batches += 1
                 processed_samples += batch_tensor.shape[0]
 
-                del gradients
+                # del gradients
 
-            del chunk_tensor
+            # del chunk_tensor
             torch.cuda.empty_cache()
 
         # Create processing info
@@ -437,7 +437,7 @@ class IFAttributor(BaseAttributor):
                     batch_influence = torch.sum(batch_grad * batch_ifvp, dim=1).cpu()
                     self_influence[sample_start:sample_end] = batch_influence
 
-                del grad_tensor, ifvp_tensor
+                # del grad_tensor, ifvp_tensor
                 torch.cuda.empty_cache()
 
         if self.profile and self.profiling_stats:
@@ -528,52 +528,48 @@ class IFAttributor(BaseAttributor):
             pin_memory=True
         )
 
-        if train_ifvp_dataloader:
-            logger.info("Starting efficient double-batched attribution computation")
+        logger.info("Starting efficient double-batched attribution computation")
 
-            # Configure test batching for memory efficiency
-            test_batch_size = min(32, test_sample_count)  # Process test samples in chunks
-            logger.debug(f"Using test batch size: {test_batch_size}")
+        # Configure test batching for memory efficiency
+        test_batch_size = min(32, test_sample_count)  # Process test samples in chunks
+        logger.debug(f"Using test batch size: {test_batch_size}")
 
-            # Single pass through training IFVP data with nested test batching
-            for chunk_tensor, batch_mapping in tqdm(train_ifvp_dataloader, desc="Computing attribution"):
-                # Move train chunk to device
-                chunk_tensor_device = self.strategy.move_to_device(chunk_tensor).to(dtype=all_test_gradients.dtype)
+        # Single pass through training IFVP data with nested test batching
+        for chunk_tensor, batch_mapping in tqdm(train_ifvp_dataloader, desc="Computing attribution"):
+            # Move train chunk to device
+            chunk_tensor_device = self.strategy.move_to_device(chunk_tensor).to(dtype=all_test_gradients.dtype)
 
-                # Process test gradients in batches to save memory
-                for test_start in range(0, test_sample_count, test_batch_size):
-                    test_end = min(test_start + test_batch_size, test_sample_count)
-                    test_batch = all_test_gradients[test_start:test_end]
+            # Process test gradients in batches to save memory
+            for test_start in range(0, test_sample_count, test_batch_size):
+                test_end = min(test_start + test_batch_size, test_sample_count)
+                test_batch = all_test_gradients[test_start:test_end]
 
-                    # Move test batch to device
-                    test_batch_device = self.strategy.move_to_device(test_batch)
+                # Move test batch to device
+                test_batch_device = self.strategy.move_to_device(test_batch)
 
-                    # Efficient batched matrix multiplication for this (train_chunk, test_batch) pair
-                    # Shape: (chunk_samples, proj_dim) @ (proj_dim, test_batch_samples) -> (chunk_samples, test_batch_samples)
-                    chunk_scores = torch.matmul(chunk_tensor_device, test_batch_device.t())
+                # Efficient batched matrix multiplication for this (train_chunk, test_batch) pair
+                # Shape: (chunk_samples, proj_dim) @ (proj_dim, test_batch_samples) -> (chunk_samples, test_batch_samples)
+                chunk_scores = torch.matmul(chunk_tensor_device, test_batch_device.t())
 
-                    # Map chunk results back to global sample indices
-                    for batch_idx, (start_row, end_row) in batch_mapping.items():
-                        if batch_idx not in batch_to_sample_mapping:
-                            continue
+                # Map chunk results back to global sample indices
+                for batch_idx, (start_row, end_row) in batch_mapping.items():
+                    if batch_idx not in batch_to_sample_mapping:
+                        continue
 
-                        train_start, train_end = batch_to_sample_mapping[batch_idx]
-                        batch_scores = chunk_scores[start_row:end_row]
-                        IF_score[train_start:train_end, test_start:test_end] = batch_scores.to(IF_score.device)
+                    train_start, train_end = batch_to_sample_mapping[batch_idx]
+                    batch_scores = chunk_scores[start_row:end_row]
+                    IF_score[train_start:train_end, test_start:test_end] = batch_scores.to(IF_score.device)
 
-                    # Clean up test batch from device
-                    del test_batch_device, chunk_scores
-                    torch.cuda.empty_cache()
-
-                # Clean up train chunk from device
-                del chunk_tensor_device
+                # Clean up test batch from device
+                # del test_batch_device, chunk_scores
                 torch.cuda.empty_cache()
 
-        else:
-            logger.warning("No IFVP dataloader available, attribution may be incomplete")
+            # Clean up train chunk from device
+            # del chunk_tensor_device
+            torch.cuda.empty_cache()
 
         # Clean up
-        del all_test_gradients
+        # del all_test_gradients
         torch.cuda.empty_cache()
 
         if self.profile and self.profiling_stats:
