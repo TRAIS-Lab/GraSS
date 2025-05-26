@@ -668,7 +668,7 @@ def main():
             projector_kwargs=projector_kwargs,
             offload="disk",
             cache_dir=args.cache_dir,
-            chunk_size=32,
+            chunk_size=16,
         )
 
         torch.cuda.synchronize(device)
