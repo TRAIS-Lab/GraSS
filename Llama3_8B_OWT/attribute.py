@@ -841,6 +841,17 @@ def main():
             "duration_seconds": duration,
             "throughput_tokens_per_second": train_tokens / duration
         }
+    elif args.mode == "precondition":
+        throughput_stats["precondition"] = {
+            "duration_seconds": duration,
+            "throughput_layers_per_second": len(layer_names) / duration
+        }
+    elif args.mode == "ifvp":
+        throughput_stats["ifvp"] = {
+            "train_pairs": len(train_dataset),
+            "duration_seconds": duration,
+            "throughput_datapoint_per_second": len(train_dataset) / duration
+        }
     elif args.mode == "self_influence":
         throughput_stats["self_influence"] = {
             "train_pairs": len(train_dataset),
