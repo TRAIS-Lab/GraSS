@@ -10,7 +10,8 @@ Please follow the installation guide from [dattri](https://github.com/TRAIS-Lab/
 
 The folders either correspond to *libraries* or *experiments*; specifically, the ones starting with `_` are *libraries* (or baselines) that implement the data attribution algorithms, while others correspond to *experiments*. In particular, there are four libraries:
 
-1. `_GradComp`: The main implementation supports influence function with linear layer's gradient factorized compression. In particular, **FactGraSS** (and **SJLT** in `_GradComp/projection/sjlt`).
+1. `_GradComp`: The main implementation supports influence function with linear layer's gradient factorized compression. In particular, the baseline **LoGra** and our proposed method, **FactGraSS**.
+   - `_GradComp/projection/sjlt`: This contains the **SJLT** CUDA kernel implementation along with the benchmark notebook.  
 2. `_dattri`: The [dattri](https://github.com/TRAIS-Lab/dattri) library with **GraSS** implementations in `_dattri/func/projection.py`.
 3. `_SelectiveMask`: The implementation of **Selective Mask**.
 4. `_LogIX`: The [LogIX](https://github.com/logix-project/logix) library with some efficiency fixes to cross-validate our LoGra implementation.
