@@ -12,11 +12,12 @@ The folders either correspond to *libraries* or *experiments*; specifically, the
 
 1. `_GradComp`: The main implementation supports influence function with linear layer's gradient factorized compression. In particular, the baseline **LoGra** and our proposed method, **FactGraSS**.
    - `_GradComp/projection/sjlt`: This contains the **SJLT** CUDA kernel implementation along with the benchmark notebook.
-   > [!Note]
-   > A standalone SJLT CUDA kernel can now be found [here](https://github.com/TRAIS-Lab/sjlt/tree/main)! You can install it via `pip install sjlt`!
 2. `_dattri`: The [dattri](https://github.com/TRAIS-Lab/dattri) library with **GraSS** implementations in `_dattri/func/projection.py`.
 3. `_SelectiveMask`: The implementation of **Selective Mask**.
 4. `_LogIX`: The [LogIX](https://github.com/logix-project/logix) library with some efficiency fixes to cross-validate our LoGra implementation.
+
+> [!Note]
+> A standalone SJLT CUDA kernel can now be found [here](https://github.com/TRAIS-Lab/sjlt/tree/main)! You can install it via `pip install sjlt`!
 
 ## Quick Start
 
