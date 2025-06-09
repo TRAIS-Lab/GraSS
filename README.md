@@ -11,7 +11,9 @@ Please follow the installation guide from [dattri](https://github.com/TRAIS-Lab/
 The folders either correspond to *libraries* or *experiments*; specifically, the ones starting with `_` are *libraries* (or baselines) that implement the data attribution algorithms, while others correspond to *experiments*. In particular, there are four libraries:
 
 1. `_GradComp`: The main implementation supports influence function with linear layer's gradient factorized compression. In particular, the baseline **LoGra** and our proposed method, **FactGraSS**.
-   - `_GradComp/projection/sjlt`: This contains the **SJLT** CUDA kernel implementation along with the benchmark notebook.  
+   - `_GradComp/projection/sjlt`: This contains the **SJLT** CUDA kernel implementation along with the benchmark notebook.
+   > [!Note]
+   > A standalone SJLT CUDA kernel can now be found [here](https://github.com/TRAIS-Lab/sjlt/tree/main)! You can install it via `pip install sjlt`!
 2. `_dattri`: The [dattri](https://github.com/TRAIS-Lab/dattri) library with **GraSS** implementations in `_dattri/func/projection.py`.
 3. `_SelectiveMask`: The implementation of **Selective Mask**.
 4. `_LogIX`: The [LogIX](https://github.com/logix-project/logix) library with some efficiency fixes to cross-validate our LoGra implementation.
@@ -20,7 +22,8 @@ The folders either correspond to *libraries* or *experiments*; specifically, the
 
 We provide the scripts for the experiments.
 
->Note that in the codebase, we call *Random Mask* as *Random*.
+> [!Note]
+> Note that in the codebase, we call *Random Mask* as *Random*.
 
 ### MLP+MNIST/ResNet+CIFAR/MusicTransformer+MAESTRO
 
@@ -138,7 +141,8 @@ For GPT2 experiments, since the LDS result and the fine-tuned models are not ava
 
 For billion-scale model, since we do not need to do quantitative experiment, we do not need to fine-tune the model several times. Here, since this is a large scale experiment, we divide the attribution into several phases, specified by `--mode`. In order, the available options are `cache`, `precondition`, `ifvp`, `attribute`. Furthermore, for `cache` and `ifvp`, we provide a further `--worker` argument to parallelize the job by splitting the dataset among several job instances.
 
-> We note that the complete order is `cache`→`precondition`→`ifvp`→`attribute`
+> [!Note]
+> The complete order of the workflow is `cache`→`precondition`→`ifvp`→`attribute`.
 
 Here, we provide an example for `cache` and `attribute`:
 
