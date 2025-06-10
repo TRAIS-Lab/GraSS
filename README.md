@@ -4,20 +4,18 @@ This is the official implementation of [GraSS: Scalable Influence Function with 
 
 ## Setup Guide
 
-Please follow the installation guide from [dattri](https://github.com/TRAIS-Lab/dattri) in order to correctly install `fast_jl`. By installing dattri, all the basic libraries will also be installed, and you should be able to run all experiments *except for LM-related* ones such as GPT2 and Llama3-8B. For those, you'll need to have the usual Hugging Face libraries such as `datasets` installed as well.
+Please follow the installation guide from [dattri](https://github.com/TRAIS-Lab/dattri) in order to correctly install `fast_jl`. In addition, also install the [`sjlt` library](https://github.com/TRAIS-Lab/sjlt/tree/main) following the installation guide.
+
+By installing dattri, all the basic libraries will also be installed, and you should be able to run all experiments *except for LM-related* ones such as GPT2 and Llama3-8B. For those, you'll need to install the usual Hugging Face libraries such as `transformers`, `datasets`, etc.
 
 ## File Structure
 
 The folders either correspond to *libraries* or *experiments*; specifically, the ones starting with `_` are *libraries* (or baselines) that implement the data attribution algorithms, while others correspond to *experiments*. In particular, there are four libraries:
 
 1. `_GradComp`: The main implementation supports influence function with linear layer's gradient factorized compression. In particular, the baseline **LoGra** and our proposed method, **FactGraSS**.
-   - `_GradComp/projection/sjlt`: This contains the **SJLT** CUDA kernel implementation along with the benchmark notebook.
 2. `_dattri`: The [dattri](https://github.com/TRAIS-Lab/dattri) library with **GraSS** implementations in `_dattri/func/projection.py`.
 3. `_SelectiveMask`: The implementation of **Selective Mask**.
 4. `_LogIX`: The [LogIX](https://github.com/logix-project/logix) library with some efficiency fixes to cross-validate our LoGra implementation.
-
-> [!Note]
-> A standalone SJLT CUDA kernel can now be found [here](https://github.com/TRAIS-Lab/sjlt/tree/main)! You can install it via `pip install sjlt`!
 
 ## Quick Start
 
@@ -144,6 +142,9 @@ For billion-scale model, since we do not need to do quantitative experiment, we 
 
 > [!Note]
 > The complete order of the workflow is `cache`→`precondition`→`ifvp`→`attribute`.
+
+> [!Warning]
+> Please note that the default precision of the model is `bfloat16`, while the default precision of the projection is `float32`. You can change it by uncommenting the line with `#Add` in `projection.py` under `_GradComp/projection` and `_dattri/func`.
 
 Here, we provide an example for `cache` and `attribute`:
 
