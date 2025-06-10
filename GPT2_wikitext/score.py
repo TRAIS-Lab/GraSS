@@ -688,25 +688,12 @@ def main():
             cache_dir="./GradComp/cache"
         )
 
-        for i in range(3):
-            attributor = IFAttributor(
-                setting="GPT2_wikitext",
-                model=model,
-                layer_names=layer_names,
-                hessian=hessian,
-                profile=args.profile,
-                device=device,
-                sparsifier_kwargs=sparsifier_kwargs,
-                projector_kwargs=projector_kwargs,
-                offload="disk",
-                cache_dir="./GradComp/cache"
-            )
-            # Measure cache throughput
-            torch.cuda.synchronize(device)
-            cache_start_time = time.time()
-            attributor.cache_gradients(train_dataloader=train_dataloader, worker=f"{i}/3")
-            torch.cuda.synchronize(device)
-            cache_end_time = time.time()
+        # Measure cache throughput
+        torch.cuda.synchronize(device)
+        cache_start_time = time.time()
+        attributor.cache_gradients(train_dataloader=train_dataloader)
+        torch.cuda.synchronize(device)
+        cache_end_time = time.time()
 
         # Grid search over damping values
         logger.info("Starting grid search for damping values...")
