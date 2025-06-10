@@ -352,7 +352,7 @@ class CudaProjector(AbstractProjector):
                 raise ModuleNotFoundError(msg) from None
         elif self.method == "SJLT":
             try:
-                from _GradComp.SJLT.sjlt_cuda import SJLTProjection
+                from sjlt import SJLTProjection
                 self.c = 1
                 if self.pre_compute:
                     torch.manual_seed(self.seed)
@@ -467,7 +467,7 @@ class CudaProjector(AbstractProjector):
                     result = self.sjlt_cuda_module(features)
             else:
                 try:
-                    from _GradComp.SJLT.sjlt_cuda import SJLTProjection
+                    from sjlt import SJLTProjection
 
                     torch.manual_seed(self.seed)
                     active_dim = self.active_indices.numel()
