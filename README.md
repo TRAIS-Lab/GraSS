@@ -13,8 +13,8 @@ By installing dattri, all the basic libraries will also be installed, and you sh
 The folders either correspond to *libraries* or *experiments*; specifically, the ones starting with `_` are *libraries* (or baselines) that implement the data attribution algorithms, while others correspond to *experiments*. In particular, there are four libraries:
 
 1. `_GradComp`: The main implementation supports influence function with linear layer's gradient factorized compression. In particular, the baseline **LoGra** and our proposed method, **FactGraSS**.
-2. `_dattri`: The [dattri](https://github.com/TRAIS-Lab/dattri) library with **GraSS** implementations in `_dattri/func/projection.py`.
-3. `_SelectiveMask`: The implementation of **Selective Mask**.
+2. `_SelectiveMask`: The implementation of **Selective Mask**.
+3. `_dattri`: The [dattri](https://github.com/TRAIS-Lab/dattri) library with **GraSS** implementations in `_dattri/func/projection.py`.
 4. `_LogIX`: The [LogIX](https://github.com/logix-project/logix) library with some efficiency fixes to cross-validate our LoGra implementation.
 
 ## Quick Start
@@ -32,7 +32,7 @@ In these settings, the LDS results and the models are provided by dattri, so we 
 	```bash
 	for PROJ_DIM in "2048" "4096" "8192" ; do
 		python SelectiveMask.py \
-			--device "cuda" \
+			--device "cuda:0" \
 			--sparsification_dim $PROJ_DIM \
 			--epoch 5000 \
 			--n 5000 \
@@ -48,7 +48,7 @@ In these settings, the LDS results and the models are provided by dattri, so we 
 	for PROJ_DIM in "2048" "4096" "8192" ; do
 		for PROJ_METHOD in "Random" "SelectiveMask" "SJLT" "FJLT" "Gaussian"; do
 			python score.py \
-				--device "cuda" \
+				--device "cuda:0" \
 				--proj_method $PROJ_METHOD \
 				--proj_dim $PROJ_DIM \
 				--seed 22
@@ -67,7 +67,7 @@ For GPT2 experiments, since the LDS result and the fine-tuned models are not ava
 		echo "Starting task ID: $SLURM_ARRAY_TASK_ID"
 
 		# Set the output directory and seed based on the current task ID
-		OUTPUT_DIR="./checkpoints/${SLURM_ARRAY_TASK_ID}"
+		OUTPUT_DIR="./checkpoints/default/${SLURM_ARRAY_TASK_ID}"
 		SEED=${SLURM_ARRAY_TASK_ID}
 
 		# Create the output directory
@@ -103,10 +103,10 @@ For GPT2 experiments, since the LDS result and the fine-tuned models are not ava
 			--dataset_name "wikitext" \
 			--dataset_config_name "wikitext-2-raw-v1" \
 			--model_name_or_path "openai-community/gpt2" \
-			--output_dir "./checkpoints" \
+			--output_dir "./checkpoints/default/" \
 			--block_size 512 \
 			--seed 0 \
-			--device "cuda" \
+			--device "cuda:0" \
 			--layer "Linear" \
 			--sparsification_dim $PROJ_DIM \
 			--epoch 500 \
@@ -123,10 +123,10 @@ For GPT2 experiments, since the LDS result and the fine-tuned models are not ava
 		--dataset_name "wikitext" \
 		--dataset_config_name "wikitext-2-raw-v1" \
 		--model_name_or_path "openai-community/gpt2" \
-		--output_dir "./checkpoints" \
+		--output_dir "./checkpoints/default/" \
 		--block_size 512 \
 		--seed 0 \
-		--device "cuda" \
+		--device "cuda:0" \
 		--baseline "GC" \
 		--tda "IF-RAW" \
 		--layer "Linear" \
@@ -162,7 +162,7 @@ Here, we provide an example for `cache` and `attribute`:
 		--output_dir "./checkpoints" \
 		--block_size 1024 \
 		--seed 0 \
-		--device "cuda" \
+		--device "cuda:0" \
 		--baseline "GC" \
 		--tda "IF-RAW" \
 		--layer "Linear" \
@@ -183,7 +183,7 @@ Here, we provide an example for `cache` and `attribute`:
 		--output_dir "./checkpoints" \
 		--block_size 1024 \
 		--seed 0 \
-		--device "cuda" \
+		--device "cuda:0" \
 		--baseline "GC" \
 		--tda "IF-RAW" \
 		--layer "Linear" \
