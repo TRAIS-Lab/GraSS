@@ -76,6 +76,7 @@ class TracInAttributor(BaseAttributor):
         """
         _check_shuffle(full_train_dataloader)
         self.full_train_dataloader = full_train_dataloader
+        proj_time = 0
 
         # Store cached gradients for each checkpoint
         self.cached_train_grads = []
@@ -94,6 +95,7 @@ class TracInAttributor(BaseAttributor):
                 )
 
             train_batch_grads = None
+            projector = None
             for train_batch_idx, train_data in enumerate(
                 tqdm(
                     full_train_dataloader,
@@ -115,15 +117,21 @@ class TracInAttributor(BaseAttributor):
 
                 # Apply projection if specified
                 if self.projector_kwargs is not None:
-                    train_random_project = random_project(
-                        grad_t,
-                        grad_t.shape[0],
-                        **self.projector_kwargs,
-                    )
-                    grad_t = train_random_project(
+                    if projector is None:
+                        projector = random_project(
+                                grad_t,
+                                grad_t.shape[0],
+                                **self.projector_kwargs,
+                            )
+
+                    torch.cuda.synchronize(self.device)
+                    start = time.time()
+                    grad_t = projector(
                         grad_t,
                         ensemble_id=ckpt_idx,
                     )
+                    torch.cuda.synchronize(self.device)
+                    proj_time += time.time() - start
 
                 # Apply normalization if specified
                 if self.normalized_grad:
@@ -141,6 +149,8 @@ class TracInAttributor(BaseAttributor):
                 train_batch_grads[col_st:col_ed] = grad_t.detach()
 
             self.cached_train_grads.append(train_batch_grads)
+
+        return proj_time
 
     def attribute(
         self,

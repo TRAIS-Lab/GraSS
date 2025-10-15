@@ -1,4 +1,5 @@
 import argparse
+import random
 import os
 import sys
 import torch
@@ -14,6 +15,14 @@ from _SelectiveMask.GradientExtractor import GradientExtractor
 from _dattri.benchmark.load import load_benchmark
 from _dattri.benchmark.utils import SubsetSampler
 from _dattri.benchmark.models.MusicTransformer.utilities.constants import TOKEN_PAD
+
+def set_random_seed(seed):
+    """Set random seed for reproducibility"""
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Optimize Selective Mask over gradients for MLP on MNIST")
@@ -82,6 +91,12 @@ def parse_args():
         default=32,
         help="Batch size for data loading"
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed for reproducibility"
+    )
 
     args = parser.parse_args()
     return args
@@ -123,6 +138,9 @@ def create_dataloaders(model_details, args):
 
 def main():
     args = parse_args()
+
+    set_random_seed(args.seed)
+
     logger = setup_logger()
 
     # Create output directory
@@ -299,7 +317,7 @@ def main():
     results["param_stats"] = param_stats
 
     # Save results
-    output_file = os.path.join(output_dir, 'result.pt')
+    output_file = os.path.join(output_dir, f'result_{args.seed}.pt')
     torch.save(results, output_file)
     logger.info(f"Results saved to {output_file}")
 

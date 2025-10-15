@@ -156,7 +156,7 @@ def main():
     # Create task
     task = AttributionTask(model=model, loss_func=f, checkpoints=model_details["models_half"][:10])
     if args.proj_method == "SelectiveMask":
-        mask_path = f"./SelectiveMask/mask_{args.proj_dim}/result.pt"
+        mask_path = f"./SelectiveMask/mask_{args.proj_dim}/result_{args.seed}.pt"
         result = torch.load(mask_path, weights_only=False)
         active_indices = result['active_indices'].to(args.device)
     elif args.localization > 0:
@@ -243,12 +243,12 @@ def main():
         "proj_time": proj_time,
     }
 
-    if args.localization > 0:
-        torch.save(result, f"./results/Loc-{args.localization}_{args.proj_method}-{args.proj_dim}.pt")
-    elif args.random > 0:
-        torch.save(result, f"./results/Rand-{args.random}_{args.proj_method}-{args.proj_dim}.pt")
-    else:
-        torch.save(result, f"./results/{args.proj_method}-{args.proj_dim}.pt")
+    # if args.localization > 0:
+    #     torch.save(result, f"./results/Loc-{args.localization}_{args.proj_method}-{args.proj_dim}.pt")
+    # elif args.random > 0:
+    #     torch.save(result, f"./results/Rand-{args.random}_{args.proj_method}-{args.proj_dim}.pt")
+    # else:
+    #     torch.save(result, f"./results/{args.proj_method}-{args.proj_dim}.pt")
 
 if __name__ == "__main__":
     main()

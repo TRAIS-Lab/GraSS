@@ -27,8 +27,8 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from _GradComp.utils import _vectorize as vectorize
-from _GradComp.utils import get_parameter_chunk_sizes
+from _GradComp.utils.common import vectorize
+from _GradComp.utils.common import get_parameter_chunk_sizes
 
 
 class ProjectionType(str, Enum):
@@ -387,7 +387,7 @@ class CudaProjector(AbstractProjector):
                     device=device,
                     # dtype=torch.bfloat16 #Add
                 )
-        elif self.method == "Random":
+        elif self.method == "RandomMask":
             if self.active_indices.numel() > proj_dim:
                 torch.manual_seed(self.seed)
                 indices = torch.randperm(self.active_indices.numel())[:proj_dim]
@@ -517,7 +517,7 @@ class CudaProjector(AbstractProjector):
             features = features[:, self.active_indices]
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
             result = features @ proj_matrix / (self.proj_dim ** 0.5)
-        elif self.method == "Random":
+        elif self.method == "RandomMask":
             features = features[:, self.active_indices]
             features = torch.where(torch.abs(features) >= self.threshold, features, torch.zeros_like(features))
             result = features
@@ -707,6 +707,164 @@ class ChunkedCudaProjector:
         return ch_output
 
 
+class RapidInProjector(AbstractProjector):
+    """RapidIn's shuffling-based projector implemented in dattri style."""
+
+    def __init__(
+        self,
+        feature_dim: int,
+        proj_dim: int,
+        seed: int,
+        proj_type: Union[str, ProjectionType],
+        device: Union[str, torch.device],
+        shuffle_lambda: int = 40,  # RapidIn uses shuffle_lambda * 2 internally
+        dtype: torch.dtype = torch.float32,
+    ):
+        super().__init__(feature_dim, proj_dim, seed, proj_type, device)
+        self.shuffle_lambda = shuffle_lambda * 2
+        self.dtype = dtype
+
+        # Initialize generator for reproducibility
+        self.generator = torch.Generator(device=self.device)
+        self.generator.manual_seed(self.seed)
+
+        # Pre-compute permutation dimensions and matrices
+        self._initialize_permutations()
+
+        # Create random sign matrix
+        self._create_random_signs()
+
+    def _factorize_dimension(self, D: int) -> List[int]:
+        """Factorize dimension D into prime factors."""
+        factors = []
+        while D != 1:
+            for i in range(2, int(D + 1)):
+                if D % i == 0:
+                    factors.append(i)
+                    D = D // i
+                    break
+        return factors
+
+    def _initialize_permutations(self):
+        """Initialize permutation matrices for shuffling."""
+        self.perm_indices_list = []
+        self.perm_dim_list = []
+
+        # Get prime factorization
+        factors = self._factorize_dimension(self.feature_dim)
+        factors_tensor = torch.tensor(factors, device=self.device)
+
+        for _ in range(self.shuffle_lambda):
+            # Randomly select subset of factors
+            n_factors = len(factors)
+            x = torch.randint(
+                n_factors // 4,
+                n_factors // 2 + 1,
+                (1,),
+                generator=self.generator,
+                device=self.device
+            ).item()
+
+            # Shuffle factors
+            perm = torch.randperm(n_factors, generator=self.generator, device=self.device)
+            shuffled_factors = factors_tensor[perm]
+
+            # Compute dimension as product of first x factors
+            dim = shuffled_factors[:x].prod().item()
+            self.perm_dim_list.append(dim)
+
+            # Generate permutation for this dimension
+            perm_indices = torch.randperm(
+                dim,
+                generator=self.generator,
+                device=self.device
+            )
+            self.perm_indices_list.append(perm_indices)
+
+    def _create_random_signs(self):
+        """Create random sign matrix (Rademacher)."""
+        # Generate random signs: -1 or 1
+        self.random_signs = torch.empty(
+            self.feature_dim,
+            dtype=self.dtype,
+            device=self.device
+        )
+        self.random_signs.bernoulli_(0.5, generator=self.generator)
+        self.random_signs = 2 * self.random_signs - 1  # Convert 0/1 to -1/1
+
+    def _apply_shuffling(self, vec: torch.Tensor) -> torch.Tensor:
+        """Apply the shuffling permutations to a single vector."""
+        for i, (dim, perm_indices) in enumerate(zip(self.perm_dim_list, self.perm_indices_list)):
+            if i % 2 == 0:
+                # Reshape and permute rows
+                vec = vec.reshape(dim, -1)
+                vec = vec[perm_indices, :]
+            else:
+                # Reshape and permute columns
+                vec = vec.reshape(-1, dim)
+                vec = vec[:, perm_indices]
+
+        return vec.reshape(-1)
+
+    def project(self, features: Union[Dict, torch.Tensor], ensemble_id: int) -> torch.Tensor:
+        """Apply RapidIn projection to features.
+
+        Args:
+            features: Input features as tensor or dict
+            ensemble_id: Ensemble ID (unused in RapidIn, kept for compatibility)
+
+        Returns:
+            Projected features of shape (batch_size, proj_dim)
+        """
+        # Handle dict input
+        if isinstance(features, dict):
+            from dattri.func.utils import vectorize
+            features = vectorize(features, device=self.device)
+        elif features.device.type != self.device:
+            features = features.to(self.device)
+
+        features = features.to(dtype=self.dtype)
+        batch_size = features.shape[0]
+
+        # Process each sample in the batch
+        projected_features = []
+        for i in range(batch_size):
+            vec = features[i].clone()
+
+            # Apply shuffling permutations
+            vec = self._apply_shuffling(vec)
+
+            # Apply random signs
+            vec = vec * self.random_signs
+
+            # Reduce dimension by summing groups
+            if self.proj_dim < self.feature_dim:
+                step = self.feature_dim // self.proj_dim
+                # Pad if necessary
+                if self.feature_dim % self.proj_dim != 0:
+                    padding = step * self.proj_dim - self.feature_dim
+                    vec = torch.nn.functional.pad(vec, (0, padding))
+                vec = vec.reshape(self.proj_dim, step).sum(dim=1)
+            elif self.proj_dim == self.feature_dim:
+                # No dimension reduction needed
+                pass
+            else:
+                raise ValueError(
+                    f"proj_dim ({self.proj_dim}) cannot be larger than "
+                    f"feature_dim ({self.feature_dim})"
+                )
+
+            projected_features.append(vec)
+
+        return torch.stack(projected_features)
+
+    def free_memory(self):
+        """Free memory used by the projector."""
+        del self.perm_indices_list
+        del self.perm_dim_list
+        del self.random_signs
+
+
 def make_random_projector(
     param_shape_list: List,
     feature_batch_size: int,
@@ -791,8 +949,18 @@ def make_random_projector(
             proj_type = ProjectionType.rademacher
         elif method == "Gaussian":
             proj_type = ProjectionType.normal
-        elif method == "Random" or method == "SelectiveMask":
+        elif method == "RandomMask" or method == "SelectiveMask":
             proj_type = ProjectionType.identity
+        elif method == "RapidIn":
+            return RapidInProjector(
+                feature_dim=feature_dim,
+                proj_dim=proj_dim,
+                seed=proj_seed,
+                proj_type=ProjectionType.rademacher,
+                device=device,
+                shuffle_lambda=20,
+                dtype=dtype,
+            )
 
         projector = CudaProjector
         using_cuda_projector = True

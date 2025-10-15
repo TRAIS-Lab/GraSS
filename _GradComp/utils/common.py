@@ -43,6 +43,7 @@ def stable_inverse(matrix: torch.Tensor, damping: float = None) -> torch.Tensor:
 
     return inverse.to(dtype=orig_dtype)
 
+
 def vectorize(
     g: Dict[str, torch.Tensor],
     batch_dim: Optional[bool] = True,
