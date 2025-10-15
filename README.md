@@ -46,7 +46,7 @@ In these settings, the LDS results and the models are provided by dattri, so we 
 2. Attribution:
 	```bash
 	for PROJ_DIM in "2048" "4096" "8192" ; do
-		for PROJ_METHOD in "Random" "SelectiveMask" "SJLT" "FJLT" "Gaussian"; do
+		for PROJ_METHOD in "RandomMask" "SelectiveMask" "SJLT" "FJLT" "Gaussian"; do
 			python score.py \
 				--device "cuda:0" \
 				--proj_method $PROJ_METHOD \
