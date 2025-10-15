@@ -198,13 +198,10 @@ Here, we provide an example for `cache` and `attribute`:
 
 If you find this repository valuable, please give it a star! Got any questions or feedback? Feel free to open an issue. Using this in your work? Please reference us using the provided citation:
 ```bibtex
-@misc{hu2025grass,
-  author        = {Pingbang Hu and Joseph Melkonian and Weijing Tang and Han Zhao and Jiaqi W. Ma},
-  title         = {GraSS: Scalable Influence Function with Sparse Gradient Compression},
-  archiveprefix = {arXiv},
-  eprint        = {2505.18976},
-  primaryclass  = {cs.LG},
-  url           = {https://arxiv.org/abs/2505.18976},
-  year          = {2025}
+@inproceedings{hu2025grass,
+  author    = {Pingbang Hu and Joseph Melkonian and Weijing Tang and Han Zhao and Jiaqi W. Ma},
+  title     = {GraSS: Scalable Influence Function with Sparse Gradient Compression},
+  booktitle = {Advances in Neural Information Processing Systems},
+  year      = {2025}
 }
 ```
