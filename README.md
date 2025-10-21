@@ -1,6 +1,6 @@
 # GraSS 🌿
 
-This is the official implementation of [GraSS: Scalable Influence Function with Sparse Gradient Compression](https://arxiv.org/abs/2505.18976v1).
+This is the official implementation of [GraSS: Scalable Data Attribution with Gradient Sparsification and Sparse Projection](https://arxiv.org/abs/2505.18976).
 
 ## Setup Guide
 
