@@ -200,7 +200,7 @@ If you find this repository valuable, please give it a star! Got any questions o
 ```bibtex
 @inproceedings{hu2025grass,
   author    = {Pingbang Hu and Joseph Melkonian and Weijing Tang and Han Zhao and Jiaqi W. Ma},
-  title     = {GraSS: Scalable Influence Function with Sparse Gradient Compression},
+  title     = {GraSS: Scalable Data Attribution with Gradient Sparsification and Sparse Projection},
   booktitle = {Advances in Neural Information Processing Systems},
   year      = {2025}
 }
