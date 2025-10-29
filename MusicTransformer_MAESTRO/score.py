@@ -253,12 +253,12 @@ def main():
         "proj_time": proj_time,
     }
 
-    # if args.localization > 0:
-    #     torch.save(result, f"./results/Loc-{args.localization}_{args.proj_method}-{args.proj_dim}.pt")
-    # elif args.random > 0:
-    #     torch.save(result, f"./results/Rand-{args.random}_{args.proj_method}-{args.proj_dim}.pt")
-    # else:
-    #     torch.save(result, f"./results/{args.proj_method}-{args.proj_dim}.pt")
+    if args.localization > 0:
+        torch.save(result, f"./results/Loc-{args.localization}_{args.proj_method}-{args.proj_dim}.pt")
+    elif args.random > 0:
+        torch.save(result, f"./results/Rand-{args.random}_{args.proj_method}-{args.proj_dim}.pt")
+    else:
+        torch.save(result, f"./results/{args.proj_method}-{args.proj_dim}.pt")
 
 if __name__ == "__main__":
     main()

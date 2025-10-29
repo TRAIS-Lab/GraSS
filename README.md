@@ -21,9 +21,6 @@ The folders either correspond to *libraries* or *experiments*; specifically, the
 
 We provide the scripts for the experiments.
 
-> [!Note]
-> Note that in the codebase, we call *Random Mask* as *Random*.
-
 ### MLP+MNIST/ResNet+CIFAR/MusicTransformer+MAESTRO
 
 In these settings, the LDS results and the models are provided by dattri, so we don't need to train models ourselves. To obtain all the results for, e.g., MLP+MNIST, run the following scripts:
@@ -117,7 +114,7 @@ For GPT2 experiments, since the LDS result and the fine-tuned models are not ava
 			--n 200
 	done
 	```
-4. Attribution: The following is an example for FactGraSS. To test other compression method, e.g., LoGra, simply remove `--sparsification Random-128*128` and change `--projection SJLt-4096` to `--projection Gaussian-64*64`.
+4. Attribution: The following is an example for FactGraSS. To test other compression method, e.g., LoGra, simply remove `--sparsification RandomMask-128*128` and change `--projection SJLT-4096` to `--projection Gaussian-64*64`.
 	```bash
 	python score.py\
 		--dataset_name "wikitext" \
@@ -130,7 +127,7 @@ For GPT2 experiments, since the LDS result and the fine-tuned models are not ava
 		--baseline "GC" \
 		--tda "IF-RAW" \
 		--layer "Linear" \
-		--sparsification Random-128*128 \
+		--sparsification RandomMask-128*128 \
 		--projection SJLT-4096 \
 		--val_ratio 0.1 \
 		--profile
@@ -166,7 +163,7 @@ Here, we provide an example for `cache` and `attribute`:
 		--baseline "GC" \
 		--tda "IF-RAW" \
 		--layer "Linear" \
-		--sparsification "Random-128*128" \
+		--sparsification "RandomMask-128*128" \
 		--projection "SJLT-4096" \
 		--mode "cache" \ # or ifvp
 		--cache_dir "./cache/" \
@@ -187,7 +184,7 @@ Here, we provide an example for `cache` and `attribute`:
 		--baseline "GC" \
 		--tda "IF-RAW" \
 		--layer "Linear" \
-		--sparsification "Random-128*128" \
+		--sparsification "RandomMask-128*128" \
 		--projection "SJLT-4096" \
 		--mode "attribute" \ # or precondition
 		--cache_dir "./cache/" \
