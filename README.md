@@ -3,11 +3,11 @@
 This is the official implementation of [GraSS: Scalable Data Attribution with Gradient Sparsification and Sparse Projection](https://arxiv.org/abs/2505.18976).
 
 > [!Note]
-> This repository is built upon the old version of [dattri](https://github.com/TRAIS-Lab/dattri). We have modified several parts of dattri to accommodate our GraSS and FactGraSS method. In this regards, this repo's code is not cleanly organized and only serves the purpose of reproducing the results in our paper. For a cleaner and more organized implementation of GraSS and FactGraSS, please refer to the latest version of [dattri](https://github.com/TRAIS-Lab/dattri).
+> This repository is built upon the old version of [dattri](https://github.com/TRAIS-Lab/dattri). We have modified several parts of dattri to accommodate our GraSS and FactGraSS method. In this regard, this repo's code is not cleanly organized and only serves the purpose of reproducing the results in our paper. For a cleaner and more organized implementation of GraSS and FactGraSS, please refer to the latest version of dattri.
 
 ## Setup Guide
 
-Please follow the installation guide from [dattri](https://github.com/TRAIS-Lab/dattri) in order to correctly install `fast_jl`. In addition, also install the [`sjlt` library](https://github.com/TRAIS-Lab/sjlt/tree/main) following the installation guide.
+Please follow the installation guide from [dattri](https://github.com/TRAIS-Lab/dattri). In addition, also install the [`sjlt` library](https://github.com/TRAIS-Lab/sjlt/tree/main) and [`fast_jl`](https://pypi.org/project/fast-jl/) following the installation guide.
 
 By installing dattri, all the basic libraries will also be installed, and you should be able to run all experiments *except for LM-related* ones such as GPT2 and Llama3-8B. For those, you'll need to install the usual Hugging Face libraries such as `transformers`, `datasets`, etc.
 
