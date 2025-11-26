@@ -32,7 +32,7 @@ The repository is organized as follows:
    - Noticeable modifications include `fast_jl` and Selective Mask supports. where the former is now removed from dattri, while the latter is specific to this project.
 2. `_SelectiveMask/`: The implementation of **Selective Mask** for learning important gradient dimensions.
 3. `_LogIX/`: The [LogIX](https://github.com/logix-project/logix) library for cross-validation (comparison baseline).
-   - Some customization is done in order to support newest huggingface Trainer API and other needs of this project.
+   - Some customization is done to support the newest Huggingface Trainer API and other needs of this project.
 
 ### Experiments
 
@@ -48,15 +48,15 @@ The repository is organized as follows:
 
 The following projection types are supported (use lowercase in command line arguments):
 
-| Type          | Description                              |
-| ------------- | ---------------------------------------- |
-| `normal`      | Gaussian random projection               |
-| `rademacher`  | Rademacher random projection             |
-| `sjlt`        | Sparse Johnson-Lindenstrauss Transform   |
-| `fjlt`        | Fast Johnson-Lindenstrauss Transform     |
-| `random_mask` | Random feature mask selection            |
-| `grass`       | GraSS projection (random_mask + SJLT)    |
-| `identity`    | No projection (keep original dimensions) |
+| Type          | Description                            |
+| ------------- | -------------------------------------- |
+| `normal`      | Gaussian random projection             |
+| `rademacher`  | Rademacher random projection           |
+| `sjlt`        | Sparse Johnson-Lindenstrauss Transform |
+| `fjlt`        | Fast Johnson-Lindenstrauss Transform   |
+| `random_mask` | Random feature mask selection          |
+| `grass`       | GraSS projection                       |
+| `identity`    | No projection                          |
 
 ### Hessian Types (for Influence Function)
 
