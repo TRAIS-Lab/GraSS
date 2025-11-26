@@ -99,7 +99,6 @@ GPT2 requires training multiple models for LDS ground truth computation. See `GP
 Example compression configurations:
 - **FactGraSS**: `--sparsification random_mask-128*128 --projection sjlt-4096`
 - **LoGra**: `--sparsification normal-64*64 --projection identity`
-- **GraSS**: `--sparsification identity --projection grass-4096`
 
 ### Llama3-8B+OpenWebText
 
