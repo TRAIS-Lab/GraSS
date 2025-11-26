@@ -35,11 +35,10 @@ from pathlib import PosixPath
 import time
 
 import sys
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.append(parent_dir)
 
-# setting CUDA_LAUNCH_BLOCKING=1
-# os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+# Add parent directory to path for _dattri import
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, parent_dir)
 
 import datasets
 import torch
@@ -67,7 +66,7 @@ from transformers.utils.versions import require_version
 
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-# check_min_version("4.46.0")
+check_min_version("4.46.0")
 
 logger = get_logger(__name__)
 
@@ -302,14 +301,15 @@ def parse_args():
     parser.add_argument(
         "--baseline",
         type=str,
-        default="GC",
-        help="Specify which baseline library implementation we want to run the data attribution method. Available options: GC, LoGra, dattri.",
+        default="dattri",
+        help="Specify which baseline library implementation we want to run the data attribution method. Available options: dattri, LogIX.",
     )
     parser.add_argument(
-        "--tda",
+        "--hessian",
         type=str,
-        default="IF-GC",
-        help="Specify which mode we want to run the data attribution method. Available options: IF-{GC,LoGra}, GD-{IF,dattri}, TRAK-{dattri}.",
+        default="eFIM",
+        choices=["eFIM", "ekfac", "Identity"],
+        help="Hessian approximation type. eFIM: empirical Fisher, ekfac: EK-FAC, Identity: no Hessian.",
     )
     parser.add_argument(
         "--layer",
@@ -318,21 +318,16 @@ def parse_args():
         help="Layer used for attribution.",
     )
     parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Debug mode.",
-    )
-    parser.add_argument(
         "--projection",
         type=str,
-        default=None,
-        help="The projection method to be used when attributing. Basic format: 'proj_method-proj_dim' for non-factorized gradient and 'proj_method-proj_dim*proj_dim' for factorized gradient.",
+        default="identity",
+        help="Projection (Stage 2): non-factorized compression. Format: 'TYPE-DIM' (e.g., 'sjlt-4096'). Types: normal, rademacher, sjlt, fjlt, random_mask, selective_mask, grass, grass_N, selective_grass, selective_grass_N, identity.",
     )
     parser.add_argument(
         "--sparsification",
         type=str,
-        default=None,
-        help="The first stage of the gradient compression algorithm. Basic format: ''sparsification_method-proj_dim' for non-factorized gradient and 'sparsification_method-proj_dim*proj_dim' for factorized gradient.",
+        default="identity",
+        help="Sparsification (Stage 1): factorized compression. Format: 'TYPE-DIM*DIM' (e.g., 'random_mask-128*128'). Types: normal, rademacher, sjlt, fjlt, random_mask, grass, grass_N, selective_grass, selective_grass_N, identity.",
     )
     parser.add_argument(
         "--val_ratio",
@@ -612,10 +607,6 @@ def main():
     test_dataset = lm_datasets["validation"]
     train_batch_size, test_batch_size = 32, 32
 
-    if args.debug: # toy dataset
-        train_dataset = train_dataset.select(range(32))
-        test_dataset = test_dataset.select(range(20))
-
     # Split test dataset into validation and test
     val_dataset, new_test_dataset, val_indices, test_indices = create_validation_split(
         test_dataset, val_ratio=args.val_ratio, seed=args.seed
@@ -652,46 +643,74 @@ def main():
     logger.info(f"The test dataset length: {len(test_dataset)}.")
     logger.info(f"The train batch size: {train_batch_size}")
     logger.info(f"The test batch size: {test_batch_size}")
-    logger.info(f"TDA Method: {args.baseline}-{args.tda}")
+    logger.info(f"TDA Method: {args.baseline}, Hessian: {args.hessian}")
     logger.info(f"Sparsifier: {sparsifier_kwargs}")
     logger.info(f"Projector: {projector_kwargs}")
     logger.info(f"Layer: {args.layer}")
     logger.info("***** Running attribution *****")
 
     profile = None
-    if args.baseline == "GC":
-        check_min_version("4.46.0")
-        from _GradComp.utils.common import find_layers
-        from _GradComp.attributor.attributor import IFAttributor
+    if args.baseline == "dattri":
+        from _dattri.algorithm import BlockProjectedIFAttributor
+        from _dattri.task import AttributionTask
+        import torch.nn as nn
 
-        # get which Hessian to use
-        tda, hessian = args.tda.split("-")
-        hessian = hessian.lower()
-        assert tda == "IF", "GradComp only supports Influence Function now."
+        # Use hessian type directly (already in dattri naming convention)
 
         model_id = 0
         checkpoint = f"{args.output_dir}/{model_id}"
+
+        # Define loss function for dattri
+        def loss_func(model_inst, batch, dev):
+            inputs = {k: v.to(dev) for k, v in batch.items()}
+            outputs = model_inst(**inputs)
+            return outputs.loss
+
+        def m(model_inst, batch, dev):
+            inputs = {k: v.to(dev) for k, v in batch.items()}
+            outputs = model_inst(**inputs)
+            logp = -outputs.loss
+            return logp - torch.log(1 - torch.exp(logp))
+
+        # Define checkpoint loader
+        def checkpoints_load_func(model_instance, checkpoint_path):
+            model_instance = AutoModelForCausalLM.from_pretrained(checkpoint_path).to(device)
+            model_instance.eval()
+            return replace_conv1d_modules(model_instance)
+
+        # Load model and find layer names
         model = AutoModelForCausalLM.from_pretrained(checkpoint)
         model = replace_conv1d_modules(model)
-        layer_names = find_layers(model, args.layer, return_type="name")
+        layer_names = [
+            name for name, module in model.named_modules()
+            if isinstance(module, nn.Linear)
+        ] if args.layer == "Linear" else None
 
-        attributor = IFAttributor(
-            setting="GPT2_wikitext",
+        # Create attribution task
+        task = AttributionTask(
             model=model,
+            loss_func=loss_func,
+            checkpoints=checkpoint,
+            target_func=m,
+            checkpoints_load_func=checkpoints_load_func,
+        )
+
+        attributor = BlockProjectedIFAttributor(
+            task=task,
             layer_names=layer_names,
-            hessian=hessian,
-            profile=args.profile,
+            hessian=args.hessian,
+            damping=None,
             device=device,
             sparsifier_kwargs=sparsifier_kwargs,
             projector_kwargs=projector_kwargs,
-            offload="disk",
-            cache_dir="./GradComp/cache"
+            offload="disk", # for comparison with LogIX, can be safely changed to "cpu"
+            cache_dir=f"./dattri/{args.sparsification}->{args.projection}"
         )
 
         # Measure cache throughput
         torch.cuda.synchronize(device)
         cache_start_time = time.time()
-        attributor.cache_gradients(train_dataloader=train_dataloader)
+        attributor.cache(train_dataloader)
         torch.cuda.synchronize(device)
         cache_end_time = time.time()
 
@@ -701,14 +720,12 @@ def main():
             logger.info(f"Evaluating damping = {damping}")
 
             # Compute preconditioners for current damping
+            attributor.damping = damping
             attributor.compute_preconditioners(damping=damping)
             attributor.compute_ifvp()
 
             # Evaluate on validation set
-            if args.profile:
-                val_score, profile = attributor.attribute(test_dataloader=val_dataloader)
-            else:
-                val_score = attributor.attribute(test_dataloader=val_dataloader)
+            val_score = attributor.attribute(train_dataloader, val_dataloader)
             # Calculate LDS for validation set
             val_lds_score = split_lds(val_score, training_setting, val_indices, original_test_len)
             validation_results[damping] = val_lds_score
@@ -732,30 +749,25 @@ def main():
         attribute_start_time = time.time()
 
         # Compute preconditioners for best damping value
+        attributor.damping = best_damping
         attributor.compute_preconditioners(damping=best_damping)
         attributor.compute_ifvp()
 
         # Measure attribute throughput
         torch.cuda.synchronize(device)
         attribute_start_time = time.time()
-        if args.profile:
-            score, profile = attributor.attribute(test_dataloader=test_dataloader)
-        else:
-            score = attributor.attribute(test_dataloader=test_dataloader)
+        score = attributor.attribute(train_dataloader, test_dataloader)
         torch.cuda.synchronize(device)
         attribute_end_time = time.time()
 
     elif args.baseline == "LogIX":
-        #check_min_version("4.46.0") # LogIX is built on top of 4.40.0, ignore the checking
         from _LogIX.huggingface import LogIXArguments, patch_trainer
 
-        # get which Hessian to use
-        tda, hessian = args.tda.split("-")
-        hessian = hessian.lower()
-        assert tda == "IF", "LogIX only supports Influence Function now."
-        assert hessian in ["none", "raw", "kfac", "ekfac"], "Invalid Hessian type."
+        # Map dattri hessian naming to LogIX naming
+        logix_hessian_mapping = {"eFIM": "raw", "ekfac": "ekfac", "Identity": "none"}
+        logix_hessian = logix_hessian_mapping.get(args.hessian, "none")
         assert args.layer == "Linear", "LogIX only supports Linear setting now."
-        assert args.projection is not None, "LogIX requires projection method."
+        assert args.sparsification != "identity", "LogIX requires sparsification method."
 
         LogIXTrainer = patch_trainer(transformers.Trainer)
 
@@ -768,10 +780,10 @@ def main():
         model.eval()
 
         logix_args_train = LogIXArguments(
-            project=f"./LogIX/{args.projection}",
-            config=f"./LogIX/{args.projection}.yaml",
+            project=f"./LogIX/{args.sparsification}",
+            config=f"./LogIX/{args.sparsification}.yaml",
             lora=True,
-            hessian=hessian,
+            hessian=logix_hessian,
             save="grad",
             train_data=True,
             label_key="input_ids",
@@ -804,10 +816,10 @@ def main():
         model = model.to(device)
         model.eval()
         logix_args_test = LogIXArguments(
-            project=f"./LogIX/{args.projection}",
-            config=f"./LogIX/{args.projection}.yaml",
+            project=f"./LogIX/{args.sparsification}",
+            config=f"./LogIX/{args.sparsification}.yaml",
             lora=True,
-            hessian=hessian,
+            hessian=logix_hessian,
             save="grad",
             train_data=False,
             label_key="input_ids",
@@ -839,106 +851,8 @@ def main():
 
         score = result["influence"].T
 
-    elif args.baseline == "dattri":
-        check_min_version("4.46.0")
-        # new dattri library
-        from dattri.algorithm import BlockProjectedIFAttributor
-        from dattri.task import AttributionTask
-        import torch.nn as nn
-
-        # get which Hessian to use
-        tda, hessian = args.tda.split("-")
-        hessian = hessian.upper()  # dattri uses "Identity" or "eFIM"
-        if hessian == "RAW":
-            hessian = "eFIM"
-        assert tda == "IF", "dattri baseline only supports Influence Function now."
-        assert args.layer == "Linear", "dattri baseline only supports Linear layers now."
-
-        model_id = 0
-        checkpoint = f"{args.output_dir}/{model_id}"
-
-        # Define loss function for dattri
-        def loss_func(model, batch, device):
-            inputs = {k: v.to(device) for k, v in batch.items()}
-            outputs = model(**inputs)
-            return outputs.loss
-
-        def m(model, batch, device):
-            inputs = {k: v.to(device) for k, v in batch.items()}
-            outputs = model(**inputs)
-            logp = -outputs.loss
-            return logp - torch.log(1 - torch.exp(logp))
-
-        # Define checkpoint loader
-        def checkpoints_load_func(model_instance, checkpoint_path):
-            model_instance = AutoModelForCausalLM.from_pretrained(checkpoint_path).to(device)
-            model_instance.eval()
-            return replace_conv1d_modules(model_instance)
-
-        # Load model and find layer names
-        model = AutoModelForCausalLM.from_pretrained(checkpoint)
-        model = replace_conv1d_modules(model)
-        layer_names = [
-            name for name, module in model.named_modules()
-            if isinstance(module, nn.Linear)
-        ]
-
-        # Create attribution task
-        task = AttributionTask(
-            model=model,
-            loss_func=loss_func,
-            checkpoints=checkpoint,
-            target_func=m,
-            checkpoints_load_func=checkpoints_load_func,
-        )
-
-        # Convert kwargs format: GradComp uses "method", dattri uses "proj_type"
-        def convert_kwargs_to_dattri(kwargs):
-            if kwargs is None:
-                return None
-            dattri_kwargs = kwargs.copy()
-            if "method" in dattri_kwargs:
-                method = dattri_kwargs.pop("method")
-                # Map method names: Normal -> normal, Identity -> identity, etc.
-                dattri_kwargs["proj_type"] = method.lower()
-            if "use_half_precision" in dattri_kwargs:
-                dattri_kwargs.pop("use_half_precision")
-            if "proj_factorize" in dattri_kwargs:
-                dattri_kwargs.pop("proj_factorize")  # dattri handles factorization internally
-            return dattri_kwargs
-
-        dattri_sparsifier_kwargs = convert_kwargs_to_dattri(sparsifier_kwargs)
-        dattri_projector_kwargs = convert_kwargs_to_dattri(projector_kwargs)
-
-        # Create BlockProjectedIFAttributor
-        attributor = BlockProjectedIFAttributor(
-            task=task,
-            layer_names=layer_names,
-            hessian=hessian,
-            damping=1e0,  # Fixed damping, no cross-validation
-            device=device,
-            sparsifier_kwargs=dattri_sparsifier_kwargs,
-            projector_kwargs=dattri_projector_kwargs,
-            offload="disk",
-            cache_dir=f"./dattri/{args.projection}"
-        )
-
-        # Measure cache throughput
-        torch.cuda.synchronize(device)
-        cache_start_time = time.time()
-        attributor.cache(train_dataloader)
-        torch.cuda.synchronize(device)
-        cache_end_time = time.time()
-
-        # Measure attribute throughput
-        torch.cuda.synchronize(device)
-        attribute_start_time = time.time()
-        score = attributor.attribute(train_dataloader, test_dataloader)
-        torch.cuda.synchronize(device)
-        attribute_end_time = time.time()
-
     else:
-        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'dattri'.")
+        raise ValueError("Invalid baseline implementation method. Choose from 'dattri', 'LogIX'.")
 
     # Calculate throughput
     train_tokens = block_size * len(train_dataset)
@@ -967,8 +881,9 @@ def main():
     result = {"score": score, "lds": lds_score, "profile": profile, "throughput": throughput_stats, "best_damping": best_damping}
     logger.info(result)
 
-    if not args.debug: # only save the results when not in debug mode
-        torch.save(result, result_filename(args))
+    result_path = result_filename(args)
+    os.makedirs(os.path.dirname(result_path), exist_ok=True)
+    torch.save(result, result_path)
 
 if __name__ == "__main__":
     main()

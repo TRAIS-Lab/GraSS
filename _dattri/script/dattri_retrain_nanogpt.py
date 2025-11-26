@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 def retrain(  # noqa:PLR0912
@@ -48,10 +48,10 @@ def retrain(  # noqa:PLR0912
 
     if only_download:
         info_msg = f"Dataset is downloaded to {dataset_path}. Exiting."
-        logging.info(info_msg)
+        logger.info(info_msg)
         return
 
-    import dattri
+    import _dattri
 
     os.chdir(Path(dattri.__file__).parent / Path("benchmark/models/nanoGPT"))
     config = Path(config_path).read_text(encoding="utf-8").splitlines()
@@ -136,7 +136,7 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    import dattri
+    import _dattri
 
     args.config_path = Path(dattri.__file__).parent / Path(
         f"benchmark/models/nanoGPT/config/train_{args.dataset}.py",

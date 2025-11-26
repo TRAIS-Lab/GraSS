@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from ...models.logistic_regression import (
+from _dattri.benchmark.models.logistic_regression import (
     LogisticRegressionMnist,
     create_lr_model,
 )

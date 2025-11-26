@@ -2,202 +2,119 @@
 
 This is the official implementation of [GraSS: Scalable Data Attribution with Gradient Sparsification and Sparse Projection](https://arxiv.org/abs/2505.18976).
 
-> [!Note]
-> This repository is built upon the old version of [dattri](https://github.com/TRAIS-Lab/dattri). We have modified several parts of dattri to accommodate our GraSS and FactGraSS method, specifically, Selective Mask.
-> Hence, this repo is not cleanly organized and only serves the purpose of reproducing the results in our paper. For a cleaner and more organized implementation of GraSS and FactGraSS, please refer to the latest version of dattri.
-
 ## Setup Guide
 
-Please follow the installation guide from [dattri](https://github.com/TRAIS-Lab/dattri). In addition, also install the [`sjlt` library](https://github.com/TRAIS-Lab/sjlt/tree/main) and [`fast_jl`](https://pypi.org/project/fast-jl/) following the installation guide.
+It's **not** required to follow the exact same steps in this section. But this is a verified environment setup flow that may help users to avoid most of the issues during the installation.
 
-By installing dattri, all the basic libraries will also be installed, and you should be able to run all experiments *except for LM-related* ones such as GPT2 and Llama3-8B. For those, you'll need to install the usual Hugging Face libraries such as `transformers`, `datasets`, etc.
+```bash
+conda create -n GraSS python=3.10
+conda activate GraSS
+
+conda install -c "nvidia/label/cuda-12.4.0" cuda-toolkit
+pip3 install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+
+pip install sjlt --no-build-isolation
+pip install fast_jl --no-build-isolation
+
+pip install -r requirements.txt
+```
+
+> [!Note]
+> The two projection CUDA kernels, [`sjlt`](https://github.com/TRAIS-Lab/sjlt/tree/main) and [`fast_jl`](https://pypi.org/project/fast-jl/), sometimes can be tricky to install due to the CUDA version mismatch. If you encounter any issues during their installation, please refer to [`sjlt`](https://github.com/TRAIS-Lab/sjlt/tree/main)'s repository for troubleshooting.
 
 ## File Structure
 
-The folders either correspond to *libraries* or *experiments*; specifically, the ones starting with `_` are *libraries* (or baselines) that implement the data attribution algorithms, while others correspond to *experiments*. In particular, there are four libraries:
+The repository is organized as follows:
 
-1. `_GradComp`: The main implementation supports influence function with linear layer's gradient factorized compression. In particular, the baseline **LoGra** and our proposed method, **FactGraSS**.
-2. `_SelectiveMask`: The implementation of **Selective Mask**.
-3. `_dattri`: The [dattri](https://github.com/TRAIS-Lab/dattri) library with **GraSS** implementations in `_dattri/func/projection.py`.
-4. `_LogIX`: The [LogIX](https://github.com/logix-project/logix) library with some efficiency fixes to cross-validate our LoGra implementation.
+### Libraries
+
+1. `_dattri/`: A local copy of the [dattri](https://github.com/TRAIS-Lab/dattri) library (based on commit [`7576361`](https://github.com/TRAIS-Lab/dattri/commit/7576361284cc4dcce35248bbb4ef0ae69e99041f)) with **GraSS**, **FactGraSS**, and **BlockProjectedIFAttributor** implementations (no separate installation required).
+   - Noticeable modifications include `fast_jl` and Selective Mask supports. where the former is now removed from dattri, while the latter is specific to this project.
+2. `_SelectiveMask/`: The implementation of **Selective Mask** for learning important gradient dimensions.
+3. `_LogIX/`: The [LogIX](https://github.com/logix-project/logix) library for cross-validation (comparison baseline).
+   - Some customization is done in order to support newest huggingface Trainer API and other needs of this project.
+
+### Experiments
+
+- `MLP_MNIST/`: Small-scale MLP on MNIST experiment
+- `ResNet_CIFAR/`: Medium-scale ResNet9 on CIFAR-2 experiment
+- `MusicTransformer_MAESTRO/`: MusicTransformer on MAESTRO experiment
+- `GPT2_wikitext/`: GPT-2 on WikiText-2 experiment
+- `Llama3_8B_OWT/`: Llama3-8B on OpenWebText experiment
+
+## API Reference
+
+### Projection Types
+
+The following projection types are supported (use lowercase in command line arguments):
+
+| Type          | Description                              |
+| ------------- | ---------------------------------------- |
+| `normal`      | Gaussian random projection               |
+| `rademacher`  | Rademacher random projection             |
+| `sjlt`        | Sparse Johnson-Lindenstrauss Transform   |
+| `fjlt`        | Fast Johnson-Lindenstrauss Transform     |
+| `random_mask` | Random feature mask selection            |
+| `grass`       | GraSS projection (random_mask + SJLT)    |
+| `identity`    | No projection (keep original dimensions) |
+
+### Hessian Types (for Influence Function)
+
+| Type       | Description                              |
+| ---------- | ---------------------------------------- |
+| `eFIM`     | Empirical Fisher Information Matrix      |
+| `Identity` | No Hessian approximation (raw gradients) |
+
+### Command Line Format
+
+```bash
+# Sparsification (Stage 1): TYPE-DIM*DIM for factorized
+--sparsification random_mask-128*128
+
+# Projection (Stage 2): TYPE-DIMENSION
+--projection sjlt-4096
+
+# Hessian type for Influence Function
+--hessian eFIM   # or Identity
+```
 
 ## Quick Start
 
-We provide the scripts for the experiments.
+Each experiment folder contains a `job/` directory with SLURM job scripts. These scripts provide complete examples for running the experiments.
 
-### MLP+MNIST/ResNet+CIFAR/MusicTransformer+MAESTRO
+### Small/Medium-Scale Experiments
 
-In these settings, the LDS results and the models are provided by dattri, so we don't need to train models ourselves. To obtain all the results for, e.g., MLP+MNIST, run the following scripts:
-
-1. Selective Mask:
-	```bash
-	for PROJ_DIM in "2048" "4096" "8192" ; do
-		python SelectiveMask.py \
-			--device "cuda:0" \
-			--sparsification_dim $PROJ_DIM \
-			--epoch 5000 \
-			--n 5000 \
-			--log_interval 500 \
-			--learning_rate 5e-5 \
-			--regularization 1e-6 \
-			--early_stop 0.9 \
-			--output_dir "./SelectiveMask"
-	done
-	```
-2. Attribution:
-	```bash
-	for PROJ_DIM in "2048" "4096" "8192" ; do
-		for PROJ_METHOD in "RandomMask" "SelectiveMask" "SJLT" "FJLT" "Gaussian"; do
-			python score.py \
-				--device "cuda:0" \
-				--proj_method $PROJ_METHOD \
-				--proj_dim $PROJ_DIM \
-				--seed 22
-		done
-	done
-	```
+For **MLP+MNIST**, **ResNet+CIFAR**, and **MusicTransformer+MAESTRO**, the LDS ground truth and models are provided by dattri. See the `job/` folder in each experiment directory:
+- `score.slurm`: Main attribution experiments
+- `selective_mask.slurm`: Optional SelectiveMask training
 
 ### GPT2+Wikitext
 
-For GPT2 experiments, since the LDS result and the fine-tuned models are not available, we need to manually produce them first. Consider running the following scripts:
+GPT2 requires training multiple models for LDS ground truth computation. See `GPT2_wikitext/job/`:
+- `train.slurm`: Fine-tune 50 models with different random subsets
+- `groundtruth.slurm`: Compute LDS ground truth
+- `selective_mask.slurm`: Optional SelectiveMask training
+- `score.slurm`: Main attribution experiments
 
-1. Fine-tune 50 models:
-	```bash
-	# Loop over the task IDs
-	for SLURM_ARRAY_TASK_ID in {0..49}; do
-		echo "Starting task ID: $SLURM_ARRAY_TASK_ID"
-
-		# Set the output directory and seed based on the current task ID
-		OUTPUT_DIR="./checkpoints/default/${SLURM_ARRAY_TASK_ID}"
-		SEED=${SLURM_ARRAY_TASK_ID}
-
-		# Create the output directory
-		mkdir -p $OUTPUT_DIR
-
-		# Run the training script
-		python train.py \
-			--dataset_name "wikitext" \
-			--dataset_config_name "wikitext-2-raw-v1" \
-			--model_name_or_path "openai-community/gpt2" \
-			--output_dir $OUTPUT_DIR \
-			--block_size 512 \
-			--subset_ratio 0.5 \
-			--seed $SEED
-
-		echo "Task ID $SLURM_ARRAY_TASK_ID completed"
-	done
-	```
-2. Obtain groundtruth for computing LDS:
-	```bash
-	python groundtruth.py\
-		--dataset_name "wikitext" \
-		--dataset_config_name "wikitext-2-raw-v1" \
-		--model_name_or_path "openai-community/gpt2" \
-		--output_dir ./checkpoints \
-		--block_size 512 \
-		--seed 0
-	```
-3. Selective Mask training:
-	```bash
-	for PROJ_DIM in "32" "64" "128" ; do
-		python SelectiveMask.py\
-			--dataset_name "wikitext" \
-			--dataset_config_name "wikitext-2-raw-v1" \
-			--model_name_or_path "openai-community/gpt2" \
-			--output_dir "./checkpoints/default/" \
-			--block_size 512 \
-			--seed 0 \
-			--device "cuda:0" \
-			--layer "Linear" \
-			--sparsification_dim $PROJ_DIM \
-			--epoch 500 \
-			--learning_rate 1e-5 \
-			--regularization 5e-5 \
-			--early_stop 0.9 \
-			--log_interval 100 \
-			--n 200
-	done
-	```
-4. Attribution: The following is an example for FactGraSS. To test other compression method, e.g., LoGra, simply remove `--sparsification RandomMask-128*128` and change `--projection SJLT-4096` to `--projection Gaussian-64*64`.
-	```bash
-	python score.py\
-		--dataset_name "wikitext" \
-		--dataset_config_name "wikitext-2-raw-v1" \
-		--model_name_or_path "openai-community/gpt2" \
-		--output_dir "./checkpoints/default/" \
-		--block_size 512 \
-		--seed 0 \
-		--device "cuda:0" \
-		--baseline "GC" \
-		--tda "IF-RAW" \
-		--layer "Linear" \
-		--sparsification RandomMask-128*128 \
-		--projection SJLT-4096 \
-		--val_ratio 0.1 \
-		--profile
-	```
+Example compression configurations:
+- **FactGraSS**: `--sparsification random_mask-128*128 --projection sjlt-4096`
+- **LoGra**: `--sparsification normal-64*64 --projection identity`
+- **GraSS**: `--sparsification identity --projection grass-4096`
 
 ### Llama3-8B+OpenWebText
 
-For billion-scale model, since we do not need to do quantitative experiment, we do not need to fine-tune the model several times. Here, since this is a large scale experiment, we divide the attribution into several phases, specified by `--mode`. In order, the available options are `cache`, `precondition`, `ifvp`, `attribute`. Furthermore, for `cache` and `ifvp`, we provide a further `--worker` argument to parallelize the job by splitting the dataset among several job instances.
+For billion-scale models, no LDS ground truth is computed. The attribution pipeline uses phased execution. See `Llama3_8B_OWT/job/`:
+- `cache.slurm`: Cache gradients with SLURM array for parallelization (automatically computes preconditioners and IFVP when hessian="eFIM")
+- `attribute.slurm`: Final attribution computation
+- `selective_mask.slurm`: Optional SelectiveMask training
 
 > [!Note]
-> The complete order of the workflow is `cache`→`precondition`→`ifvp`→`attribute`.
-
-> [!Warning]
-> Please note that the default precision of the model is `bfloat16`, while the default precision of the projection is `float32`. You can change it by uncommenting the line with `#Add` in `projection.py` under `_GradComp/projection` and `_dattri/func`.
-
-Here, we provide an example for `cache` and `attribute`:
-
-1. `cache`/`ifvp`: For caching projected gradients and computing iFVP, we can parallelize via `--worker`. The following script submits 20 jobs to divide the dataset into 20 chunks:
-
-	```bash
-	#SBATCH -a 0-19
-
-	WORKER_ID=$SLURM_ARRAY_TASK_ID
-
-	python attribute.py \
-		--dataset_name "openwebtext" \
-		--trust_remote_code \
-		--model_name_or_path "meta-llama/Llama-3.1-8B-Instruct" \
-		--output_dir "./checkpoints" \
-		--block_size 1024 \
-		--seed 0 \
-		--device "cuda:0" \
-		--baseline "GC" \
-		--tda "IF-RAW" \
-		--layer "Linear" \
-		--sparsification "RandomMask-128*128" \
-		--projection "SJLT-4096" \
-		--mode "cache" \ # or ifvp
-		--cache_dir "./cache/" \
-		--worker "$WORKER_ID/20" \
-		--profile
-	```
-2. `attribute`/`precondition`: Computing preconditioners and also attributing do  not have the parallelization functionality. Simply removing `--worker` and change `--mode`:
-
-	```bash
-	python attribute.py \
-		--dataset_name "openwebtext" \
-		--trust_remote_code \
-		--model_name_or_path "meta-llama/Llama-3.1-8B-Instruct" \
-		--output_dir "./checkpoints" \
-		--block_size 1024 \
-		--seed 0 \
-		--device "cuda:0" \
-		--baseline "GC" \
-		--tda "IF-RAW" \
-		--layer "Linear" \
-		--sparsification "RandomMask-128*128" \
-		--projection "SJLT-4096" \
-		--mode "attribute" \ # or precondition
-		--cache_dir "./cache/" \
-		--profile
-	```
+> The `cache` mode automatically runs `compute_preconditioners()` and `compute_ifvp()` when using `--hessian eFIM`. The `--worker` argument enables parallelization for large-scale caching.
 
 ## Citation
 
 If you find this repository valuable, please give it a star! Got any questions or feedback? Feel free to open an issue. Using this in your work? Please reference us using the provided citation:
+
 ```bibtex
 @inproceedings{hu2025grass,
   author    = {Pingbang Hu and Joseph Melkonian and Weijing Tang and Han Zhao and Jiaqi W. Ma},

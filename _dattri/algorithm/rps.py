@@ -8,19 +8,19 @@ if TYPE_CHECKING:
     from torch import Tensor
     from torch.utils.data import DataLoader
 
-    from ..task import AttributionTask
+    from _dattri.task import AttributionTask
 
 import warnings
 
 import torch
 from torch.nn.functional import normalize
 
-from utils import (
+from _dattri.algorithm.utils import (
     _check_shuffle,
     get_rps_weight,
     rps_finetune_theta,
 )
-from ..model_util.hook import get_final_layer_io
+from _dattri.model_util.hook import get_final_layer_io
 
 from .base import BaseAttributor
 

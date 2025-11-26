@@ -90,51 +90,10 @@ def _vectorize(
     return arr
 
 
-def _get_parameter_chunk_sizes(
-    param_shape_list: List,
-    batch_size: int,
-) -> tuple[int, int]:
-    """Compute chunk size information from feature to be projected.
-
-    Get a tuple containing max chunk size and a list of the number of
-    parameters in each chunk.
-
-    Args:
-        param_shape_list (List): A list of numbers indicating the total number of
-            features to be projected. A typical example is a list of parameter
-            size of each module in a torch.nn.Module model.
-        batch_size (int): The batch size. Each term (or module) in feature
-            will have the same batch size.
-
-    Returns:
-        tuple[int, List[int]]: A tuple containing:
-            - Maximum number of parameters per chunk
-            - A list of the number of parameters in each chunk
-    """
-    # get the number of params of each term in feature
-    param_shapes = np.array(param_shape_list)
-
-    chunk_sum = 0
-    max_chunk_size = np.iinfo(np.uint32).max // batch_size
-    params_per_chunk = []
-
-    for ps in param_shapes:
-        if chunk_sum + ps >= max_chunk_size:
-            params_per_chunk.append(chunk_sum)
-            chunk_sum = 0
-
-        chunk_sum += ps
-
-    if param_shapes.sum() - np.sum(params_per_chunk) > 0:
-        params_per_chunk.append(param_shapes.sum() - np.sum(params_per_chunk))
-
-    return max_chunk_size, params_per_chunk
-
-
 def get_parameter_chunk_sizes(
     param_shape_list: List,
     batch_size: int,
-) -> tuple[int, int]:
+) -> tuple[int, List[int]]:
     """Compute chunk size information from feature to be projected.
 
     Get a tuple containing max chunk size and a list of the number of
@@ -152,14 +111,40 @@ def get_parameter_chunk_sizes(
             - Maximum number of parameters per chunk
             - A list of the number of parameters in each chunk
     """
-    # get the number of total params
-    param_num = param_shape_list[0]
+    param_shapes = np.array(param_shape_list)
 
-    max_chunk_size = np.iinfo(np.uint32).max // batch_size
+    max_chunk_size = np.iinfo(np.uint32).max // (batch_size * 8)
 
-    num_chunk = param_num // max_chunk_size
-    remaining = param_num % max_chunk_size
-    params_per_chunk = [max_chunk_size] * num_chunk + [remaining]
+    params_per_chunk = []
+    chunk_sum = 0
+
+    for ps in param_shapes:
+        # If adding the current param exceeds the max size,
+        # finalize the current chunk (if not empty) and start a new one.
+
+        current_ps = ps
+
+        if chunk_sum + current_ps >= max_chunk_size:
+            if chunk_sum > 0:
+                params_per_chunk.append(chunk_sum)
+            chunk_sum = 0  # Reset for new chunk
+
+        # Handle the case where a single param layer is
+        # larger than the max_chunk_size by splitting it.
+        while current_ps >= max_chunk_size:
+            params_per_chunk.append(max_chunk_size)
+            current_ps -= max_chunk_size
+
+        # Add the (remainder of) the current param to the chunk
+        chunk_sum += current_ps
+
+    # Add the final chunk if it has any params
+    if chunk_sum > 0:
+        params_per_chunk.append(chunk_sum)
+
+    # Handle edge case of no params
+    if not params_per_chunk:
+        params_per_chunk = [0]
 
     return max_chunk_size, params_per_chunk
 
@@ -189,69 +174,36 @@ def flatten_params(tensors: Dict[str, Tensor]) -> Tensor:
     )
 
 
-# def _unflatten_params(tensors: Tensor, model: torch.nn.Module) -> Dict[str, Tensor]:
-#     """Unflatten a single tensor into a dictionary of tensors.
-
-#     This is a reverse operation of flatten_params. The transforming could enable the
-#     following usage of `functional_call` function.
-
-#     Args:
-#         tensors (Tensor): A single tensor containing the flattened parameters.
-#         model (torch.nn.Module): A torch.nn.Module object providing shape
-#             information and parameter names.
-
-#     Returns:
-#         Dict[str, Tensor]: A dictionary of tensors (e.g., something similar to
-#             model.named_parameters()).
-
-#     Note:
-#         The returned value will use the `tensor` as the value of the dictionary, rather
-#         than directly returning model.named_parameters().
-#     """
-#     model_params = {k: p for k, p in model.named_parameters() if p.requires_grad}
-#     shape_list = [p.shape for p in model_params.values()]
-
-#     def generator() -> Tensor:
-#         current_index = 0
-#         for shape in shape_list:
-#             size = math.prod(shape)
-#             yield tensors[current_index : current_index + size].reshape(shape)
-#             current_index += size
-
-#     return dict(zip(model_params.keys(), generator()))
-
-
 def _unflatten_params(tensors: Tensor, model: torch.nn.Module) -> Dict[str, Tensor]:
-    """Unflatten tensors handling tied weights using model information."""
+    """Unflatten a single tensor into a dictionary of tensors.
+
+    This is a reverse operation of flatten_params. The transforming could enable the
+    following usage of `functional_call` function.
+
+    Args:
+        tensors (Tensor): A single tensor containing the flattened parameters.
+        model (torch.nn.Module): A torch.nn.Module object providing shape
+            information and parameter names.
+
+    Returns:
+        Dict[str, Tensor]: A dictionary of tensors (e.g., something similar to
+            model.named_parameters()).
+
+    Note:
+        The returned value will use the `tensor` as the value of the dictionary, rather
+        than directly returning model.named_parameters().
+    """
     model_params = {k: p for k, p in model.named_parameters() if p.requires_grad}
+    shape_list = [p.shape for p in model_params.values()]
 
-    # Get tied weights info
-    tied_weights_keys = getattr(model.__class__, '_tied_weights_keys', [])
-
-    # For GPT2, we know lm_head.weight is tied to transformer.wte.weight
-    # Filter out tied weights from parameter list
-    unique_params = {}
-    for name, param in model_params.items():
-        if name not in tied_weights_keys:
-            unique_params[name] = param
-
-    # Generate tensors for unique parameters
-    shape_list = [p.shape for p in unique_params.values()]
-    def generator():
+    def generator() -> Tensor:
         current_index = 0
         for shape in shape_list:
             size = math.prod(shape)
-            yield tensors[current_index:current_index + size].reshape(shape)
+            yield tensors[current_index : current_index + size].reshape(shape)
             current_index += size
 
-    # Create result dictionary
-    result = dict(zip(unique_params.keys(), generator()))
-
-    # Add tied parameters
-    if 'lm_head.weight' in tied_weights_keys:
-        result['lm_head.weight'] = result['transformer.wte.weight']
-
-    return result
+    return dict(zip(model_params.keys(), generator()))
 
 
 def _unflatten_params_layerwise(
@@ -300,7 +252,7 @@ def flatten_func(model: torch.nn.Module, param_num: int = 0) -> Callable:
         Args:
             function (Callable): The function to be wrapped.
 
-        returns:
+        Returns:
             Callable: A wrapped function that flattens the parameters at the
             specified index.
         """
@@ -349,7 +301,7 @@ def partial_param(
         Args:
             function: The function to be wrapped.
 
-        returns:
+        Returns:
             (Callable): A wrapped function that changes the parameters at the
                 specified index to require only some specific layers' parameters
         """

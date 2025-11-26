@@ -35,10 +35,10 @@ from pathlib import PosixPath
 import time
 
 import sys
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.append(parent_dir)
 
-# os.environ["TOKENIZERS_PARALLELISM"] = "1"
+# Add parent directory to path for _dattri import
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, parent_dir)
 
 import datasets
 import torch
@@ -65,7 +65,7 @@ from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-# check_min_version("4.46.0")
+check_min_version("4.46.0")
 
 logger = get_logger(__name__)
 
@@ -267,14 +267,15 @@ def parse_args():
     parser.add_argument(
         "--baseline",
         type=str,
-        default="GC",
-        help="Specify which baseline library implementation we want to run the data attribution method. Available options: GC, LoGra, dattri.",
+        default="dattri",
+        help="Specify which baseline library implementation we want to run the data attribution method. Available options: dattri, LogIX.",
     )
     parser.add_argument(
-        "--tda",
+        "--hessian",
         type=str,
-        default="IF-GC",
-        help="Specify which mode we want to run the data attribution method. Available options: IF-{GC,LoGra}, GD-{IF,dattri}, TRAK-{dattri}.",
+        default="eFIM",
+        choices=["eFIM", "ekfac", "Identity"],
+        help="Hessian approximation type. eFIM: empirical Fisher, ekfac: EK-FAC, Identity: no Hessian.",
     )
     parser.add_argument(
         "--layer",
@@ -289,21 +290,16 @@ def parse_args():
         help="Directory to store cache files"
     )
     parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Debug mode.",
-    )
-    parser.add_argument(
         "--projection",
         type=str,
-        default=None,
-        help="The projection method to be used when attributing. Basic format: 'proj_method-proj_dim' for non-factorized gradient and 'proj_method-proj_dim*proj_dim' for factorized gradient.",
+        default="identity",
+        help="Projection (Stage 2): non-factorized compression. Format: 'TYPE-DIM' (e.g., 'sjlt-4096'). Types: normal, rademacher, sjlt, fjlt, random_mask, selective_mask, grass, grass_N, selective_grass, selective_grass_N, identity.",
     )
     parser.add_argument(
         "--sparsification",
         type=str,
-        default=None,
-        help="The first stage of the gradient compression algorithm. Basic format: ''sparsification_method-proj_dim' for non-factorized gradient and 'sparsification_method-proj_dim*proj_dim' for factorized gradient.",
+        default="identity",
+        help="Sparsification (Stage 1): factorized compression. Format: 'TYPE-DIM*DIM' (e.g., 'random_mask-128*128'). Types: normal, rademacher, sjlt, fjlt, random_mask, grass, grass_N, selective_grass, selective_grass_N, identity.",
     )
     parser.add_argument(
         "--worker",
@@ -315,7 +311,12 @@ def parse_args():
         "--mode",
         type=str,
         default="cache",
-        help="The mode of the computation. Available options: 'cache', 'precondition', 'ifvp', 'self_influence', 'attribute', and 'quant'.",
+        help="The mode of the computation. Available options: 'cache', 'self_influence', 'attribute', and 'quant'. Note: 'cache' automatically runs preconditioners and IFVP when hessian='eFIM'.",
+    )
+    parser.add_argument(
+        "--throughput_test",
+        action="store_true",
+        help="Use a smaller dataset for throughput testing purposes.",
     )
 
     args = parser.parse_args()
@@ -463,38 +464,10 @@ def main():
             trust_remote_code=args.trust_remote_code,
         )
     elif args.model_name_or_path:
-        if args.baseline == "GC":
-            config = AutoConfig.from_pretrained(
-                args.model_name_or_path,
-                trust_remote_code=args.trust_remote_code,
-            )
-        elif args.baseline == "LogIX":
-            import json
-            from pathlib import Path
-            from transformers.models.llama.configuration_llama import LlamaConfig
-
-            # Path to your original config
-            model_name = "meta-llama/Llama-3.1-8B-Instruct"
-            cache_dir = "/work/10367/pbb/vista/.cache/hub"
-
-            # Get the config path directly
-            snapshot_path = Path(cache_dir) / "models--meta-llama--Llama-3.1-8B-Instruct/snapshots/0e9e39f249a16976918f6564b8830bc894c89659"
-            config_path = snapshot_path / "config.json"
-
-            # Load and modify the config
-            with open(config_path, 'r') as f:
-                config_dict = json.load(f)
-
-            # Fix the rope_scaling structure
-            if "rope_scaling" in config_dict:
-                factor = config_dict["rope_scaling"].get("factor", 1.0)
-                config_dict["rope_scaling"] = {
-                    "type": "linear",
-                    "factor": factor
-                }
-
-            # Create a LlamaConfig directly instead of using AutoConfig.from_dict
-            config = LlamaConfig(**config_dict)
+        config = AutoConfig.from_pretrained(
+            args.model_name_or_path,
+            trust_remote_code=args.trust_remote_code,
+        )
     else:
         config = CONFIG_MAPPING[args.model_type]()
         logger.warning("You are instantiating a new config instance from scratch.")
@@ -619,7 +592,7 @@ def main():
     train_batch_size, test_batch_size = 6, 6
 
     train_dataset = train_dataset.shuffle(seed=args.seed).select(range(int(1_000_000_000 / block_size)))
-    if args.debug: # toy dataset
+    if args.throughput_test:  # smaller dataset for throughput testing
         train_dataset = train_dataset.select(range(int(1_000_000 / block_size)))
 
 
@@ -635,7 +608,7 @@ def main():
     # Logging setting
     logger.info(f"The train dataset length: {len(train_dataset)}.")
     logger.info(f"The train batch size: {train_batch_size}")
-    logger.info(f"TDA Method: {args.baseline}-{args.tda}")
+    logger.info(f"TDA Method: {args.baseline}, Hessian: {args.hessian}")
     logger.info(f"Mode: {args.mode}")
     logger.info(f"Sparsifier: {sparsifier_kwargs}")
     logger.info(f"Projector: {projector_kwargs}")
@@ -644,50 +617,68 @@ def main():
     logger.info("***** Running attribution *****")
 
     score, profile = None, None
-    if args.baseline == "GC":
-        check_min_version("4.46.0")
-        from _GradComp.utils.common import find_layers
-        from _GradComp.attributor.attributor import IFAttributor
+    if args.baseline == "dattri":
+        from _dattri.algorithm import BlockProjectedIFAttributor
+        from _dattri.task import AttributionTask
+        import torch.nn as nn
 
-        # get which Hessian to use
-        tda, hessian = args.tda.split("-")
-        hessian = hessian.lower()
-        assert tda == "IF", "GradComp only supports Influence Function now."
+        # Use hessian type directly (already in dattri naming convention)
 
-        layer_names = find_layers(model, args.layer, return_type="name")
+        # Define loss function for dattri
+        def loss_func(model_inst, batch, dev):
+            inputs = {k: v.to(dev) for k, v in batch.items()}
+            outputs = model_inst(**inputs)
+            return outputs.loss
 
-        attributor = IFAttributor(
-            setting="Llama3_8B_OWT",
+        def m(model_inst, batch, dev):
+            inputs = {k: v.to(dev) for k, v in batch.items()}
+            outputs = model_inst(**inputs)
+            logp = -outputs.loss
+            return logp - torch.log(1 - torch.exp(logp))
+
+        # Define checkpoint loader
+        def checkpoints_load_func(model_instance, checkpoint_path):
+            model_instance = AutoModelForCausalLM.from_pretrained(
+                checkpoint_path,
+                torch_dtype=torch.bfloat16
+            ).to(device)
+            model_instance.eval()
+            return model_instance
+
+        # Find layer names
+        layer_names = [
+            name for name, module in model.named_modules()
+            if isinstance(module, nn.Linear)
+        ] if args.layer == "Linear" else None
+
+        # Create attribution task
+        task = AttributionTask(
             model=model,
+            loss_func=loss_func,
+            checkpoints=args.model_name_or_path,
+            target_func=m,
+            checkpoints_load_func=checkpoints_load_func,
+        )
+
+        # Create BlockProjectedIFAttributor
+        # sparsifier_kwargs and projector_kwargs are already in dattri format from setup_compression_kwargs
+        attributor = BlockProjectedIFAttributor(
+            task=task,
             layer_names=layer_names,
-            hessian=hessian,
-            profile=args.profile,
+            hessian=args.hessian,
+            damping=1e0,
             device=device,
             sparsifier_kwargs=sparsifier_kwargs,
             projector_kwargs=projector_kwargs,
             offload="disk",
             cache_dir=args.cache_dir,
-            chunk_size=16,
         )
 
         torch.cuda.synchronize(device)
         start_time = time.time()
 
         if args.mode == "cache":
-            result = attributor.cache_gradients(
-                    train_dataloader,
-                    worker=args.worker,
-                )
-            if args.profile:
-                profile = result[1]
-
-        elif args.mode == "precondition":
-            attributor.compute_preconditioners()
-
-        elif args.mode == "ifvp":
-            result = attributor.compute_ifvp(worker=args.worker)
-            if args.profile:
-                profile = result[1]
+            attributor.cache(train_dataloader)
 
         elif args.mode == "self_influence":
             score = attributor.compute_self_attribution()
@@ -701,15 +692,22 @@ def main():
                 shuffle=False
             )
 
-            result = attributor.attribute(test_dataloader=test_dataloader)
-            if args.profile:
-                score, profile = result
-            else:
-                score = result
+            score = attributor.attribute(train_dataloader, test_dataloader)
 
         elif args.mode == "quant":
+            # Load prompt dataset
+            prompt_dataset = FilePromptDataset("./prompts/", tokenizer, block_size)
+
+            # Load attribution scores from previous attribute run
+            # Construct the expected result path from attribute mode
+            worker_id, total_worker = args.worker.split('/')
+            score_path = f"./results/{args.baseline}/{args.hessian}/{args.layer}/{args.sparsification}->{args.projection}_attribute_worker{worker_id}_of_{total_worker}.pt"
+            logger.info(f"Loading attribution scores from {score_path}...")
+            saved_result = torch.load(score_path, map_location="cpu")
+            score = saved_result["score"]
+
             logger.info("Generating the response for each prompt...")
-            response_output_dir = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/response/")
+            response_output_dir = os.path.join(f"./results/{args.baseline}/{args.hessian}/{args.layer}/response/")
             generate_responses(
                 model,
                 tokenizer,
@@ -719,8 +717,8 @@ def main():
                 max_new_tokens=500
             )
 
-            logger.info(f"Retrieving the top 100 influential examples for each prompt...")
-            topk_output_dir = os.path.join(f"./results/{args.baseline}/{args.tda}/{args.layer}/topk/")
+            logger.info(f"Retrieving the top {5} influential examples for each prompt...")
+            topk_output_dir = os.path.join(f"./results/{args.baseline}/{args.hessian}/{args.layer}/topk/")
             retrieve_top_k(
                 score,
                 k=5,
@@ -730,34 +728,35 @@ def main():
                 output_dir=topk_output_dir
             )
         else:
-            raise ValueError("Invalid mode. Choose from 'cache', 'precondition', 'ifvp', 'self_influence', 'attribute', and 'quant'.")
+            raise ValueError("Invalid mode. Choose from 'cache', 'self_influence', 'attribute', and 'quant'.")
 
         torch.cuda.synchronize(device)
         end_time = time.time()
 
-    elif args.baseline == "LogIX": #Only used for comparing the throughput, so some of the code are sloppy (specifically, how we get the subset of dataloader)
+    elif args.baseline == "LogIX":  # Only used for comparing the throughput
         from _LogIX.huggingface import LogIXArguments, patch_trainer
 
-        # get which Hessian to use
-        tda, hessian = args.tda.split("-")
-        hessian = hessian.lower()
-        assert tda == "IF", "LogIX only supports Influence Function now."
-        assert hessian in ["none", "raw", "kfac", "ekfac"], "Invalid Hessian type."
+        # Map dattri hessian naming to LogIX naming
+        logix_hessian_mapping = {"eFIM": "raw", "ekfac": "ekfac", "Identity": "none"}
+        logix_hessian = logix_hessian_mapping.get(args.hessian, "none")
         assert args.layer == "Linear", "LogIX only supports Linear setting now."
-        assert args.projection is not None, "LogIX requires projection method."
+        assert args.sparsification != "identity", "LogIX requires sparsification method."
 
+        LogIXTrainer = patch_trainer(transformers.Trainer)
         model_cpy = model
-        if args.mode == "cache":
-            LogIXTrainer = patch_trainer(transformers.Trainer)
 
+        torch.cuda.synchronize(device)
+        start_time = time.time()
+
+        if args.mode == "cache":
             model = model.to(device)
             model.eval()
 
             logix_args_train = LogIXArguments(
-                project=f"./LogIX/{args.projection}",
-                config=f"./LogIX/{args.projection}.yaml",
+                project=f"./LogIX/{args.sparsification}",
+                config=f"./LogIX/{args.sparsification}.yaml",
                 lora=True,
-                hessian=hessian,
+                hessian=logix_hessian,
                 save="grad",
                 train_data=True,
                 label_key="input_ids",
@@ -776,26 +775,21 @@ def main():
                 args=training_args,
                 logix_args=logix_args_train,
             )
-            # Measure cache throughput
-            torch.cuda.synchronize(device)
-            cache_start_time = time.time()
             trainer.extract_log()
-            torch.cuda.synchronize(device)
-            cache_end_time = time.time()
 
-        model = model_cpy # Reset the model to the original one (removing LoRA)
-        if args.precondition:
-            raise NotImplementedError("Standalone Precondition is not implemented for LogIX.")
-
-        model = model_cpy # Reset the model to the original one (removing LoRA)
-        if args.attribute:
+        elif args.mode == "attribute":
+            model = model_cpy  # Reset the model to the original one (removing LoRA)
             model = model.to(device)
             model.eval()
+
+            # Create prompt dataset for attribution
+            prompt_dataset = FilePromptDataset("./prompts/", tokenizer, block_size)
+
             logix_args_test = LogIXArguments(
-                project=f"./LogIX/{args.projection}",
-                config=f"./LogIX/{args.projection}.yaml",
+                project=f"./LogIX/{args.sparsification}",
+                config=f"./LogIX/{args.sparsification}.yaml",
                 lora=True,
-                hessian=hessian,
+                hessian=logix_hessian,
                 save="grad",
                 train_data=False,
                 label_key="input_ids",
@@ -818,121 +812,17 @@ def main():
                 logix_args=logix_args_test,
             )
 
-            # Measure attribute throughput
-            torch.cuda.synchronize(device)
-            attribute_start_time = time.time()
             result = trainer.influence()
-            torch.cuda.synchronize(device)
-            attribute_end_time = time.time()
-
             score = result["influence"].T
 
-    elif args.baseline == "dattri":
-        check_min_version("4.46.0")
-        # dattri library for data attribution
-        from dattri.algorithm import BlockProjectedIFAttributor
-        from dattri.task import AttributionTask
-        import torch.nn as nn
-
-        # get which Hessian to use
-        tda, hessian = args.tda.split("-")
-        hessian = hessian.upper()  # dattri uses "Identity" or "eFIM"
-        if hessian == "RAW":
-            hessian = "eFIM"
-        assert tda == "IF", "dattri baseline only supports Influence Function now."
-        assert args.layer == "Linear", "dattri baseline only supports Linear layers now."
-
-        # Define loss function for dattri
-        def loss_func(model, batch, device):
-            inputs = {k: v.to(device) for k, v in batch.items()}
-            outputs = model(**inputs)
-            return outputs.loss
-
-        def m(model, batch, device):
-            inputs = {k: v.to(device) for k, v in batch.items()}
-            outputs = model(**inputs)
-            logp = -outputs.loss
-            return logp - torch.log(1 - torch.exp(logp))
-
-        # Define checkpoint loader
-        def checkpoints_load_func(model_instance, checkpoint_path):
-            model_instance = AutoModelForCausalLM.from_pretrained(
-                checkpoint_path,
-                torch_dtype=torch.bfloat16
-            ).to(device)
-            model_instance.eval()
-            return model_instance
-
-        # Find layer names
-        layer_names = [
-            name for name, module in model.named_modules()
-            if isinstance(module, nn.Linear)
-        ]
-
-        # Create attribution task
-        task = AttributionTask(
-            model=model,
-            loss_func=loss_func,
-            checkpoints=args.model_name_or_path,
-            target_func=m,
-            checkpoints_load_func=checkpoints_load_func,
-        )
-
-        # Convert kwargs format: GradComp uses "method", dattri uses "proj_type"
-        def convert_kwargs_to_dattri(kwargs):
-            if kwargs is None:
-                return None
-            dattri_kwargs = kwargs.copy()
-            if "method" in dattri_kwargs:
-                method = dattri_kwargs.pop("method")
-                # Map method names: Normal -> normal, Identity -> identity, etc.
-                dattri_kwargs["proj_type"] = method.lower()
-            if "use_half_precision" in dattri_kwargs:
-                dattri_kwargs.pop("use_half_precision")
-            if "proj_factorize" in dattri_kwargs:
-                dattri_kwargs.pop("proj_factorize")  # dattri handles factorization internally
-            return dattri_kwargs
-
-        dattri_sparsifier_kwargs = convert_kwargs_to_dattri(sparsifier_kwargs)
-        dattri_projector_kwargs = convert_kwargs_to_dattri(projector_kwargs)
-
-        # Create BlockProjectedIFAttributor
-        attributor = BlockProjectedIFAttributor(
-            task=task,
-            layer_names=layer_names,
-            hessian=hessian,
-            damping=1e0,  # Fixed damping, no cross-validation
-            device=device,
-            sparsifier_kwargs=dattri_sparsifier_kwargs,
-            projector_kwargs=dattri_projector_kwargs,
-            offload="disk",
-            cache_dir=args.cache_dir
-        )
-
-        torch.cuda.synchronize(device)
-        start_time = time.time()
-
-        if args.mode == "cache":
-            attributor.cache(train_dataloader)
-
-        elif args.mode == "attribute":
-            prompt_dataset = FilePromptDataset("./prompts/", tokenizer, block_size)
-            test_dataloader = DataLoader(
-                prompt_dataset,
-                collate_fn=lambda batch: prompt_collate_fn(batch, tokenizer),
-                batch_size=test_batch_size,
-                shuffle=False
-            )
-            score = attributor.attribute(train_dataloader, test_dataloader)
-
         else:
-            raise ValueError("dattri baseline only supports 'cache' and 'attribute' modes.")
+            raise ValueError("LogIX only supports 'cache' and 'attribute' modes.")
 
         torch.cuda.synchronize(device)
         end_time = time.time()
 
     else:
-        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'dattri'.")
+        raise ValueError("Invalid baseline implementation method. Choose from 'dattri', 'LogIX'.")
 
     # Calculate throughput
     duration = end_time - start_time
@@ -944,17 +834,6 @@ def main():
             "duration_seconds": duration,
             "throughput_tokens_per_second": train_tokens / duration
         }
-    elif args.mode == "precondition":
-        throughput_stats["precondition"] = {
-            "duration_seconds": duration,
-            "throughput_layers_per_second": len(layer_names) / duration
-        }
-    elif args.mode == "ifvp":
-        throughput_stats["ifvp"] = {
-            "train_pairs": len(train_dataset),
-            "duration_seconds": duration,
-            "throughput_datapoint_per_second": len(train_dataset) / duration
-        }
     elif args.mode == "self_influence":
         throughput_stats["self_influence"] = {
             "train_pairs": len(train_dataset),
@@ -963,7 +842,7 @@ def main():
         }
     elif args.mode == "attribute":
         train_test_pairs = len(train_dataset) * len(prompt_dataset)
-        throughput_stats["self_influence"] = {
+        throughput_stats["attribute"] = {
             "train_test_pairs": train_test_pairs,
             "duration_seconds": duration,
             "throughput_pair_per_second": train_test_pairs / duration
@@ -971,11 +850,12 @@ def main():
 
     logger.info("***** Attribution finished *****")
 
-    result = {"score": score, "profile": profile, "throughput": throughput_stats} #TODO: Change file name for different mode (otherwise they'll collapse)
+    result = {"score": score, "profile": profile, "throughput": throughput_stats}
     logger.info(result)
 
-    if not args.debug: # only save the results when not in debug mode
-        torch.save(result, result_filename(args))
+    result_path = result_filename(args)
+    os.makedirs(os.path.dirname(result_path), exist_ok=True)
+    torch.save(result, result_path)
 
 if __name__ == "__main__":
     main()

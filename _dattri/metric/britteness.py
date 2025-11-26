@@ -14,7 +14,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from ..benchmark.utils import SubsetSampler
+from _dattri.benchmark.utils import SubsetSampler
 
 
 def brittleness(

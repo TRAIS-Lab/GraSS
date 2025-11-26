@@ -15,7 +15,7 @@ import torch
 from torch import nn
 from torch.func import grad, vmap
 
-from .func.utils import flatten_func, flatten_params, partial_param
+from _dattri.func.utils import flatten_func, flatten_params, partial_param
 
 
 def _default_checkpoint_load_func(
@@ -211,7 +211,7 @@ class AttributionTask:
 
     def get_grad_target_func(
         self,
-        in_dims: Tuple[Union[None, int], ...] = (None, 1),
+        in_dims: Tuple[Union[None, int], ...] = (None, 1),  # noqa: RUF036
         layer_name: Optional[Union[str, List[str]]] = None,
         ckpt_idx: Optional[int] = None,
     ) -> Callable:
@@ -238,8 +238,6 @@ class AttributionTask:
         # first add decorator that handles the layer_name
         target_func = self.target_func
         if layer_name is not None:
-            if not isinstance(layer_name, list):
-                layer_name = [layer_name]
             self._load_checkpoints(ckpt_idx)
             target_func = partial_param(
                 full_param=self.named_parameters,
@@ -300,7 +298,7 @@ class AttributionTask:
 
     def get_grad_loss_func(
         self,
-        in_dims: Tuple[Union[None, int], ...] = (None, 1),
+        in_dims: Tuple[Union[None, int], ...] = (None, 1),  # noqa: RUF036
         layer_name: Optional[Union[str, List[str]]] = None,
         ckpt_idx: Optional[int] = None,
     ) -> Callable:
@@ -315,7 +313,7 @@ class AttributionTask:
                 dimension of the tensor.
             layer_name (Optional[Union[str, List[str]]]): The name of the layer as
                 to calculate the gradient w.r.t. If None, all the parameters
-                will be used to calculate the gradient of loss. This should be
+                will be used to calcluate the gradient of loss. This should be
                 a string or a list of strings if multiple layers are needed. The name
                 of layer should follow the key of model.named_parameters().
             ckpt_idx (Optional[int]): The index of the checkpoint to be loaded, only
@@ -326,8 +324,6 @@ class AttributionTask:
         """
         loss_func = self.loss_func
         if layer_name is not None:
-            if not isinstance(layer_name, list):
-                layer_name = [layer_name]
             self._load_checkpoints(ckpt_idx)
             loss_func = partial_param(
                 full_param=self.named_parameters,
@@ -421,7 +417,7 @@ class AttributionTask:
             Tuple[Union[torch.Tensor, List[torch.Tensor]], Optional[List[int]]]: If
                 layer_split is True, the return value will be a tuple of the parameters
                 of each layer and the param_layer_map. If layer_split is False, the
-                return value will be a flattened parameter of the model and None.
+                return value will be aflattened parameter of the model and None.
 
         Raises:
             ValueError: If the length of param_layer_map is not the same as the length
@@ -430,8 +426,6 @@ class AttributionTask:
         self._load_checkpoints(ckpt_idx)
 
         if layer_name is not None:
-            if not isinstance(layer_name, list):
-                layer_name = [layer_name]
             named_parameters = {
                 k: self.named_parameters[k]
                 for k in layer_name
@@ -450,10 +444,10 @@ class AttributionTask:
                     )
                     raise ValueError(error_msg)
                 return tuple(
-                    [param.flatten() for param in named_parameters.values()],
+                    param.flatten() for param in named_parameters.values()
                 ), param_layer_map
             return tuple(
-                [param.flatten() for param in named_parameters.values()],
+                param.flatten() for param in named_parameters.values()
             ), self._generate_param_layer_map(named_parameters)
         return flatten_params(named_parameters), None
 

@@ -15,10 +15,10 @@ if TYPE_CHECKING:
     from torch.utils.data import Dataset
 
 
-from ...models.MusicTransformer.dataset.e_piano import (
+from _dattri.benchmark.models.MusicTransformer.dataset.e_piano import (
     create_epiano_datasets,
 )
-from ...models.MusicTransformer.dataset.preprocess_midi import (
+from _dattri.benchmark.models.MusicTransformer.dataset.preprocess_midi import (
     prep_maestro_midi,
 )
 
@@ -97,7 +97,7 @@ def create_maestro_datasets(
     )
 
     if generated_music:
-        from ...models.MusicTransformer.dataset.e_piano import (
+        from _dattri.benchmark.models.MusicTransformer.dataset.e_piano import (
             EPianoDataset,
         )
 

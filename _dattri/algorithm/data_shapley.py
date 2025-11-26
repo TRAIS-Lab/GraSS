@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
     from typing import List, Optional, Tuple
 
-    from ..task import AttributionTask
+    from _dattri.task import AttributionTask
 
 import torch
 from tqdm import tqdm

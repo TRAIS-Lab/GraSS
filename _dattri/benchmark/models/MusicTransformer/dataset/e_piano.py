@@ -9,13 +9,13 @@ import torch.nn as nn
 from torch.utils.data import Dataset, Sampler
 import math
 
-from ..utilities.constants import (
+from _dattri.benchmark.models.MusicTransformer.utilities.constants import (
     TORCH_LABEL_TYPE,
     TOKEN_PAD,
     TOKEN_END,
     TORCH_FLOAT
 )
-from ..utilities.device import cpu_device
+from _dattri.benchmark.models.MusicTransformer.utilities.device import cpu_device
 
 SEQUENCE_START = 0
 

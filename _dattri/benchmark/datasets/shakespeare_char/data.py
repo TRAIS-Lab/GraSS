@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import os
 from pathlib import Path
-import dattri
+import _dattri
 from torch.utils.data import  Dataset
 import torch
 

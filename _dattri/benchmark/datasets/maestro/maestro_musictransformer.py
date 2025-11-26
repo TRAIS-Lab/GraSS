@@ -19,8 +19,8 @@ from torch import nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import LambdaLR
 
-from ...models.MusicTransformer.music_transformer import MusicTransformer
-from ...models.MusicTransformer.utilities.constants import (
+from _dattri.benchmark.models.MusicTransformer.music_transformer import MusicTransformer
+from _dattri.benchmark.models.MusicTransformer.utilities.constants import (
     ADAM_BETA_1,
     ADAM_BETA_2,
     ADAM_EPSILON,
@@ -28,10 +28,10 @@ from ...models.MusicTransformer.utilities.constants import (
     SCHEDULER_WARMUP_STEPS,
     TOKEN_PAD,
 )
-from ...models.MusicTransformer.utilities.lr_scheduling import (
+from _dattri.benchmark.models.MusicTransformer.utilities.lr_scheduling import (
     LrStepTracker,
 )
-from ...models.MusicTransformer.utilities.run_model import (
+from _dattri.benchmark.models.MusicTransformer.utilities.run_model import (
     eval_model,
     train_epoch,
 )

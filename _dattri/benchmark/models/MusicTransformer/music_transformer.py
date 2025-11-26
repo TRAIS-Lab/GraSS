@@ -5,10 +5,10 @@ import torch.nn as nn
 from torch.nn.modules.normalization import LayerNorm
 import random
 
-from ...models.MusicTransformer.utilities.constants import *
+from _dattri.benchmark.models.MusicTransformer.utilities.constants import *
 
-from ...models.MusicTransformer.positional_encoding import PositionalEncoding
-from ...models.MusicTransformer.rpr import TransformerEncoderRPR, TransformerEncoderLayerRPR
+from _dattri.benchmark.models.MusicTransformer.positional_encoding import PositionalEncoding
+from _dattri.benchmark.models.MusicTransformer.rpr import TransformerEncoderRPR, TransformerEncoderLayerRPR
 
 
 # MusicTransformer

@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from typing import Any, Dict, Tuple
 
-import os
 import pathlib
 import warnings
 import zipfile
@@ -17,19 +16,19 @@ from io import BytesIO
 import requests
 import torch
 
-from .datasets.cifar import (
+from _dattri.benchmark.datasets.cifar import (
     create_cifar2_dataset,
     create_resnet9_model,
     loss_cifar_resnet9,
     train_cifar_resnet9,
 )
-from .datasets.maestro import (
+from _dattri.benchmark.datasets.maestro import (
     create_maestro_datasets,
     create_musictransformer_model,
     loss_maestro_musictransformer,
     train_maestro_musictransformer,
 )
-from .datasets.mnist import (
+from _dattri.benchmark.datasets.mnist import (
     create_lr_model,
     create_mlp_model,
     create_mnist_dataset,
@@ -38,8 +37,8 @@ from .datasets.mnist import (
     train_mnist_lr,
     train_mnist_mlp,
 )
-from .datasets.shakespeare_char import create_shakespeare_dataset
-from .utils import SubsetSampler
+from _dattri.benchmark.datasets.shakespeare_char import create_shakespeare_dataset
+from _dattri.benchmark.utils import SubsetSampler
 
 REPO_URL = "https://huggingface.co/datasets/trais-lab/dattri-benchmark/resolve/main/"
 
@@ -110,8 +109,8 @@ def _count_folders(directory_path: str) -> int:
     Returns:
         int: The number of folders in the directory.
     """
-    items = os.listdir(directory_path)
-    folders = [item for item in items if (directory_path / item).is_dir()]
+    path = pathlib.Path(directory_path)
+    folders = [item for item in path.iterdir() if item.is_dir()]
     return len(folders)
 
 

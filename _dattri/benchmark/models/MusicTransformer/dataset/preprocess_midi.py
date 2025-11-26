@@ -8,7 +8,7 @@ import pickle
 import json
 import random
 
-import dattri.benchmark.models.MusicTransformer.midi_processor.processor as midi_processor
+import _dattri.benchmark.models.MusicTransformer.midi_processor.processor as midi_processor
 
 JSON_FILE = "maestro-v2.0.0.json"
 

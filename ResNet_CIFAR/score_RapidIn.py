@@ -86,9 +86,8 @@ def create_validation_split(test_dataset, test_sampler, groundtruth, val_ratio=0
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--proj_method", type=str, default="Gaussian")
-    parser.add_argument("--localization", type=int, default=0, help="Use localization method")
-    parser.add_argument("--random", type=int, default=0, help="Use random active indices first")
+    parser.add_argument("--proj_type", type=str, default="normal",
+                        help="Projection type: normal, rademacher, sjlt, fjlt, random_mask, selective_mask, grass, grass_N, selective_grass, selective_grass_N, identity")
     parser.add_argument("--proj_dim", type=int, default=1024)
     parser.add_argument("--val_ratio", type=float, default=0.1, help="Ratio of test data to use for validation")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
@@ -96,7 +95,7 @@ def main():
 
     # Print the settings
     print("Settings: ResNet + CIFAR2")
-    print("Projection Method:", args.proj_method)
+    print("Projection Type:", args.proj_type)
     print("Projection Dimension:", args.proj_dim)
     print("Validation Split Ratio:", args.val_ratio)
     print("Random Seed:", args.seed)
@@ -154,11 +153,10 @@ def main():
 
     projector_kwargs = {
         "device": args.device,
-        "use_half_precision": False,
-        "method": args.proj_method,
+        "proj_type": args.proj_type,
+        "proj_seed": args.seed,
         "proj_dim": args.proj_dim,
         "proj_max_batch_size": 32,
-        "active_indices": None
     }
 
     # Prepare attributor and cache once (reused for different damping values)

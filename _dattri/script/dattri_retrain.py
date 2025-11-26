@@ -13,24 +13,24 @@ from pathlib import Path
 import torch
 from torch.utils.data import SubsetRandomSampler
 
-from ..benchmark.datasets.cifar import (
+from _dattri.benchmark.datasets.cifar import (
     create_cifar2_dataset,
     train_cifar_resnet9,
 )
-from ..benchmark.datasets.imagenet import (
+from _dattri.benchmark.datasets.imagenet import (
     create_imagenet_dataset,
     train_imagenet_resnet18,
 )
-from ..benchmark.datasets.maestro import (
+from _dattri.benchmark.datasets.maestro import (
     create_maestro_datasets,
     train_maestro_musictransformer,
 )
-from ..benchmark.datasets.mnist import (
+from _dattri.benchmark.datasets.mnist import (
     create_mnist_dataset,
     train_mnist_lr,
     train_mnist_mlp,
 )
-from ..model_util.retrain import retrain_lds, retrain_loo
+from _dattri.model_util.retrain import retrain_lds, retrain_loo
 
 SUPPORTED_MODELS = ["lr", "resnet18", "resnet9", "musictransformer"]
 

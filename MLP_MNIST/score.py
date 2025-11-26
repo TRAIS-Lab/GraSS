@@ -1,10 +1,23 @@
-import argparse
+"""
+MLP + MNIST experiment for TRAK attribution.
 
+Usage:
+    python score.py --proj_type normal --proj_dim 1024
+    python score.py --proj_type sjlt --proj_dim 4096
+    python score.py --proj_type random_mask --proj_dim 512
+
+Projection types: normal, rademacher, sjlt, random_mask, grass, identity
+"""
+
+import argparse
 import os
 import sys
 import numpy as np
+
+# Add parent directory to path for _dattri import
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-sys.path.append(parent_dir)
+sys.path.insert(0, parent_dir)
+
 import torch
 from torch import nn
 
@@ -84,10 +97,11 @@ def create_validation_split(test_dataset, test_sampler, groundtruth, val_ratio=0
     )
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="TRAK attribution for MLP on MNIST")
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--proj_method", type=str, default="Gaussian")
-    parser.add_argument("--proj_dim", type=int, default=1024)
+    parser.add_argument("--proj_type", type=str, default="normal",
+                        help="Projection type: normal, rademacher, sjlt, fjlt, random_mask, selective_mask, grass, grass_N, selective_grass, selective_grass_N, identity")
+    parser.add_argument("--proj_dim", type=int, default=1024, help="Projection dimension")
     parser.add_argument("--val_ratio", type=float, default=0.1, help="Ratio of test data to use for validation")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     args = parser.parse_args()
@@ -97,7 +111,7 @@ def main():
 
     # Print the settings
     print("Settings: MLP + MNIST")
-    print("Projection Method:", args.proj_method)
+    print("Projection Type:", args.proj_type)
     print("Projection Dimension:", args.proj_dim)
     print("Validation Split Ratio:", args.val_ratio)
     print("Random Seed:", args.seed)
@@ -154,21 +168,14 @@ def main():
 
     # Create task
     task = AttributionTask(model=model, loss_func=f, checkpoints=model_details["models_half"][:10])
-    if args.proj_method == "SelectiveMask":
-        mask_path = f"./SelectiveMask/mask_{args.proj_dim}/result_{args.seed}.pt"
-        result = torch.load(mask_path, weights_only=False)
-        active_indices = result['active_indices'].to(args.device)
-    else:
-        active_indices = None
 
     # Setup projector kwargs
     projector_kwargs = {
         "device": args.device,
-        "use_half_precision": False,
-        "method": args.proj_method,
+        "proj_type": args.proj_type,
         "proj_seed": args.seed,
         "proj_dim": args.proj_dim,
-        "active_indices": active_indices
+        "proj_max_batch_size": 64,
     }
 
     # Grid search over damping values
@@ -236,7 +243,8 @@ def main():
         "proj_time": proj_time,
     }
 
-    # torch.save(result, f"./results/{args.proj_method}-{args.proj_dim}.pt")
+    os.makedirs("./results", exist_ok=True)
+    torch.save(result, f"./results/{args.proj_type}-{args.proj_dim}.pt")
 
 if __name__ == "__main__":
     main()

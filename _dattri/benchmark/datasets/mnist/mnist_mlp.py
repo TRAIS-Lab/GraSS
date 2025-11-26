@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch import nn
 
-from ...models.mlp import MLPMnist, create_mlp_model
+from _dattri.benchmark.models.mlp import MLPMnist, create_mlp_model
 
 
 def train_mnist_mlp(

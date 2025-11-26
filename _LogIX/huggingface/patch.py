@@ -222,8 +222,10 @@ def patch_trainer(TrainerClass):
         def get_data_id(self, inputs):
             ipt = inputs.get(self.logix_input_key)
             if self.data_id_logic == "detokenize":
-                assert self.tokenizer is not None
-                return self.tokenizer.batch_decode(ipt, skip_special_tokens=True)
+                # Use processing_class (newer) or tokenizer (deprecated) for compatibility
+                tokenizer = getattr(self, 'processing_class', None) or getattr(self, 'tokenizer', None)
+                assert tokenizer is not None, "No tokenizer/processing_class available for detokenization"
+                return tokenizer.batch_decode(ipt, skip_special_tokens=True)
             elif self.data_id_logic == "hash":
                 return self.data_id_generator(ipt)
 

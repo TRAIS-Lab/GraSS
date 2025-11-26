@@ -3,7 +3,7 @@
 import torch
 import numpy as np
 
-from ..midi_processor.processor import (
+from _dattri.benchmark.models.MusicTransformer.midi_processor.processor import (
     RANGE_NOTE_ON,
     RANGE_NOTE_OFF,
     RANGE_VEL,

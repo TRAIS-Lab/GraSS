@@ -1,10 +1,10 @@
 import torch
 import time
 
-from constants import *
+from _dattri.benchmark.models.MusicTransformer.utilities.constants import *
 from .lr_scheduling import get_lr
 
-from ..dataset.e_piano import compute_epiano_accuracy
+from _dattri.benchmark.models.MusicTransformer.dataset.e_piano import compute_epiano_accuracy
 
 
 # train_epoch
