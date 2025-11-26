@@ -61,7 +61,7 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from transformers.utils import check_min_version, send_example_telemetry
+from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
@@ -344,7 +344,7 @@ def main():
 
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
-    send_example_telemetry("run_clm_no_trainer", args)
+    # send_example_telemetry("run_clm_no_trainer", args)
 
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
     # If we're using tracking, we also need to initialize it here and it will by default pick up all supported trackers
@@ -827,8 +827,112 @@ def main():
 
             score = result["influence"].T
 
+    elif args.baseline == "dattri":
+        check_min_version("4.46.0")
+        # dattri library for data attribution
+        from dattri.algorithm import BlockProjectedIFAttributor
+        from dattri.task import AttributionTask
+        import torch.nn as nn
+
+        # get which Hessian to use
+        tda, hessian = args.tda.split("-")
+        hessian = hessian.upper()  # dattri uses "Identity" or "eFIM"
+        if hessian == "RAW":
+            hessian = "eFIM"
+        assert tda == "IF", "dattri baseline only supports Influence Function now."
+        assert args.layer == "Linear", "dattri baseline only supports Linear layers now."
+
+        # Define loss function for dattri
+        def loss_func(model, batch, device):
+            inputs = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(**inputs)
+            return outputs.loss
+
+        def m(model, batch, device):
+            inputs = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(**inputs)
+            logp = -outputs.loss
+            return logp - torch.log(1 - torch.exp(logp))
+
+        # Define checkpoint loader
+        def checkpoints_load_func(model_instance, checkpoint_path):
+            model_instance = AutoModelForCausalLM.from_pretrained(
+                checkpoint_path,
+                torch_dtype=torch.bfloat16
+            ).to(device)
+            model_instance.eval()
+            return model_instance
+
+        # Find layer names
+        layer_names = [
+            name for name, module in model.named_modules()
+            if isinstance(module, nn.Linear)
+        ]
+
+        # Create attribution task
+        task = AttributionTask(
+            model=model,
+            loss_func=loss_func,
+            checkpoints=args.model_name_or_path,
+            target_func=m,
+            checkpoints_load_func=checkpoints_load_func,
+        )
+
+        # Convert kwargs format: GradComp uses "method", dattri uses "proj_type"
+        def convert_kwargs_to_dattri(kwargs):
+            if kwargs is None:
+                return None
+            dattri_kwargs = kwargs.copy()
+            if "method" in dattri_kwargs:
+                method = dattri_kwargs.pop("method")
+                # Map method names: Normal -> normal, Identity -> identity, etc.
+                dattri_kwargs["proj_type"] = method.lower()
+            if "use_half_precision" in dattri_kwargs:
+                dattri_kwargs.pop("use_half_precision")
+            if "proj_factorize" in dattri_kwargs:
+                dattri_kwargs.pop("proj_factorize")  # dattri handles factorization internally
+            return dattri_kwargs
+
+        dattri_sparsifier_kwargs = convert_kwargs_to_dattri(sparsifier_kwargs)
+        dattri_projector_kwargs = convert_kwargs_to_dattri(projector_kwargs)
+
+        # Create BlockProjectedIFAttributor
+        attributor = BlockProjectedIFAttributor(
+            task=task,
+            layer_names=layer_names,
+            hessian=hessian,
+            damping=1e0,  # Fixed damping, no cross-validation
+            device=device,
+            sparsifier_kwargs=dattri_sparsifier_kwargs,
+            projector_kwargs=dattri_projector_kwargs,
+            offload="disk",
+            cache_dir=args.cache_dir
+        )
+
+        torch.cuda.synchronize(device)
+        start_time = time.time()
+
+        if args.mode == "cache":
+            attributor.cache(train_dataloader)
+
+        elif args.mode == "attribute":
+            prompt_dataset = FilePromptDataset("./prompts/", tokenizer, block_size)
+            test_dataloader = DataLoader(
+                prompt_dataset,
+                collate_fn=lambda batch: prompt_collate_fn(batch, tokenizer),
+                batch_size=test_batch_size,
+                shuffle=False
+            )
+            score = attributor.attribute(train_dataloader, test_dataloader)
+
+        else:
+            raise ValueError("dattri baseline only supports 'cache' and 'attribute' modes.")
+
+        torch.cuda.synchronize(device)
+        end_time = time.time()
+
     else:
-        raise ValueError("Invalid baseline implementation method. Choose from 'GC' and 'LogIX'.")
+        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'dattri'.")
 
     # Calculate throughput
     duration = end_time - start_time
