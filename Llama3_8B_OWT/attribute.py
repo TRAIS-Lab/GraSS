@@ -747,7 +747,7 @@ def main():
         assert args.projection is not None, "LogIX requires projection method."
 
         model_cpy = model
-        if args.cache:
+        if args.mode == "cache":
             LogIXTrainer = patch_trainer(transformers.Trainer)
 
             model = model.to(device)
