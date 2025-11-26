@@ -36,7 +36,6 @@ dist
 *.npy
 *.mmap
 *.pt
-*.slurm
 
 */log
 # */data/*
