@@ -2,6 +2,9 @@
 
 This is the official implementation of [GraSS: Scalable Data Attribution with Gradient Sparsification and Sparse Projection](https://arxiv.org/abs/2505.18976).
 
+> [!Note]
+> This repository is built upon the old version of [dattri](https://github.com/TRAIS-Lab/dattri). We have modified several parts of dattri to accommodate our GraSS and FactGraSS method. In this regards, this repo's code is not cleanly organized and only serves the purpose of reproducing the results in our paper. For a cleaner and more organized implementation of GraSS and FactGraSS, please refer to the latest version of [dattri](https://github.com/TRAIS-Lab/dattri).
+
 ## Setup Guide
 
 Please follow the installation guide from [dattri](https://github.com/TRAIS-Lab/dattri) in order to correctly install `fast_jl`. In addition, also install the [`sjlt` library](https://github.com/TRAIS-Lab/sjlt/tree/main) following the installation guide.
