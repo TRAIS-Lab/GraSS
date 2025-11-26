@@ -83,22 +83,23 @@ def patch_trainer(TrainerClass):
 
             args._n_gpu = 1
 
+            # Use keyword arguments for compatibility with newer transformers versions
             super().__init__(
-                model,
-                args,
-                data_collator,
-                train_dataset,
-                eval_dataset,
-                tokenizer,
-                model_init,
-                compute_metrics,
-                (
+                model=model,
+                args=args,
+                data_collator=data_collator,
+                train_dataset=train_dataset,
+                eval_dataset=eval_dataset,
+                processing_class=tokenizer,  # renamed from 'tokenizer' in newer versions
+                model_init=model_init,
+                compute_metrics=compute_metrics,
+                callbacks=(
                     [logix_callback]
                     if callbacks is None
                     else [logix_callback] + callbacks
                 ),
-                optimizers,
-                preprocess_logits_for_metrics,
+                optimizers=optimizers,
+                preprocess_logits_for_metrics=preprocess_logits_for_metrics,
             )
 
         def extract_log(self, *args, **kwargs):
@@ -181,6 +182,7 @@ def patch_trainer(TrainerClass):
 
         def training_step(
             self, model: nn.Module, inputs: Dict[str, Union[torch.Tensor, Any]],
+            num_items_in_batch: Optional[int] = None,  # Added for newer transformers compatibility
         ) -> torch.Tensor:
             model.eval()
             inputs = self._prepare_inputs(inputs)

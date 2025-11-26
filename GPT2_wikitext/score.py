@@ -62,7 +62,7 @@ from transformers import (
     default_data_collator,
     get_scheduler,
 )
-from transformers.utils import check_min_version, send_example_telemetry
+from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
 
 
@@ -368,7 +368,7 @@ def main():
 
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
-    send_example_telemetry("run_clm_no_trainer", args)
+    # send_example_telemetry("run_clm_no_trainer", args)
 
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
     # If we're using tracking, we also need to initialize it here and it will by default pick up all supported trackers
@@ -796,7 +796,7 @@ def main():
         cache_start_time = time.time()
         trainer.extract_log()
         torch.cuda.synchronize(device)
-        cache_end_time = time.time(device)
+        cache_end_time = time.time()
 
         # 2. Computing influence scores for test data
         model = AutoModelForCausalLM.from_pretrained(checkpoint) # reinitialize the model
@@ -824,7 +824,7 @@ def main():
         trainer = LogIXTrainer(
             model=model,
             tokenizer=tokenizer,
-            train_dataset=test_dataset,
+            train_dataset=new_test_dataset,
             data_collator=default_data_collator,
             args=training_args,
             logix_args=logix_args_test,
@@ -839,51 +839,106 @@ def main():
 
         score = result["influence"].T
 
-    elif args.baseline == "LoGra":
+    elif args.baseline == "dattri":
         check_min_version("4.46.0")
-        from _GradComp.archive._LoGra.influence_function import IFAttributor
+        # new dattri library
+        from dattri.algorithm import BlockProjectedIFAttributor
+        from dattri.task import AttributionTask
+        import torch.nn as nn
 
         # get which Hessian to use
         tda, hessian = args.tda.split("-")
-        hessian = hessian.lower()
-        assert tda == "IF", "LoGra only supports Influence Function now."
-        assert args.layer == "Linear", "LoGra only supports Linear setting now."
-        assert args.projection is not None, "LoGra requires projection method."
+        hessian = hessian.upper()  # dattri uses "Identity" or "eFIM"
+        if hessian == "RAW":
+            hessian = "eFIM"
+        assert tda == "IF", "dattri baseline only supports Influence Function now."
+        assert args.layer == "Linear", "dattri baseline only supports Linear layers now."
 
         model_id = 0
         checkpoint = f"{args.output_dir}/{model_id}"
+
+        # Define loss function for dattri
+        def loss_func(model, batch, device):
+            inputs = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(**inputs)
+            return outputs.loss
+
+        def m(model, batch, device):
+            inputs = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(**inputs)
+            logp = -outputs.loss
+            return logp - torch.log(1 - torch.exp(logp))
+
+        # Define checkpoint loader
+        def checkpoints_load_func(model_instance, checkpoint_path):
+            model_instance = AutoModelForCausalLM.from_pretrained(checkpoint_path).to(device)
+            model_instance.eval()
+            return replace_conv1d_modules(model_instance)
+
+        # Load model and find layer names
         model = AutoModelForCausalLM.from_pretrained(checkpoint)
         model = replace_conv1d_modules(model)
+        layer_names = [
+            name for name, module in model.named_modules()
+            if isinstance(module, nn.Linear)
+        ]
 
-        attributor = IFAttributor(
+        # Create attribution task
+        task = AttributionTask(
             model=model,
-            layer_type=args.layer, #TODO: fix to match
+            loss_func=loss_func,
+            checkpoints=checkpoint,
+            target_func=m,
+            checkpoints_load_func=checkpoints_load_func,
+        )
+
+        # Convert kwargs format: GradComp uses "method", dattri uses "proj_type"
+        def convert_kwargs_to_dattri(kwargs):
+            if kwargs is None:
+                return None
+            dattri_kwargs = kwargs.copy()
+            if "method" in dattri_kwargs:
+                method = dattri_kwargs.pop("method")
+                # Map method names: Normal -> normal, Identity -> identity, etc.
+                dattri_kwargs["proj_type"] = method.lower()
+            if "use_half_precision" in dattri_kwargs:
+                dattri_kwargs.pop("use_half_precision")
+            if "proj_factorize" in dattri_kwargs:
+                dattri_kwargs.pop("proj_factorize")  # dattri handles factorization internally
+            return dattri_kwargs
+
+        dattri_sparsifier_kwargs = convert_kwargs_to_dattri(sparsifier_kwargs)
+        dattri_projector_kwargs = convert_kwargs_to_dattri(projector_kwargs)
+
+        # Create BlockProjectedIFAttributor
+        attributor = BlockProjectedIFAttributor(
+            task=task,
+            layer_names=layer_names,
             hessian=hessian,
-            profile=args.profile,
+            damping=1e0,  # Fixed damping, no cross-validation
             device=device,
-            cpu_offload=True,
-            projector_kwargs=projector_kwargs,
+            sparsifier_kwargs=dattri_sparsifier_kwargs,
+            projector_kwargs=dattri_projector_kwargs,
+            offload="disk",
+            cache_dir=f"./dattri/{args.projection}"
         )
 
         # Measure cache throughput
         torch.cuda.synchronize(device)
         cache_start_time = time.time()
-        attributor.cache(train_dataloader=train_dataloader)
+        attributor.cache(train_dataloader)
         torch.cuda.synchronize(device)
         cache_end_time = time.time()
 
         # Measure attribute throughput
         torch.cuda.synchronize(device)
         attribute_start_time = time.time()
-        if args.profile:
-            score, profile = attributor.attribute(test_dataloader=test_dataloader)
-        else:
-            score = attributor.attribute(test_dataloader=test_dataloader)
+        score = attributor.attribute(train_dataloader, test_dataloader)
         torch.cuda.synchronize(device)
         attribute_end_time = time.time()
 
     else:
-        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'LoGra'.")
+        raise ValueError("Invalid baseline implementation method. Choose from 'GC', 'LogIX', 'dattri'.")
 
     # Calculate throughput
     train_tokens = block_size * len(train_dataset)

@@ -21,7 +21,7 @@ from _LogIX.lora.utils import compute_top_k_singular_vectors
 
 
 class LoraLinear(nn.Module):
-    def __init__(self, rank: int, linear: nn.Linear, shared_module: nn.Linear = None, dtype=torch.float16):
+    def __init__(self, rank: int, linear: nn.Linear, shared_module: nn.Linear = None):
         """Transforms a linear layer into a LoraLinear layer.
 
         Args:
@@ -29,16 +29,15 @@ class LoraLinear(nn.Module):
             linear (nn.Linear): The linear layer to transform
         """
         super().__init__()
-        self.dtype = dtype  # Store the dtype
 
         in_features = linear.in_features
         out_features = linear.out_features
 
         self.rank = min(rank, in_features, out_features)
 
-        self.logix_lora_A = nn.Linear(in_features, self.rank, bias=False, dtype=self.dtype)
-        self.logix_lora_B = shared_module or nn.Linear(self.rank, self.rank, bias=False, dtype=self.dtype)
-        self.logix_lora_C = nn.Linear(self.rank, out_features, bias=False, dtype=self.dtype)
+        self.logix_lora_A = nn.Linear(in_features, self.rank, bias=False)
+        self.logix_lora_B = shared_module or nn.Linear(self.rank, self.rank, bias=False)
+        self.logix_lora_C = nn.Linear(self.rank, out_features, bias=False)
 
         nn.init.kaiming_uniform_(self.logix_lora_A.weight, a=math.sqrt(5))
         nn.init.zeros_(self.logix_lora_B.weight)
@@ -47,10 +46,6 @@ class LoraLinear(nn.Module):
         self._linear = linear
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        if input.dtype != self.dtype:
-            lora_input = input.to(self.dtype)
-        else:
-            lora_input = input
         result = self._linear(input)
         result += self.logix_lora_C(self.logix_lora_B(self.logix_lora_A(input)))
 
