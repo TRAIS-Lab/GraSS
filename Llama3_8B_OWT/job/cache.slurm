@@ -11,38 +11,73 @@ echo "Job is starting on `hostname`"
 cd ~/Project/GraSS/Llama3_8B_OWT
 
 # Define the dataset and model parameters
-DATASET_NAME="openwebtext"
-MODEL_NAME="meta-llama/Llama-3.1-8B-Instruct"
+DATASET_NAME=vietgpt/openwebtext_en # to avoid legacy python script issue for datasets
+MODEL_NAME=meta-llama/Llama-3.1-8B-Instruct
 BLOCK_SIZE=1024
-DEVICE="cuda:0"
-CACHE_DIR="./cache/"
+DEVICE=cuda:0
+CACHE_DIR=/scratch/bfwm/phu1/Project/GraSS/cache/
+DTYPE=float16
 
 # Worker configuration from SLURM array
 WORKER_ID=$SLURM_ARRAY_TASK_ID
 TOTAL_WORKERS=20
 
-# Compression settings
-SPARSIFIER="random_mask"
-SPAR_DIM="128*128"
-PROJECTOR="sjlt"
-PROJ_DIM="4096"
-
-python attribute.py \
+python score.py \
     --dataset_name $DATASET_NAME \
-    --trust_remote_code \
     --model_name_or_path $MODEL_NAME \
-    --output_dir "./checkpoints" \
+	--dataset_cache_dir /scratch/bfwm/phu1/Project/GraSS/dataset_cache/ \
+    --output_dir ./checkpoints \
     --block_size $BLOCK_SIZE \
     --seed 0 \
     --device $DEVICE \
-    --baseline "dattri" \
-    --hessian "eFIM" \
-    --layer "Linear" \
-    --sparsification $SPARSIFIER-$SPAR_DIM \
-    --projection $PROJECTOR-$PROJ_DIM \
-    --mode "cache" \
+    --baseline dattri \
+    --hessian eFIM \
+    --layer Linear \
+    --sparsification random_mask-128*128 \
+    --projection sjlt-4096 \
+    --mode cache \
     --cache_dir $CACHE_DIR \
-    --worker "$WORKER_ID/$TOTAL_WORKERS" \
+    --worker $WORKER_ID/$TOTAL_WORKERS \
+	--dtype $DTYPE \
+	--throughput_test \
+    --profile
+
+python score.py \
+    --dataset_name $DATASET_NAME \
+    --model_name_or_path $MODEL_NAME \
+	--dataset_cache_dir /scratch/bfwm/phu1/Project/GraSS/dataset_cache/ \
+    --output_dir ./checkpoints \
+    --block_size $BLOCK_SIZE \
+    --seed 0 \
+    --device $DEVICE \
+    --baseline dattri \
+    --hessian eFIM \
+    --layer Linear \
+    --sparsification normal-64*64 \
+    --mode cache \
+    --cache_dir $CACHE_DIR \
+    --worker $WORKER_ID/$TOTAL_WORKERS \
+	--dtype $DTYPE \
+	--throughput_test \
+    --profile
+
+python score.py \
+    --dataset_name $DATASET_NAME \
+    --model_name_or_path $MODEL_NAME \
+	--dataset_cache_dir /scratch/bfwm/phu1/Project/GraSS/dataset_cache/ \
+    --output_dir ./checkpoints \
+    --block_size $BLOCK_SIZE \
+    --seed 0 \
+    --device $DEVICE \
+    --baseline LogIX \
+    --hessian eFIM \
+    --layer Linear \
+    --sparsification Random-64*64 \
+    --mode cache \
+    --cache_dir $CACHE_DIR \
+    --worker $WORKER_ID/$TOTAL_WORKERS \
+	--dtype $DTYPE \
+	--throughput_test \
     --profile
 
 echo "Cache task $WORKER_ID/$TOTAL_WORKERS completed"

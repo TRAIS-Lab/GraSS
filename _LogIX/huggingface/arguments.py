@@ -72,6 +72,13 @@ class LogIXArguments:
     ignore_idx: int = field(
         default=-100, metadata={"help": "The index to be ignored in loss computation."}
     )
+    log_dtype: str = field(
+        default="none",
+        metadata={
+            "help": "Data type for logging. Options: 'none' (preserve original), "
+                    "'float32', 'float16', 'bfloat16', 'int8'. Default: 'none'"
+        }
+    )
 
     def __post_init__(self):
         self.mode = "log"

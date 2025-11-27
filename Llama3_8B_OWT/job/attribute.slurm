@@ -20,7 +20,7 @@ SPAR_DIM="128*128"
 PROJECTOR="sjlt"
 PROJ_DIM="4096"
 
-python attribute.py \
+python score.py \
     --dataset_name $DATASET_NAME \
     --trust_remote_code \
     --model_name_or_path $MODEL_NAME \

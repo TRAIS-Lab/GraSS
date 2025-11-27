@@ -11,7 +11,7 @@ conda create -n GraSS python=3.10
 conda activate GraSS
 
 conda install -c "nvidia/label/cuda-12.4.0" cuda-toolkit
-pip3 install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+pip3 install torch==2.6.0 torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124
 
 pip install sjlt --no-build-isolation
 pip install fast_jl --no-build-isolation

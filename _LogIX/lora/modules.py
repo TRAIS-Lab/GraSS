@@ -32,12 +32,14 @@ class LoraLinear(nn.Module):
 
         in_features = linear.in_features
         out_features = linear.out_features
+        dtype = linear.weight.dtype
+        device = linear.weight.device
 
         self.rank = min(rank, in_features, out_features)
 
-        self.logix_lora_A = nn.Linear(in_features, self.rank, bias=False)
-        self.logix_lora_B = shared_module or nn.Linear(self.rank, self.rank, bias=False)
-        self.logix_lora_C = nn.Linear(self.rank, out_features, bias=False)
+        self.logix_lora_A = nn.Linear(in_features, self.rank, bias=False, dtype=dtype, device=device)
+        self.logix_lora_B = shared_module or nn.Linear(self.rank, self.rank, bias=False, dtype=dtype, device=device)
+        self.logix_lora_C = nn.Linear(self.rank, out_features, bias=False, dtype=dtype, device=device)
 
         nn.init.kaiming_uniform_(self.logix_lora_A.weight, a=math.sqrt(5))
         nn.init.zeros_(self.logix_lora_B.weight)
@@ -85,16 +87,18 @@ class LoraConv2d(nn.Module):
         kernel_size = conv.kernel_size
         stride = conv.stride
         padding = conv.padding
+        dtype = conv.weight.dtype
+        device = conv.weight.device
 
         self.rank = min(rank, in_channels, out_channels)
 
         self.logix_lora_A = nn.Conv2d(
-            in_channels, self.rank, kernel_size, stride, padding, bias=False
+            in_channels, self.rank, kernel_size, stride, padding, bias=False, dtype=dtype, device=device
         )
         self.logix_lora_B = shared_module or nn.Conv2d(
-            self.rank, self.rank, 1, bias=False
+            self.rank, self.rank, 1, bias=False, dtype=dtype, device=device
         )
-        self.logix_lora_C = nn.Conv2d(self.rank, out_channels, 1, bias=False)
+        self.logix_lora_C = nn.Conv2d(self.rank, out_channels, 1, bias=False, dtype=dtype, device=device)
 
         nn.init.kaiming_uniform_(self.logix_lora_A.weight, a=math.sqrt(5))
         nn.init.zeros_(self.logix_lora_B.weight)
@@ -147,12 +151,14 @@ class LoraEmbedding(nn.Module):
 
         num_embeddings = embedding.num_embeddings
         embedding_dim = embedding.embedding_dim
+        dtype = embedding.weight.dtype
+        device = embedding.weight.device
 
         self.rank = min(rank, num_embeddings, embedding_dim)
 
-        self.logix_lora_A = nn.Embedding(num_embeddings, self.rank)
-        self.logix_lora_B = shared_module or nn.Linear(self.rank, self.rank, bias=False)
-        self.logix_lora_C = nn.Linear(self.rank, embedding_dim, bias=False)
+        self.logix_lora_A = nn.Embedding(num_embeddings, self.rank, dtype=dtype, device=device)
+        self.logix_lora_B = shared_module or nn.Linear(self.rank, self.rank, bias=False, dtype=dtype, device=device)
+        self.logix_lora_C = nn.Linear(self.rank, embedding_dim, bias=False, dtype=dtype, device=device)
 
         nn.init.kaiming_uniform_(self.logix_lora_A.weight, a=math.sqrt(5))
         nn.init.zeros_(self.logix_lora_B.weight)

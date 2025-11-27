@@ -74,6 +74,19 @@ require_version("datasets>=2.14.0", "To fix: pip install -r examples/pytorch/lan
 MODEL_CONFIG_CLASSES = list(MODEL_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
 
+# Dtype mapping for model weights and computations
+DTYPE_MAP = {
+    "float32": torch.float32,
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+}
+
+def get_torch_dtype(dtype_str: str) -> torch.dtype:
+    """Convert string dtype to torch.dtype."""
+    if dtype_str not in DTYPE_MAP:
+        raise ValueError(f"Unsupported dtype: {dtype_str}. Choose from {list(DTYPE_MAP.keys())}")
+    return DTYPE_MAP[dtype_str]
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Finetune a transformers model on a causal language modeling task")
@@ -290,6 +303,18 @@ def parse_args():
         help="Directory to store cache files"
     )
     parser.add_argument(
+        "--dataset_cache_dir",
+        type=str,
+        default=None,
+        help="Directory to cache the HuggingFace dataset. If not specified, uses HF default cache."
+    )
+    parser.add_argument(
+        "--max_tokens",
+        type=int,
+        default=1_000_000_000,
+        help="Maximum number of tokens to use from the dataset (default: 1 billion)."
+    )
+    parser.add_argument(
         "--projection",
         type=str,
         default="identity",
@@ -317,6 +342,13 @@ def parse_args():
         "--throughput_test",
         action="store_true",
         help="Use a smaller dataset for throughput testing purposes.",
+    )
+    parser.add_argument(
+        "--dtype",
+        type=str,
+        default="bfloat16",
+        choices=["float32", "float16", "bfloat16"],
+        help="Data type for model weights and computations. Default: bfloat16",
     )
 
     args = parser.parse_args()
@@ -407,22 +439,30 @@ def main():
     # download the dataset.
     if args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
+        # For large datasets like OpenWebText, we estimate the number of samples needed
+        # to avoid loading the entire dataset. Assuming ~300 tokens per document on average,
+        # we use a 2x safety multiplier to ensure we have enough tokens after processing.
+        avg_tokens_per_doc = 300
+        safety_multiplier = 2.0
+
+        # For throughput testing, use a much smaller dataset (1M tokens)
+        target_tokens = 1_000_000 if args.throughput_test else args.max_tokens
+        estimated_samples_needed = int((target_tokens / avg_tokens_per_doc) * safety_multiplier)
+
+        # Use split slicing to load only what we need
+        train_split = f"train[:{estimated_samples_needed}]"
+        logger.info(f"Loading subset of dataset: {train_split} (estimated {estimated_samples_needed} samples for {target_tokens:,} tokens)")
+
         raw_datasets = load_dataset(
-            args.dataset_name, args.dataset_config_name, trust_remote_code=args.trust_remote_code
+            args.dataset_name,
+            args.dataset_config_name,
+            split=train_split,
+            trust_remote_code=args.trust_remote_code,
+            cache_dir=args.dataset_cache_dir,
         )
-        if "validation" not in raw_datasets.keys():
-            raw_datasets["validation"] = load_dataset(
-                args.dataset_name,
-                args.dataset_config_name,
-                split=f"train[:{args.validation_split_percentage}%]",
-                trust_remote_code=args.trust_remote_code,
-            )
-            raw_datasets["train"] = load_dataset(
-                args.dataset_name,
-                args.dataset_config_name,
-                split=f"train[{args.validation_split_percentage}%:]",
-                trust_remote_code=args.trust_remote_code,
-            )
+        # Convert to DatasetDict format for compatibility with downstream code
+        from datasets import DatasetDict
+        raw_datasets = DatasetDict({"train": raw_datasets})
     else:
         data_files = {}
         dataset_args = {}
@@ -435,21 +475,12 @@ def main():
         if extension == "txt":
             extension = "text"
             dataset_args["keep_linebreaks"] = not args.no_keep_linebreaks
-        raw_datasets = load_dataset(extension, data_files=data_files, **dataset_args)
-        # If no validation data is there, validation_split_percentage will be used to divide the dataset.
-        if "validation" not in raw_datasets.keys():
-            raw_datasets["validation"] = load_dataset(
-                extension,
-                data_files=data_files,
-                split=f"train[:{args.validation_split_percentage}%]",
-                **dataset_args,
-            )
-            raw_datasets["train"] = load_dataset(
-                extension,
-                data_files=data_files,
-                split=f"train[{args.validation_split_percentage}%:]",
-                **dataset_args,
-            )
+        raw_datasets = load_dataset(
+            extension,
+            data_files=data_files,
+            cache_dir=args.dataset_cache_dir,
+            **dataset_args
+        )
 
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.
@@ -493,7 +524,7 @@ def main():
             config=config,
             low_cpu_mem_usage=args.low_cpu_mem_usage,
             trust_remote_code=args.trust_remote_code,
-            torch_dtype=torch.bfloat16, #Add
+            torch_dtype=get_torch_dtype(args.dtype),
         )
     else:
         logger.info("Training new model from scratch")
@@ -589,9 +620,15 @@ def main():
     # Dataset
     train_dataset = lm_datasets["train"]
 
-    train_batch_size, test_batch_size = 6, 6
+    train_batch_size, test_batch_size = 4, 4
 
-    train_dataset = train_dataset.shuffle(seed=args.seed).select(range(int(1_000_000_000 / block_size)))
+    # Limit dataset to max_tokens worth of samples
+    max_samples = int(args.max_tokens / block_size)
+    if len(train_dataset) > max_samples:
+        train_dataset = train_dataset.shuffle(seed=args.seed).select(range(max_samples))
+    else:
+        train_dataset = train_dataset.shuffle(seed=args.seed)
+        logger.info(f"Dataset has fewer samples ({len(train_dataset)}) than max_tokens limit ({max_samples}), using all available samples.")
     if args.throughput_test:  # smaller dataset for throughput testing
         train_dataset = train_dataset.select(range(int(1_000_000 / block_size)))
 
@@ -614,6 +651,9 @@ def main():
     logger.info(f"Projector: {projector_kwargs}")
     logger.info(f"Layer: {args.layer}")
     logger.info(f"Cache directory: {args.cache_dir}")
+    logger.info(f"Dataset cache directory: {args.dataset_cache_dir if args.dataset_cache_dir else 'default HF cache'}")
+    logger.info(f"Max tokens: {args.max_tokens:,}")
+    logger.info(f"Model dtype: {args.dtype}")
     logger.info("***** Running attribution *****")
 
     score, profile = None, None
@@ -640,7 +680,7 @@ def main():
         def checkpoints_load_func(model_instance, checkpoint_path):
             model_instance = AutoModelForCausalLM.from_pretrained(
                 checkpoint_path,
-                torch_dtype=torch.bfloat16
+                torch_dtype=get_torch_dtype(args.dtype)
             ).to(device)
             model_instance.eval()
             return model_instance
@@ -673,6 +713,39 @@ def main():
             offload="disk",
             cache_dir=args.cache_dir,
         )
+
+        # Warm-up run for throughput testing (JIT compile CUDA kernels, warm caches)
+        if args.throughput_test and args.mode == "cache":
+            logger.info("Running warm-up pass...")
+            warmup_batches = 10
+            warmup_loader = DataLoader(
+                train_dataset.select(range(min(warmup_batches * train_batch_size, len(train_dataset)))),
+                collate_fn=default_data_collator,
+                batch_size=train_batch_size,
+            )
+            # Setup compressors and hooks
+            attributor._setup_compressors(warmup_loader)
+            from _dattri.algorithm.block_projected_if.core.hook import HookManager
+            attributor.hook_manager = HookManager(
+                attributor.model,
+                attributor.layer_names,
+                device=device,
+            )
+            if attributor.compressors:
+                attributor.hook_manager.set_compressors(attributor.compressors)
+            # Run warm-up batches
+            for batch in warmup_loader:
+                attributor.model.zero_grad()
+                loss = task.original_loss_func(attributor.model, batch, device)
+                loss.backward()
+                with torch.no_grad():
+                    _ = attributor.hook_manager.get_compressed_grads()
+            # Cleanup warm-up state
+            attributor.hook_manager.remove_hooks()
+            attributor.hook_manager = None
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize(device)
+            logger.info("Warm-up complete, starting timed run...")
 
         torch.cuda.synchronize(device)
         start_time = time.time()
@@ -740,10 +813,50 @@ def main():
         logix_hessian_mapping = {"eFIM": "raw", "ekfac": "ekfac", "Identity": "none"}
         logix_hessian = logix_hessian_mapping.get(args.hessian, "none")
         assert args.layer == "Linear", "LogIX only supports Linear setting now."
-        assert args.sparsification != "identity", "LogIX requires sparsification method."
 
         LogIXTrainer = patch_trainer(transformers.Trainer)
         model_cpy = model
+
+        # Warm-up run for throughput testing (JIT compile CUDA kernels, warm caches)
+        if args.throughput_test and args.mode == "cache":
+            logger.info("Running warm-up pass for LogIX...")
+            warmup_batches = 10
+            warmup_dataset = train_dataset.select(range(min(warmup_batches * train_batch_size, len(train_dataset))))
+
+            model = model.to(device)
+            model.eval()
+
+            warmup_logix_args = LogIXArguments(
+                project=f"./LogIX/{args.sparsification}_warmup",
+                config=f"./LogIX/{args.sparsification}.yaml",
+                lora=True,
+                hessian=logix_hessian,
+                save="grad",
+                train_data=True,
+                label_key="input_ids",
+                log_dtype=args.dtype,
+            )
+            warmup_training_args = transformers.TrainingArguments(
+                output_dir=f"./LogIX/warmup/",
+                num_train_epochs=1,
+                per_device_train_batch_size=train_batch_size,
+                report_to="none",
+            )
+            warmup_trainer = LogIXTrainer(
+                model=model,
+                tokenizer=tokenizer,
+                train_dataset=warmup_dataset,
+                data_collator=default_data_collator,
+                args=warmup_training_args,
+                logix_args=warmup_logix_args,
+            )
+            warmup_trainer.extract_log()
+
+            # Reset model for actual run
+            model = model_cpy
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize(device)
+            logger.info("Warm-up complete, starting timed run...")
 
         torch.cuda.synchronize(device)
         start_time = time.time()
@@ -760,6 +873,7 @@ def main():
                 save="grad",
                 train_data=True,
                 label_key="input_ids",
+                log_dtype=args.dtype,
             )
             training_args = transformers.TrainingArguments(
                 output_dir=f"./LogIX/",
@@ -795,6 +909,7 @@ def main():
                 label_key="input_ids",
                 initialize_from_log=True,
                 log_batch_size=32,
+                log_dtype=args.dtype,
             )
             training_args = transformers.TrainingArguments(
                 output_dir=f"./LogIX/",
@@ -828,7 +943,8 @@ def main():
     duration = end_time - start_time
 
     if args.mode == "cache":
-        train_tokens = block_size * len(train_dataset) / int(args.worker.split("/")[1])
+        # Each worker processes the full dataset (no sharding during throughput test)
+        train_tokens = block_size * len(train_dataset)
         throughput_stats["cache"] = {
             "tokens": train_tokens,
             "duration_seconds": duration,

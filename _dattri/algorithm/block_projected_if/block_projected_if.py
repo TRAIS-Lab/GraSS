@@ -312,11 +312,11 @@ class BlockProjectedIFAttributor(BaseAttributor):
         self.hook_manager = None
 
         # Compute preconditioners and IFVP if needed
-        if self.hessian == "eFIM":
-            logger.info("Computing preconditioners...")
-            self.compute_preconditioners()
-            logger.info("Computing IFVP...")
-            self.compute_ifvp()
+        # if self.hessian == "eFIM":
+        #     logger.info("Computing preconditioners...")
+        #     self.compute_preconditioners()
+        #     logger.info("Computing IFVP...")
+        #     self.compute_ifvp()
 
         logger.info("Caching completed")
 

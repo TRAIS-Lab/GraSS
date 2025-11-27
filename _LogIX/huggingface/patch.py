@@ -58,6 +58,9 @@ def patch_trainer(TrainerClass):
             # Initialize LogIX
             self.logix_args = logix_args
             self.logix = LogIX(project=logix_args.project, config=logix_args.config)
+            # Apply log_dtype from arguments if specified
+            if logix_args.log_dtype != "none":
+                self.logix.config.logging.log_dtype = logix_args.log_dtype
             self.logix_scheduler = LogIXScheduler(
                 self.logix, hessian=logix_args.hessian, save=logix_args.save
             )
