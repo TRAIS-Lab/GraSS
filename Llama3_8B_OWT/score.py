@@ -689,13 +689,11 @@ def main():
             model_instance.eval()
             return model_instance
 
-        # Find layer names
         layer_names = [
             name for name, module in model.named_modules()
             if isinstance(module, nn.Linear)
         ] if args.layer == "Linear" else None
 
-        # Create attribution task
         task = AttributionTask(
             model=model,
             loss_func=loss_func,
@@ -704,8 +702,6 @@ def main():
             checkpoints_load_func=checkpoints_load_func,
         )
 
-        # Create BlockProjectedIFAttributor
-        # sparsifier_kwargs and projector_kwargs are already in dattri format from setup_compression_kwargs
         attributor = BlockProjectedIFAttributor(
             task=task,
             layer_names=layer_names,

@@ -681,12 +681,12 @@ def main():
         # Load model and find layer names
         model = AutoModelForCausalLM.from_pretrained(checkpoint)
         model = replace_conv1d_modules(model)
+
         layer_names = [
             name for name, module in model.named_modules()
             if isinstance(module, nn.Linear)
         ] if args.layer == "Linear" else None
 
-        # Create attribution task
         task = AttributionTask(
             model=model,
             loss_func=loss_func,
