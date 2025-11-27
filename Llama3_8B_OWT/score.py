@@ -81,6 +81,9 @@ DTYPE_MAP = {
     "bfloat16": torch.bfloat16,
 }
 
+# Token limit for throughput testing (smaller dataset for faster benchmarks)
+THROUGHPUT_TEST_TOKENS = 1_000_000
+
 def get_torch_dtype(dtype_str: str) -> torch.dtype:
     """Convert string dtype to torch.dtype."""
     if dtype_str not in DTYPE_MAP:
@@ -445,8 +448,8 @@ def main():
         avg_tokens_per_doc = 300
         safety_multiplier = 2.0
 
-        # For throughput testing, use a much smaller dataset (1M tokens)
-        target_tokens = 1_000_000 if args.throughput_test else args.max_tokens
+        # For throughput testing, use a much smaller dataset
+        target_tokens = THROUGHPUT_TEST_TOKENS if args.throughput_test else args.max_tokens
         estimated_samples_needed = int((target_tokens / avg_tokens_per_doc) * safety_multiplier)
 
         # Use split slicing to load only what we need
@@ -630,7 +633,8 @@ def main():
         train_dataset = train_dataset.shuffle(seed=args.seed)
         logger.info(f"Dataset has fewer samples ({len(train_dataset)}) than max_tokens limit ({max_samples}), using all available samples.")
     if args.throughput_test:  # smaller dataset for throughput testing
-        train_dataset = train_dataset.select(range(int(1_000_000 / block_size)))
+        throughput_samples = min(int(THROUGHPUT_TEST_TOKENS / block_size), len(train_dataset))
+        train_dataset = train_dataset.select(range(throughput_samples))
 
 
     train_sampler = SubsetSampler(range(len(train_dataset)))
@@ -815,7 +819,6 @@ def main():
         assert args.layer == "Linear", "LogIX only supports Linear setting now."
 
         LogIXTrainer = patch_trainer(transformers.Trainer)
-        model_cpy = model
 
         # Warm-up run for throughput testing (JIT compile CUDA kernels, warm caches)
         if args.throughput_test and args.mode == "cache":
@@ -827,7 +830,7 @@ def main():
             model.eval()
 
             warmup_logix_args = LogIXArguments(
-                project=f"./LogIX/{args.sparsification}_warmup",
+                project=f"{args.cache_dir}/LogIX/{args.sparsification}",
                 config=f"./LogIX/{args.sparsification}.yaml",
                 lora=True,
                 hessian=logix_hessian,
@@ -837,7 +840,7 @@ def main():
                 log_dtype=args.dtype,
             )
             warmup_training_args = transformers.TrainingArguments(
-                output_dir=f"./LogIX/warmup/",
+                output_dir=f"{args.cache_dir}/LogIX/{args.sparsification}",
                 num_train_epochs=1,
                 per_device_train_batch_size=train_batch_size,
                 report_to="none",
@@ -852,9 +855,17 @@ def main():
             )
             warmup_trainer.extract_log()
 
-            # Reset model for actual run
-            model = model_cpy
+            # Reset model for actual run by reloading from checkpoint
+            # (LogIX modifies the model with LoRA, so we need a fresh copy)
+            del model, warmup_trainer
             torch.cuda.empty_cache()
+            model = AutoModelForCausalLM.from_pretrained(
+                args.model_name_or_path,
+                config=config,
+                low_cpu_mem_usage=args.low_cpu_mem_usage,
+                trust_remote_code=args.trust_remote_code,
+                torch_dtype=get_torch_dtype(args.dtype),
+            )
             torch.cuda.synchronize(device)
             logger.info("Warm-up complete, starting timed run...")
 
@@ -866,7 +877,7 @@ def main():
             model.eval()
 
             logix_args_train = LogIXArguments(
-                project=f"./LogIX/{args.sparsification}",
+                project=f"{args.cache_dir}/LogIX/{args.sparsification}",
                 config=f"./LogIX/{args.sparsification}.yaml",
                 lora=True,
                 hessian=logix_hessian,
@@ -876,7 +887,7 @@ def main():
                 log_dtype=args.dtype,
             )
             training_args = transformers.TrainingArguments(
-                output_dir=f"./LogIX/",
+                project=f"{args.cache_dir}/LogIX/{args.sparsification}",
                 num_train_epochs=1,
                 per_device_train_batch_size=train_batch_size,
                 report_to="none",
@@ -892,15 +903,21 @@ def main():
             trainer.extract_log()
 
         elif args.mode == "attribute":
-            model = model_cpy  # Reset the model to the original one (removing LoRA)
-            model = model.to(device)
+            # Reload the model fresh (LogIX may have modified it with LoRA in cache mode)
+            model = AutoModelForCausalLM.from_pretrained(
+                args.model_name_or_path,
+                config=config,
+                low_cpu_mem_usage=args.low_cpu_mem_usage,
+                trust_remote_code=args.trust_remote_code,
+                torch_dtype=get_torch_dtype(args.dtype),
+            ).to(device)
             model.eval()
 
             # Create prompt dataset for attribution
             prompt_dataset = FilePromptDataset("./prompts/", tokenizer, block_size)
 
             logix_args_test = LogIXArguments(
-                project=f"./LogIX/{args.sparsification}",
+                project=f"{args.cache_dir}/LogIX/{args.sparsification}",
                 config=f"./LogIX/{args.sparsification}.yaml",
                 lora=True,
                 hessian=logix_hessian,
@@ -912,7 +929,7 @@ def main():
                 log_dtype=args.dtype,
             )
             training_args = transformers.TrainingArguments(
-                output_dir=f"./LogIX/",
+                output_dir=f"{args.cache_dir}/LogIX/{args.sparsification}",
                 num_train_epochs=1,
                 per_device_train_batch_size=test_batch_size,
                 report_to="none",

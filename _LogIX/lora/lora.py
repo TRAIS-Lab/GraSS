@@ -79,15 +79,16 @@ class LoRAHandler:
 
             psg = find_parameter_sharing_group(name, self.parameter_sharing_groups)
             if self.parameter_sharing and psg not in shared_modules:
+                dtype = module.weight.dtype
                 if isinstance(module, nn.Linear):
-                    shared_module = nn.Linear(self.rank, self.rank, bias=False)
+                    shared_module = nn.Linear(self.rank, self.rank, bias=False, dtype=dtype)
                 elif isinstance(module, nn.Conv1d):
                     shared_module = nn.Conv1d(
-                        self.rank, self.rank, kernel_size=1, bias=False
+                        self.rank, self.rank, kernel_size=1, bias=False, dtype=dtype
                     )
                 elif isinstance(module, nn.Conv2d):
                     shared_module = nn.Conv2d(
-                        self.rank, self.rank, kernel_size=1, bias=False
+                        self.rank, self.rank, kernel_size=1, bias=False, dtype=dtype
                     )
                 shared_modules[psg] = shared_module
 

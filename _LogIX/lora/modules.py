@@ -48,8 +48,7 @@ class LoraLinear(nn.Module):
         self._linear = linear
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        result = self._linear(input)
-        result += self.logix_lora_C(self.logix_lora_B(self.logix_lora_A(input)))
+        result = self._linear(input) + self.logix_lora_C(self.logix_lora_B(self.logix_lora_A(input)))
 
         return result
 
@@ -107,8 +106,7 @@ class LoraConv2d(nn.Module):
         self._conv = conv
 
     def forward(self, input) -> torch.Tensor:
-        result = self._conv(input)
-        result += self.logix_lora_C(self.logix_lora_B(self.logix_lora_A(input)))
+        result = self._conv(input) + self.logix_lora_C(self.logix_lora_B(self.logix_lora_A(input)))
 
         return result
 
@@ -167,8 +165,7 @@ class LoraEmbedding(nn.Module):
         self._embedding = embedding
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        result = self._embedding(input)
-        result += self.logix_lora_C(self.logix_lora_B(self.logix_lora_A(input)))
+        result = self._embedding(input) + self.logix_lora_C(self.logix_lora_B(self.logix_lora_A(input)))
 
         return result
 
